@@ -18,6 +18,7 @@ pub mod gpu;
 pub mod gpu_views;
 pub mod memory;
 pub mod memory_bar;
+pub mod memory_views;
 pub mod menu;
 pub mod net;
 pub use tl_ui_overview::overview;

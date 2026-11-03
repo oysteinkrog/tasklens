@@ -1,51 +1,87 @@
-//! The Memory page: the Physical memory, Commit and Swap charts stacked above the composition
-//! bar and the Details grid, the two page-menu check items and the page's demand
-//! (docs/ui/performance.md UI-PRF-026, UI-PRF-020; PERF-018, PERF-026, PERF-041; ADR-008).
+//! The Memory page: the Physical memory, Commit and Swap charts, the composition bar, the
+//! Details grid, the Compressed memory, Swap devices and Memory modules blocks, the page-menu
+//! check items and the page's demand (docs/ui/performance.md UI-PRF-026 to UI-PRF-028,
+//! UI-PRF-020, UI-PRF-060; PERF-018, PERF-026, PERF-041; ADR-008).
 //!
-//! A Usage / By app switch above the first chart picks `performance.memory_view`. "By app" puts
-//! the memory-by-app chart and its legend (UI-PRF-060, `memory_apps.rs`) in place of the
-//! Physical memory chart, and adds "Groups shown" to the page menu.
+//! The page body is one widget container (ADR-019 phase 3, `tasklens-hzire.6`). By default it
+//! holds the 1.3.0 parts in their 1.3.0 places (`page_flow::memory`): the Physical memory,
+//! Commit and Swap charts as chart widgets, the composition bar ([`CompositionBarView`] in a
+//! [`MemoryPartView`], fixed widget `memory_bar`), Details, and the three blocks as the fixed
+//! widgets `memory_compressed`, `swap_devices` and `memory_modules`. The Usage and By app switch
+//! above the first part picks the page's preset: `usage` (Physical memory) or `apps` (Memory by
+//! app, the fixed widget `memory_by_app`, whose legend opens a memory group in Processes).
+//! "Show swap usage" and "Show memory composition" add or remove the Swap chart and the bar.
+//! Edit Widgets adds in use, available, cached, swap, commit, pressure and the other memory
+//! metrics as chart, bar, value, stats or any mix.
 //!
-//! The charts are cached views that re-render for their own series. The page re-renders only
-//! when a chart appears or goes, or its header or Details rows change. The specs are built again
-//! only when a total, a chart setting or the theme changed.
+//! `page.memory` converts `memory_view`, `memory_swap_graph` and `memory_composition` once, at
+//! load (`Settings::clamp`). The switch and the page menu edit the page's flow layout and never
+//! write those keys; a page without an entry gets one. With a grid layout the switch moves to
+//! the page header and asks "Replace your widgets?" first, and the two check items are hidden.
+//! "Groups shown" stays in the page menu while the page shows Memory by app.
+//!
+//! Render contract: the page renders on a header change, a range change, a layout change and an
+//! edit mode change, never because of a sample. The charts, the bar, Details and the blocks are
+//! views of their own that notify only for their own changes.
 //!
 //! The page's words are `en-US.ftl` keys, translated once per strings version into [`Words`].
 
-#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::base::ScrollbarHandle;
 use gpui_kit::component::v_flex;
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AnyView, AnyWindowHandle, App, AppContext as _,
-    AsyncApp, Context, Div, ElementId, Entity, EntityId, FocusHandle, Focusable, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, WeakEntity, Window, div, px, radians,
+    Context, Div, ElementId, Entity, EntityId, FocusHandle, Focusable, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, WeakEntity, Window, div, px, radians,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
-use tl_model::health::{SourceId, SourceState};
-use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::health::SourceId;
 use tl_model::snapshot::{
     InvField, InventorySnapshot, MemoryDetails, MemoryModule, Snapshot, SwapDevice, SwapKindModel,
 };
 use tl_model::system::{MemoryTotals, ZramTotals};
 use tl_model::units;
 use tl_model::validity::Validity;
+use tl_ui_settings::layout::{
+    ContainerLayout, FixedWidget, FormSet, WidgetContent, WidgetOptions, WidgetSetting,
+    container_layout,
+};
+use tl_ui_settings::layout_boxes::METRIC_MEM_SWAP;
+use tl_ui_settings::layout_pages::{
+    METRIC_COMMIT_PCT, METRIC_PHYSICAL, PRESET_APPS, PRESET_USAGE, convert_memory_page,
+    memory_preset, page_container,
+};
+use tl_ui_settings::settings::{MemoryView, PerformanceSettings};
 
 use super::actions::{
     PerfSetMemoryGroupsShown, PerfToggleMemoryComposition, PerfToggleMemorySwapGraph,
+    PerfWidgetEditStart, PerfWidgetResetPage,
 };
-pub(crate) use super::core::look::DIRTY_ALPHA;
+use super::aggregate::{add_demand, page_layout, reset_page, start_page_edit, strings_version};
 use super::details::{Fallback, KeyValueModel, render_details};
+use super::gpu_views::PartResized;
 use super::memory_bar::{Composition, CompositionBarView};
+use super::memory_views::{
+    MemoryPartView, PART_BAR, PART_COMPRESSED, PART_MODULES, PART_SWAP_DEVICES, PART_SWITCH,
+    PartDraw, PartShown,
+};
 use super::overview::memory_apps::{GROUPS_SHOWN, MemoryAppsChart};
 use super::page::{
-    DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_history_request, page_range_ns, page_words,
+    DevicePage, DevicePageFrame, details_draw, page_history_request, page_range_ns, page_words,
 };
+use super::page_flow::memory::{BLOCKS, MemoryParts, block_index, memory_flow};
+use super::widget::container::{FlowDecor, WidgetContainer};
+use super::widget::details_widget::{DetailsResized, DetailsShown, DetailsView};
+use super::widget::edit::{WidgetEditor, default_layout};
+use super::widget::fixed_widget::FixedContent;
+use super::widget::menu::confirm_preset_page;
+use super::widget::source::SourceStore;
 use super::{DeviceKey, DeviceRow};
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
@@ -54,16 +90,11 @@ use tl_ui_base::selector::TlSelector;
 use tl_ui_base::settings_global::{Section, SettingKey, SettingValue, TlSettings, animations_on};
 use tl_ui_base::text::style::label_style;
 use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
-use tl_ui_chart::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
-    ValueAlign, ValueFormat, YScale,
-};
+use tl_ui_chart::chart::ChartView;
 use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use tl_ui_kit::components::icons::TlIcon;
 use tl_ui_kit::components::menu::TlMenu;
-use tl_ui_kit::components::motion::{M_BASE, M_FAST, ease_out_cubic};
-use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use tl_ui_settings::settings::MemoryView;
+use tl_ui_kit::components::motion::{M_FAST, ease_out_cubic};
 use tl_ui_table::table::cells::CellOut;
 use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
@@ -73,12 +104,6 @@ use tl_ui_table::table::tree_table::{
     TableSort, TlTreeTable, TreeTableDelegate,
 };
 
-/// Debug selectors of the chart boxes.
-pub const PHYSICAL_ID: &str = "perf-mem-physical";
-pub const COMMIT_ID: &str = "perf-mem-commit";
-/// Debug selector of the box around the composition bar view.
-pub const BAR_WRAP_ID: &str = "perf-mem-bar-wrap";
-pub const SWAP_ID: &str = "perf-mem-swap";
 /// Debug selector of the Usage / By app switch; each segment adds `-usage` or `-apps`.
 pub const VIEW_SWITCH_ID: &str = "perf-mem-view";
 
@@ -195,12 +220,6 @@ impl Words {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PageSettings {
     range_ns: u64,
-    smooth: bool,
-    rounded: bool,
-    composition: bool,
-    swap: bool,
-    /// `performance.memory_view`.
-    view: MemoryView,
     /// `performance.memory_by_app.top_n`.
     top_n: u8,
 }
@@ -210,11 +229,6 @@ impl PageSettings {
         let s = TlSettings::settings(cx);
         Self {
             range_ns: page_range_ns(cx),
-            smooth: s.motion.smooth_graphs,
-            rounded: s.appearance.rounded_corners,
-            composition: s.performance.memory_composition,
-            swap: s.performance.memory_swap_graph,
-            view: s.performance.memory_view,
             top_n: s.performance.memory_by_app.top_n,
         }
     }
@@ -228,153 +242,6 @@ fn section_versions(cx: &App) -> [u64; 3] {
         tl.version(Section::Motion),
         tl.version(Section::Appearance),
     ]
-}
-
-/// `MemTotal`, `CommitLimit` and `SwapTotal` in bytes, from `Snapshot.system`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Totals {
-    mem: u64,
-    commit_limit: u64,
-    swap: u64,
-}
-
-impl Totals {
-    fn of(snap: &Snapshot) -> Self {
-        let m = &snap.system.memory;
-        Self {
-            mem: m.total,
-            commit_limit: m.commit_limit,
-            swap: m.swap_total,
-        }
-    }
-}
-
-fn series(device: DeviceIdx, metric: MetricId) -> SeriesId {
-    SeriesId { device, metric }
-}
-
-fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettings) -> ChartSpec {
-    ChartSpec {
-        series,
-        y,
-        range_ns: s.range_ns,
-        grid: GridStyle {
-            lines: true,
-            baseline: false,
-            outline: true,
-            rounded: s.rounded,
-            vertical_at: None,
-        },
-        smooth: s.smooth,
-        background: ChartBg::Window,
-        hover: true,
-        ..ChartSpec::default()
-    }
-}
-
-/// Used with fill, committed as a dashed line and dirty bytes as a faint line, 0..MemTotal.
-fn physical_spec(device: DeviceIdx, total: u64, s: &PageSettings, theme: &TlTheme) -> ChartSpec {
-    let line = theme.graph.mem_line;
-    let series = smallvec![
-        ChartSeries {
-            id: series(device, MetricId::MEM_USED),
-            fill: Some(theme.graph.mem_fill),
-            line,
-            ..ChartSeries::default()
-        },
-        ChartSeries {
-            id: series(device, MetricId::MEM_COMMIT),
-            line,
-            dashed: true,
-            ..ChartSeries::default()
-        },
-        ChartSeries {
-            id: series(device, MetricId::MEM_DIRTY),
-            line: Hsla {
-                a: line.a * DIRTY_ALPHA,
-                ..line
-            },
-            line_width: px(1.),
-            ..ChartSeries::default()
-        },
-    ];
-    spec(series, YScale::FixedTotal(total as f32), s)
-}
-
-/// Committed bytes with fill, 0..max(CommitLimit, peak).
-fn commit_spec(device: DeviceIdx, limit: u64, s: &PageSettings, theme: &TlTheme) -> ChartSpec {
-    let series = smallvec![ChartSeries {
-        id: series(device, MetricId::MEM_COMMIT),
-        fill: Some(theme.graph.mem_fill),
-        line: theme.graph.mem_line,
-        ..ChartSeries::default()
-    }];
-    spec(series, YScale::Commit(limit as f32), s)
-}
-
-/// Swap used with fill, 0..SwapTotal.
-fn swap_spec(device: DeviceIdx, total: u64, s: &PageSettings, theme: &TlTheme) -> ChartSpec {
-    let series = smallvec![ChartSeries {
-        id: series(device, MetricId::SWAP_USED),
-        fill: Some(theme.graph.mem_fill),
-        line: theme.graph.mem_line,
-        ..ChartSeries::default()
-    }];
-    spec(series, YScale::FixedTotal(total as f32), s)
-}
-
-fn physical_labels(w: &Words) -> ChartLabels {
-    ChartLabels {
-        heading: Some(w.physical.clone()),
-        value_fmt: ValueFormat::Bytes,
-        value_align: ValueAlign::Right,
-        range_word: w.range_memory.clone(),
-        // The dirty line has no legend entry.
-        legend: smallvec![
-            (w.used.clone(), LegendStyle::Solid),
-            (w.committed.clone(), LegendStyle::Dashed)
-        ],
-        show_axis_max: false,
-    }
-}
-
-/// The value is `Committed_AS / CommitLimit`; the axis text shows when the peak passes 100%.
-fn commit_labels(w: &Words, limit: u64) -> ChartLabels {
-    ChartLabels {
-        heading: Some(w.commit.clone()),
-        value_fmt: ValueFormat::PercentOf { total: limit },
-        value_align: ValueAlign::Right,
-        range_word: w.commit.clone(),
-        legend: SmallVec::new(),
-        show_axis_max: true,
-    }
-}
-
-fn swap_labels(w: &Words) -> ChartLabels {
-    ChartLabels {
-        heading: Some(w.swap.clone()),
-        value_fmt: ValueFormat::Bytes,
-        value_align: ValueAlign::Right,
-        range_word: w.range_swap.clone(),
-        legend: SmallVec::new(),
-        show_axis_max: false,
-    }
-}
-
-/// The chart state from the memory source health: Failed with its error, else Live (the views
-/// derive WarmingUp and Stale themselves).
-fn health_state(snap: &Snapshot) -> ChartState {
-    let h = snap.health.get(SourceId::Memory);
-    match h.state {
-        SourceState::Failed => ChartState::Failed(
-            h.last_error
-                .as_deref()
-                .unwrap_or_default()
-                .to_owned()
-                .into(),
-        ),
-        _ => ChartState::Live,
-    }
 }
 
 // ---- Details grid (UI-PRF-028, PERF-043) ----
@@ -1626,60 +1493,222 @@ fn swap_rows_of(details: &MemoryDetails) -> Arc<[SwapDevice]> {
     }
 }
 
-/// The Swap chart's height animation (UI-PRF-026).
-#[derive(Clone, Copy, Debug)]
-struct SwapAnim {
-    /// True while the chart opens, false while it closes.
-    showing: bool,
-    /// Bumped on each change, so a new change restarts the animation.
-    generation: u32,
+// ---- The page's flow layout (ADR-019 phase 3 "Header buttons and page menu") ----
+
+/// The view of the Memory page preset `id`; `None` for an id that is not one.
+pub fn preset_view(id: &str) -> Option<MemoryView> {
+    match id {
+        PRESET_USAGE => Some(MemoryView::Usage),
+        PRESET_APPS => Some(MemoryView::Apps),
+        _ => None,
+    }
+}
+
+/// The view of `layout`: its preset's, `None` for a grid layout.
+pub fn layout_view(layout: &ContainerLayout) -> Option<MemoryView> {
+    layout.preset.as_ref().and_then(|p| preset_view(&p.id))
+}
+
+/// Whether `w` is a metric widget of `metric`.
+fn is_metric(w: &WidgetSetting, metric: &str) -> bool {
+    matches!(&w.content, WidgetContent::Metric(s) if s.metric.as_str() == metric)
+}
+
+/// Whether `w` is a preset's first part: Physical memory or Memory by app.
+fn is_mode_widget(w: &WidgetSetting) -> bool {
+    is_metric(w, METRIC_PHYSICAL) || w.content == WidgetContent::Fixed(FixedWidget::MemoryByApp)
+}
+
+fn is_bar(w: &WidgetSetting) -> bool {
+    w.content == WidgetContent::Fixed(FixedWidget::MemoryBar)
+}
+
+/// Whether the flow layout `layout` lists the Swap chart.
+pub fn layout_swap(layout: &ContainerLayout) -> bool {
+    layout.widgets.iter().any(|w| is_metric(w, METRIC_MEM_SWAP))
+}
+
+/// Whether the flow layout `layout` lists the composition bar.
+pub fn layout_bar(layout: &ContainerLayout) -> bool {
+    layout.widgets.iter().any(is_bar)
+}
+
+/// The widget of the built-in `view` preset that `pick` chooses, as conversion lists it.
+fn preset_widget(
+    container: &str,
+    view: MemoryView,
+    pick: fn(&WidgetSetting) -> bool,
+) -> Option<WidgetSetting> {
+    let perf = PerformanceSettings {
+        memory_view: view,
+        memory_swap_graph: true,
+        memory_composition: true,
+        ..PerformanceSettings::default()
+    };
+    convert_memory_page(&perf, container)
+        .widgets
+        .into_iter()
+        .find(|w| pick(w))
+}
+
+/// Inserts `w` into `layout` at `at` with a new id.
+fn insert_widget(layout: &mut ContainerLayout, at: usize, w: WidgetSetting) {
+    let at = at.min(layout.widgets.len());
+    let id = layout.next_id;
+    layout.next_id += 1;
+    layout.widgets.insert(
+        at,
+        WidgetSetting {
+            id,
+            cell: None,
+            options: WidgetOptions::default(),
+            ..w
+        },
+    );
+}
+
+/// The place of the first widget `pick` chooses in `layout`.
+fn position(layout: &ContainerLayout, pick: impl Fn(&WidgetSetting) -> bool) -> Option<usize> {
+    layout.widgets.iter().position(pick)
+}
+
+/// Sets the preset of the flow layout `layout` to `view`'s and puts the new preset's first part
+/// in place of the old one. Commit, Swap, the bar, Details and the blocks keep their ids.
+/// Nothing for a grid layout.
+pub fn set_memory_preset(layout: &mut ContainerLayout, view: MemoryView) {
+    let Some(preset) = layout.preset.as_mut() else {
+        return;
+    };
+    let id = memory_preset(view);
+    if preset.id == id {
+        return;
+    }
+    preset.id = id.to_owned();
+    let at = position(layout, is_mode_widget).unwrap_or(0);
+    layout.widgets.retain(|w| !is_mode_widget(w));
+    if let Some(w) = preset_widget(&layout.container, view, is_mode_widget) {
+        insert_widget(layout, at, w);
+    }
+}
+
+/// Adds the Swap chart to the flow layout `layout` (after Commit, as in 1.3.0) or takes it off.
+/// Nothing for a grid layout.
+pub fn set_memory_swap(layout: &mut ContainerLayout, on: bool) {
+    if layout.preset.is_none() || layout_swap(layout) == on {
+        return;
+    }
+    if !on {
+        layout.widgets.retain(|w| !is_metric(w, METRIC_MEM_SWAP));
+        return;
+    }
+    let at = position(layout, |w| is_metric(w, METRIC_COMMIT_PCT))
+        .map(|i| i + 1)
+        .or_else(|| position(layout, is_bar))
+        .or_else(|| position(layout, is_details))
+        .unwrap_or(layout.widgets.len());
+    let view = layout_view(layout).unwrap_or_default();
+    if let Some(w) = preset_widget(&layout.container, view, |w| is_metric(w, METRIC_MEM_SWAP)) {
+        insert_widget(layout, at, w);
+    }
+}
+
+/// Adds the composition bar to the flow layout `layout` (before Details, as in 1.3.0) or takes
+/// it off. Nothing for a grid layout.
+pub fn set_memory_bar(layout: &mut ContainerLayout, on: bool) {
+    if layout.preset.is_none() || layout_bar(layout) == on {
+        return;
+    }
+    if !on {
+        layout.widgets.retain(|w| !is_bar(w));
+        return;
+    }
+    let at = position(layout, is_details).unwrap_or(layout.widgets.len());
+    let view = layout_view(layout).unwrap_or_default();
+    if let Some(w) = preset_widget(&layout.container, view, is_bar) {
+        insert_widget(layout, at, w);
+    }
+}
+
+fn is_details(w: &WidgetSetting) -> bool {
+    w.content == WidgetContent::Fixed(FixedWidget::Details)
+}
+
+/// The memory-by-app chart, made the first time a layout places it.
+type AppsSlot = Rc<RefCell<Option<Entity<MemoryAppsChart>>>>;
+
+/// The chart of `slot`, made now when it has none.
+fn apps_of(slot: &AppsSlot, hub: &Entity<SnapshotHub>, cx: &mut App) -> Entity<MemoryAppsChart> {
+    if let Some(apps) = &*slot.borrow() {
+        return apps.clone();
+    }
+    let hub = hub.clone();
+    let apps = cx.new(|cx| MemoryAppsChart::new(hub, cx));
+    *slot.borrow_mut() = Some(apps.clone());
+    apps
+}
+
+/// The draw of a part from the page: `f` builds the element. `None` once the page is gone.
+fn part_draw(
+    page: WeakEntity<MemoryPage>,
+    f: fn(&mut MemoryPage, &mut Window, &mut Context<MemoryPage>) -> Option<AnyElement>,
+) -> PartDraw {
+    Rc::new(move |window: &mut Window, cx: &mut App| {
+        page.upgrade()?.update(cx, |p, cx| f(p, window, cx))
+    })
+}
+
+/// A heading of a block in `style`.
+fn heading(text: SharedString, style: gpui_kit::TextStyleRefinement, theme: &TlTheme) -> Div {
+    let mut el = div().text_color(theme.text_primary).child(text);
+    *el.text_style() = style;
+    el
 }
 
 /// The Memory device page.
 pub struct MemoryPage {
     key: DeviceKey,
     row: DeviceRow,
-    physical: Entity<ChartView>,
-    commit: Entity<ChartView>,
-    swap: Entity<ChartView>,
-    /// The memory-by-app chart, created the first time the "By app" view shows.
-    apps: Option<Entity<MemoryAppsChart>>,
+    /// The container id, `page.memory`.
+    container_id: SharedString,
+    /// The memory-by-app chart, once a layout placed it.
+    apps: AppsSlot,
     hub: Entity<SnapshotHub>,
-    /// The composition bar view, which keeps the `CompositionBarState`. Created the first time
-    /// the bar is shown; a cached view, so a memory sample repaints only the bar.
-    bar: Option<Entity<CompositionBarView>>,
-    /// The composition of the newest memory sample.
-    composition: Option<Composition>,
+    /// The composition bar view, which keeps the `CompositionBarState`; a memory sample
+    /// repaints only the bar.
+    bar: Entity<CompositionBarView>,
     /// E25-003 fills the rows.
     details: KeyValueModel,
-    /// The "Compressed memory" block under the Details grid.
+    details_view: Entity<DetailsView>,
+    /// The "Compressed memory" block.
     compressed: CompressedBlock,
-    /// The "Memory modules" block under the swap table.
+    /// The "Memory modules" block.
     modules: ModulesBlock,
     /// One focus handle per module chevron, in module order.
     module_focus: Vec<FocusHandle>,
-    /// This page, for the chevron click closures.
+    /// This page, for the click closures.
     this: WeakEntity<Self>,
     /// The `/proc/swaps` entries of the "Swap devices" block.
     swap_rows: Arc<[SwapDevice]>,
-    /// Created in the first render, which has the `Window` the table needs.
+    /// Created the first time the block draws, which has the `Window` the table needs.
     swap_table: Option<Entity<TlTreeTable<SwapTableDelegate>>>,
     /// The table body width the Name column was last fitted to.
     swap_body: f32,
-    /// `performance.memory_composition`.
-    show_composition: bool,
-    /// `performance.memory_swap_graph`.
-    show_swap: bool,
-    swap_total: u64,
-    totals: Totals,
-    /// The Swap chart is in the graph area (its end state while it animates).
-    swap_shown: bool,
-    swap_anim: Option<SwapAnim>,
-    anim_generation: u32,
+    /// The Usage and By app switch the flow layout draws above its first part.
+    switch_view: Entity<MemoryPartView>,
+    /// The composition bar part (fixed widget `memory_bar`).
+    bar_view: Entity<MemoryPartView>,
+    /// The blocks, in `page_flow::memory::BLOCKS` order.
+    block_views: [Entity<MemoryPartView>; 3],
+    /// The heights and flags the flow placer reads.
+    parts: MemoryParts,
+    container: Entity<WidgetContainer>,
+    editor: Entity<WidgetEditor>,
+    /// The preset of the layout the page shows; `None` for a grid layout.
+    view: Option<MemoryView>,
     header: (SharedString, SharedString),
     settings: PageSettings,
     settings_versions: [u64; 3],
-    /// `UiMetrics.style_version` the chart colours were built for.
+    /// `UiMetrics.style_version` the parts were drawn for.
     style_version: u64,
     words: Words,
     demand: Entity<DemandAggregator>,
@@ -1690,9 +1719,11 @@ pub struct MemoryPage {
     window: Option<AnyWindowHandle>,
     /// The page root; the menu items dispatch their actions here.
     focus: FocusHandle,
-    _subs: SmallVec<[Subscription; 4]>,
+    _subs: SmallVec<[Subscription; 12]>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub notify_count: Cell<u32>,
 }
 
 impl MemoryPage {
@@ -1703,46 +1734,114 @@ impl MemoryPage {
         demand: Entity<DemandAggregator>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let theme = current(cx).clone();
+        let container_id = SharedString::from(page_container(&key.0));
         let settings = PageSettings::read(cx);
         let snap = Arc::clone(hub.read(cx).current());
-        let totals = Totals::of(&snap);
         let mut words = Words::default();
         words.refresh(cx);
+        let this = cx.weak_entity();
 
-        let idx = row.idx;
-        let physical = {
-            let (spec, labels) = (
-                physical_spec(idx, totals.mem, &settings, &theme),
-                physical_labels(&words),
-            );
-            cx.new(|cx| {
-                ChartView::new(spec, labels, &hub, cx)
-                    .with_newest_marks()
-                    .with_device_history(&snap)
+        let composition = Composition::of(&snap.system.memory);
+        let bar = cx.new(|cx| CompositionBarView::new(composition, cx));
+        let mut details = memory_details_model();
+        details.refresh_strings(cx);
+        let details_view = {
+            let shown = DetailsShown::of(&details, strings_version(cx));
+            let draw = details_draw(this.clone());
+            let id = container_id.clone();
+            cx.new(|_| DetailsView::new(id, shown, draw))
+        };
+        let mut part = |part: &'static str, draw: PartDraw| {
+            let id = container_id.clone();
+            cx.new(move |_| MemoryPartView::new(id, part, PartShown::default(), draw))
+        };
+        let switch_view = part(
+            PART_SWITCH,
+            part_draw(this.clone(), |p, _, cx| Some(p.view_switch(cx))),
+        );
+        let bar_view = part(
+            PART_BAR,
+            part_draw(this.clone(), |p, _, _| {
+                // Not cached: a cached view with only a width has no height of its own.
+                Some(div().w_full().child(p.bar.clone()).into_any_element())
+            }),
+        );
+        let block_views = [
+            part(
+                PART_COMPRESSED,
+                part_draw(this.clone(), |p, _, cx| p.compressed_element(cx)),
+            ),
+            part(
+                PART_SWAP_DEVICES,
+                part_draw(this.clone(), |p, window, cx| {
+                    p.sync_swap_table(window, cx);
+                    p.swap_element(cx)
+                }),
+            ),
+            part(
+                PART_MODULES,
+                part_draw(this.clone(), |p, _, cx| p.modules_element(cx)),
+            ),
+        ];
+        let natural = |v: &Entity<MemoryPartView>, cx: &App| v.read(cx).natural_height();
+        let parts = MemoryParts {
+            switch: natural(&switch_view, cx),
+            switch_at: Rc::default(),
+            swap: Rc::new(Cell::new(snap.system.memory.swap_total > 0)),
+            bar: natural(&bar_view, cx),
+            details: details_view.read(cx).natural_height(),
+            blocks: [
+                natural(&block_views[0], cx),
+                natural(&block_views[1], cx),
+                natural(&block_views[2], cx),
+            ],
+            shown: [
+                Rc::new(Cell::new(false)),
+                Rc::new(Cell::new(false)),
+                Rc::new(Cell::new(false)),
+            ],
+        };
+        let apps: AppsSlot = Rc::default();
+        let content: FixedContent = {
+            let details: AnyView = details_view.clone().into();
+            let bar: AnyView = bar_view.clone().into();
+            let blocks: [AnyView; 3] = block_views.clone().map(Into::into);
+            let shown = parts.shown.clone();
+            let (slot, hub) = (Rc::clone(&apps), hub.clone());
+            Rc::new(move |kind: &FixedWidget, cx: &mut App| match kind {
+                FixedWidget::Details => Some(details.clone()),
+                FixedWidget::MemoryBar => Some(bar.clone()),
+                FixedWidget::MemoryByApp => Some(apps_of(&slot, &hub, cx).into()),
+                // A block 1.3.0 hides shows "Nothing to show on this device" in a grid layout.
+                kind => {
+                    let i = block_index(kind)?;
+                    shown[i].get().then(|| blocks[i].clone())
+                }
             })
         };
-        let commit = {
-            let (spec, labels) = (
-                commit_spec(idx, totals.commit_limit, &settings, &theme),
-                commit_labels(&words, totals.commit_limit),
-            );
-            cx.new(|cx| {
-                ChartView::new(spec, labels, &hub, cx)
-                    .with_newest_marks()
-                    .with_device_history(&snap)
+        let layout = page_layout(&container_id, cx);
+        let view = layout_view(&layout);
+        let container = {
+            let store = Rc::new(RefCell::new(SourceStore::for_page(&hub)));
+            let id = container_id.clone();
+            let hub = hub.clone();
+            let decor = FlowDecor {
+                view: switch_view.clone().into(),
+                bounds: Rc::clone(&parts.switch_at),
+            };
+            let flow = memory_flow(parts.clone());
+            cx.new(move |cx| {
+                let mut c = WidgetContainer::new(id, layout, &hub, store, cx);
+                c.set_flow_placer(Some(flow), cx);
+                c.set_fixed_content(Some(content), cx);
+                c.set_flow_decor(Some(decor), cx);
+                c
             })
         };
-        let swap = {
-            let (spec, labels) = (
-                swap_spec(idx, totals.swap, &settings, &theme),
-                swap_labels(&words),
-            );
-            cx.new(|cx| {
-                ChartView::new(spec, labels, &hub, cx)
-                    .with_newest_marks()
-                    .with_device_history(&snap)
-            })
+        let editor = {
+            let container = container.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| WidgetEditor::new(container, &hub, cx))
         };
 
         let mut subs = SmallVec::new();
@@ -1750,38 +1849,52 @@ impl MemoryPage {
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
         subs.push(cx.observe_global::<UiMetrics>(Self::sync_style));
         subs.push(cx.observe_global::<Strings>(Self::sync_words));
+        // A part got taller or shorter: the parts under it move.
+        subs.push(
+            cx.subscribe(&details_view, |this, _, _: &DetailsResized, cx| {
+                this.place_again(cx);
+            }),
+        );
+        for view in [&switch_view, &bar_view]
+            .into_iter()
+            .chain(block_views.iter())
+        {
+            subs.push(cx.subscribe(view, |this, _, _: &PartResized, cx| {
+                this.place_again(cx);
+            }));
+        }
+        // A layout change can change what the page asks for, its menu and its focus order.
+        subs.push(cx.observe(&container, |this, _, cx| this.on_container_changed(cx)));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
             .detach();
 
         let header = (page_words(cx).memory.clone(), SharedString::default());
-        let composition = Composition::of(&snap.system.memory);
+        editor.update(cx, |e, _| e.set_page_name(header.0.clone()));
         let mut this = Self {
             key,
             row,
-            physical,
-            commit,
-            swap,
-            apps: None,
-            hub: hub.clone(),
-            bar: None,
-            composition,
-            details: memory_details_model(),
+            container_id,
+            apps,
+            hub,
+            bar,
+            details,
+            details_view,
             compressed: CompressedBlock::new(),
             modules: ModulesBlock::new(),
             module_focus: Vec::new(),
-            this: cx.weak_entity(),
+            this,
             swap_rows: swap_rows_of(&snap.device_details.memory),
             swap_table: None,
             swap_body: 0.,
-            show_composition: settings.composition,
-            show_swap: settings.swap,
-            swap_total: totals.swap,
-            totals,
-            swap_shown: settings.swap && totals.swap > 0,
-            swap_anim: None,
-            anim_generation: 0,
+            switch_view,
+            bar_view,
+            block_views,
+            parts,
+            container,
+            editor,
+            view,
             header,
             settings,
             settings_versions: section_versions(cx),
@@ -1795,95 +1908,130 @@ impl MemoryPage {
             _subs: subs,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            notify_count: Cell::new(0),
         };
-        let state = health_state(&snap);
-        this.set_chart_state(state, cx);
-        this.sync_bar(cx);
-        this.sync_details(&snap, cx);
-        this.sync_modules(&snap, cx);
-        this.sync_apps(cx);
+        this.apply_snapshot(&snap, ComponentMask::ALL, cx);
+        this.sync_parts(cx);
         this
     }
 
-    /// Creates the memory-by-app chart when the "By app" view shows for the first time.
-    fn sync_apps(&mut self, cx: &mut Context<Self>) {
-        if self.settings.view == MemoryView::Apps && self.apps.is_none() {
-            let hub = self.hub.clone();
-            self.apps = Some(cx.new(|cx| MemoryAppsChart::new(hub, cx)));
-        }
+    /// The memory-by-app chart, once a layout has placed it.
+    pub fn apps(&self) -> Option<Entity<MemoryAppsChart>> {
+        self.apps.borrow().clone()
     }
 
-    /// The memory-by-app chart, once the "By app" view has shown.
-    pub fn apps(&self) -> Option<&Entity<MemoryAppsChart>> {
-        self.apps.as_ref()
+    /// The preset of the layout the page shows: Usage or By app, `None` with a grid layout.
+    pub fn view(&self) -> Option<MemoryView> {
+        self.view
     }
 
-    /// `performance.memory_view`.
-    pub fn view(&self) -> MemoryView {
-        self.settings.view
+    /// The page's widget container.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
     }
 
-    /// Switches the first chart between Usage and By app and saves the choice.
-    pub fn set_view(&mut self, view: MemoryView, cx: &mut Context<Self>) {
-        TlSettings::update(cx, |d| d.settings.performance.memory_view = view);
-        self.sync_settings(cx);
+    /// The editor around the container (Edit Widgets).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
     }
 
-    /// Brings Details rows 7 to 11 up to date from the inventory; notifies only on change.
-    fn sync_modules(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
-        let mem = &snap.system.memory;
-        let total = match mem.validity {
-            Validity::Valid | Validity::Stale => mem.total,
-            _ => 0,
-        };
-        if update_memory_details_modules(&mut self.details, &snap.inventory, total) {
-            cx.notify();
-        }
-        if update_modules_block(&mut self.modules, &snap.inventory) {
-            let n = self.modules.modules.len();
-            self.module_focus.truncate(n);
-            while self.module_focus.len() < n {
-                self.module_focus.push(cx.focus_handle());
-            }
-            cx.notify();
-        }
+    /// The Details widget's view.
+    pub fn details_view(&self) -> &Entity<DetailsView> {
+        &self.details_view
     }
 
-    /// Brings the Details rows up to date; notifies only when one changed.
-    fn sync_details(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
-        let inputs = MemoryDetailInputs {
-            mem: &snap.system.memory,
-            now_boot_ns: self.hub.read(cx).now_ns(),
-            observed_end_ns: snap.system.header.observed_end,
-            error: snap.health.get(SourceId::Memory).last_error.as_deref(),
-        };
-        if update_memory_details(&mut self.details, &inputs) {
-            cx.notify();
-        }
-        let inputs = CompressedInputs {
-            mem: &snap.system.memory,
-            details: &snap.device_details.memory,
-        };
-        let changed = update_compressed_block(&mut self.compressed, &inputs);
-        if self.compressed.refresh_strings(cx) || changed {
-            cx.notify();
-        }
-        let rows = swap_rows_of(&snap.device_details.memory);
-        if !Arc::ptr_eq(&self.swap_rows, &rows) && *self.swap_rows != *rows {
-            self.swap_rows = rows;
-            cx.notify();
-        }
-        if let Some(table) = &self.swap_table {
-            let rows = Arc::clone(&self.swap_rows);
-            table.update(cx, |t, cx| {
-                if t.delegate_mut().set_rows(rows) {
-                    t.on_new_version(cx);
-                }
-            });
-        }
+    /// The container id, `page.memory`.
+    pub fn container_id(&self) -> &SharedString {
+        &self.container_id
     }
 
-    /// The "Swap devices" table, once the page has rendered.
+    /// The Usage and By app switch.
+    pub fn switch_view(&self) -> &Entity<MemoryPartView> {
+        &self.switch_view
+    }
+
+    /// The composition bar part (fixed widget `memory_bar`).
+    pub fn bar_view(&self) -> &Entity<MemoryPartView> {
+        &self.bar_view
+    }
+
+    /// The block parts, in `page_flow::memory::BLOCKS` order: Compressed memory, Swap devices,
+    /// Memory modules.
+    pub fn block_views(&self) -> &[Entity<MemoryPartView>; 3] {
+        &self.block_views
+    }
+
+    /// Whether the block `kind` has something to show (1.3.0 hides it otherwise).
+    pub fn block_shown(&self, kind: &FixedWidget) -> bool {
+        block_index(kind).is_some_and(|i| self.parts.shown[i].get())
+    }
+
+    /// The id of the first widget of `metric` in the layout the page shows.
+    pub fn widget_of(&self, metric: &str, cx: &App) -> Option<u32> {
+        let c = self.container.read(cx);
+        c.layout()
+            .widgets
+            .iter()
+            .find(|w| is_metric(w, metric))
+            .map(|w| w.id)
+    }
+
+    /// The chart of the first placed widget of `metric` that draws one.
+    pub fn chart_of(&self, metric: &str, cx: &App) -> Option<Entity<ChartView>> {
+        let c = self.container.read(cx);
+        c.layout()
+            .widgets
+            .iter()
+            .filter(|w| is_metric(w, metric))
+            .find_map(|w| c.widget(w.id)?.read(cx).chart().cloned())
+    }
+
+    /// The Physical memory chart, while the page shows it.
+    pub fn physical(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_PHYSICAL, cx)
+    }
+
+    /// The Commit chart, while the page shows it.
+    pub fn commit(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_COMMIT_PCT, cx)
+    }
+
+    /// The Swap chart, while the page shows it.
+    pub fn swap(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_MEM_SWAP, cx)
+    }
+
+    /// Whether the page places a fixed widget of `kind`.
+    fn placed(&self, kind: &FixedWidget, cx: &App) -> bool {
+        let c = self.container.read(cx);
+        let placed = c.placed_ids();
+        c.layout().widgets.iter().any(|w| {
+            placed.contains(&w.id) && matches!(&w.content, WidgetContent::Fixed(k) if k == kind)
+        })
+    }
+
+    /// The flow layout lists the composition bar ("Show memory composition").
+    pub fn show_composition(&self, cx: &App) -> bool {
+        layout_bar(self.container.read(cx).layout())
+    }
+
+    /// The flow layout lists the Swap chart ("Show swap usage").
+    pub fn show_swap(&self, cx: &App) -> bool {
+        layout_swap(self.container.read(cx).layout())
+    }
+
+    /// Whether the Swap chart takes space: the layout lists it and the system has swap.
+    pub fn swap_shown(&self, cx: &App) -> bool {
+        self.swap(cx).is_some()
+    }
+
+    /// The composition bar view.
+    pub fn bar(&self) -> &Entity<CompositionBarView> {
+        &self.bar
+    }
+
+    /// The "Swap devices" table, once the block has drawn.
     pub fn swap_table(&self) -> Option<&Entity<TlTreeTable<SwapTableDelegate>>> {
         self.swap_table.as_ref()
     }
@@ -1893,64 +2041,16 @@ impl MemoryPage {
         &self.modules
     }
 
-    /// Opens or closes module `i`; the chevron turns over `m_fast`.
-    pub fn toggle_module(&mut self, i: usize, cx: &mut Context<Self>) {
-        if self.modules.toggle(i) {
-            cx.notify();
-        }
-    }
-
     /// The "Compressed memory" block's models.
     pub fn compressed(&self) -> &CompressedBlock {
         &self.compressed
     }
 
-    /// The composition bar view, once it has been shown.
-    pub fn bar(&self) -> Option<&Entity<CompositionBarView>> {
-        self.bar.as_ref()
-    }
-
-    /// Creates the bar view when the bar is shown for the first time, and hands it the newest
-    /// composition. The bar view notifies itself only when the composition changed.
-    fn sync_bar(&mut self, cx: &mut Context<Self>) {
-        if !self.show_composition {
-            return;
+    /// Opens or closes module `i`; the chevron turns over `m_fast`.
+    pub fn toggle_module(&mut self, i: usize, cx: &mut Context<Self>) {
+        if self.modules.toggle(i) {
+            self.sync_parts(cx);
         }
-        let c = self.composition;
-        match &self.bar {
-            Some(bar) => bar.update(cx, |b, cx| b.set_composition(c, cx)),
-            None => self.bar = Some(cx.new(|cx| CompositionBarView::new(c, cx))),
-        }
-    }
-
-    pub fn physical(&self) -> &Entity<ChartView> {
-        &self.physical
-    }
-
-    pub fn commit(&self) -> &Entity<ChartView> {
-        &self.commit
-    }
-
-    pub fn swap(&self) -> &Entity<ChartView> {
-        &self.swap
-    }
-
-    pub fn show_composition(&self) -> bool {
-        self.show_composition
-    }
-
-    pub fn show_swap(&self) -> bool {
-        self.show_swap
-    }
-
-    /// The Swap chart is in the graph area, or will be when its animation ends.
-    pub fn swap_shown(&self) -> bool {
-        self.swap_shown
-    }
-
-    /// The Swap chart's height is animating.
-    pub fn swap_animating(&self) -> bool {
-        self.swap_anim.is_some()
     }
 
     pub fn words(&self) -> &Words {
@@ -1962,34 +2062,48 @@ impl MemoryPage {
         self.active
     }
 
-    /// This page's demand part while it is active: memory, and the inventory for Details rows 7
-    /// to 11. The "By app" view also asks for the process sweep (`process_top`, as the Overview
-    /// Top processes box does): the engine sums the memory groups on each sweep (UI-PRF-060).
-    /// At 1 h, 24 h and 7 d it asks for the device metric history.
-    pub fn demand_part(&self) -> Demand {
-        Demand {
+    /// This page's demand part while it is active: memory, the inventory for Details rows 7 to
+    /// 11 and the modules block, the device metric history at 1 h, 24 h and 7 d, and what the
+    /// placed widgets read. Memory by app asks for the process sweep (`process_top`): the engine
+    /// sums the memory groups on each sweep (UI-PRF-060). With the default layout it equals
+    /// 1.3.0's.
+    pub fn demand_part(&self, cx: &App) -> Demand {
+        let mut demand = Demand {
             any_surface_visible: true,
             memory: true,
             inventory: true,
-            process_top: self.settings.view == MemoryView::Apps,
             device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
-        }
+        };
+        add_demand(&mut demand, &self.container.read(cx).demand_part());
+        demand
     }
 
     fn send_demand(&self, cx: &mut App) {
         if !self.active {
             return;
         }
-        let (id, window, part) = (self.id, self.window, self.demand_part());
+        let (id, window, part) = (self.id, self.window, self.demand_part(cx));
         self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
     }
 
-    fn set_chart_state(&self, state: ChartState, cx: &mut App) {
-        for chart in [&self.physical, &self.commit, &self.swap] {
-            let state = state.clone();
-            chart.update(cx, |v, cx| v.set_state(state, cx));
-        }
+    fn notify(&self, cx: &mut Context<Self>) {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// A part's height, the swap or a block's shown state changed: the flow layout places the
+    /// parts again.
+    fn place_again(&mut self, cx: &mut Context<Self>) {
+        self.container.update(cx, |c, cx| {
+            c.place_again(cx);
+        });
+    }
+
+    /// The container placed its widgets again or took a new layout: the demand follows.
+    fn on_container_changed(&mut self, cx: &mut Context<Self>) {
+        self.send_demand(cx);
     }
 
     fn on_snapshot(
@@ -1999,102 +2113,237 @@ impl MemoryPage {
         cx: &mut Context<Self>,
     ) {
         let snap = Arc::clone(hub.read(cx).current());
-        if ev.mask.intersects(
+        self.apply_snapshot(&snap, ev.mask, cx);
+    }
+
+    /// Brings Details, the blocks, the bar and the swap state up to date with the components in
+    /// `mask`. The page itself does not render; each part notifies for its own change.
+    fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
+        let mut parts = false;
+        if mask.intersects(
             ComponentMask::SYSTEM | ComponentMask::HEALTH | ComponentMask::DEVICE_DETAILS,
         ) {
-            self.sync_details(&snap, cx);
+            parts |= self.sync_details(snap, cx);
         }
-        if ev
-            .mask
-            .intersects(ComponentMask::SYSTEM | ComponentMask::INVENTORY)
-        {
-            self.sync_modules(&snap, cx);
+        if mask.intersects(ComponentMask::SYSTEM | ComponentMask::INVENTORY) {
+            parts |= self.sync_modules(snap, cx);
         }
-        if ev.mask.contains(ComponentMask::SYSTEM) {
-            self.composition = Composition::of(&snap.system.memory);
-            self.sync_bar(cx);
-            let totals = Totals::of(&snap);
-            if totals != self.totals {
-                let old = self.totals;
-                self.totals = totals;
-                self.swap_total = totals.swap;
-                self.rebuild_specs(old, cx);
-                self.sync_swap_shown(cx);
+        if mask.contains(ComponentMask::SYSTEM) {
+            let c = Composition::of(&snap.system.memory);
+            self.bar.update(cx, |b, cx| b.set_composition(c, cx));
+            let swap = snap.system.memory.swap_total > 0;
+            if swap != self.parts.swap.get() {
+                self.parts.swap.set(swap);
+                self.place_again(cx);
             }
         }
-        if ev.mask.contains(ComponentMask::HEALTH) {
-            self.set_chart_state(health_state(&snap), cx);
+        if parts {
+            self.sync_parts(cx);
+        }
+        // Memory went away: an edit ends as Cancel does.
+        if mask.contains(ComponentMask::DEVICES)
+            && !snap
+                .devices
+                .entries
+                .iter()
+                .any(|e| e.idx == self.row.idx && e.present)
+        {
+            self.editor.update(cx, |e, cx| e.cancel(cx));
         }
     }
 
-    /// Hands each chart whose total changed since `old` its new spec, and the Commit chart its
-    /// new value format.
-    fn rebuild_specs(&self, old: Totals, cx: &mut App) {
-        let (idx, s, t) = (self.row.idx, self.settings, self.totals);
-        let theme = current(cx).clone();
-        if t.mem != old.mem {
-            let spec = physical_spec(idx, t.mem, &s, &theme);
-            self.physical.update(cx, |v, cx| v.set_spec(spec, cx));
+    /// Brings Details rows 7 to 11 and the modules block up to date from the inventory. True
+    /// when the block changed.
+    fn sync_modules(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
+        let mem = &snap.system.memory;
+        let total = match mem.validity {
+            Validity::Valid | Validity::Stale => mem.total,
+            _ => 0,
+        };
+        if update_memory_details_modules(&mut self.details, &snap.inventory, total) {
+            self.push_details(cx);
         }
-        if t.commit_limit != old.commit_limit {
-            let spec = commit_spec(idx, t.commit_limit, &s, &theme);
-            let labels = commit_labels(&self.words, t.commit_limit);
-            self.commit.update(cx, |v, cx| {
-                v.set_spec(spec, cx);
-                v.set_labels(labels, cx);
+        if !update_modules_block(&mut self.modules, &snap.inventory) {
+            return false;
+        }
+        let n = self.modules.modules.len();
+        self.module_focus.truncate(n);
+        while self.module_focus.len() < n {
+            self.module_focus.push(cx.focus_handle());
+        }
+        true
+    }
+
+    /// Brings the Details rows, the compressed block and the swap rows up to date. True when a
+    /// block changed.
+    fn sync_details(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
+        let inputs = MemoryDetailInputs {
+            mem: &snap.system.memory,
+            now_boot_ns: self.hub.read(cx).now_ns(),
+            observed_end_ns: snap.system.header.observed_end,
+            error: snap.health.get(SourceId::Memory).last_error.as_deref(),
+        };
+        if update_memory_details(&mut self.details, &inputs) {
+            self.push_details(cx);
+        }
+        let inputs = CompressedInputs {
+            mem: &snap.system.memory,
+            details: &snap.device_details.memory,
+        };
+        let mut changed = update_compressed_block(&mut self.compressed, &inputs);
+        changed |= self.compressed.refresh_strings(cx);
+        let rows = swap_rows_of(&snap.device_details.memory);
+        if !Arc::ptr_eq(&self.swap_rows, &rows) && *self.swap_rows != *rows {
+            self.swap_rows = rows;
+            changed = true;
+        }
+        if let Some(table) = &self.swap_table {
+            let rows = Arc::clone(&self.swap_rows);
+            table.update(cx, |t, cx| {
+                if t.delegate_mut().set_rows(rows) {
+                    t.on_new_version(cx);
+                }
             });
         }
-        if t.swap != old.swap {
-            let spec = swap_spec(idx, t.swap, &s, &theme);
-            self.swap.update(cx, |v, cx| v.set_spec(spec, cx));
+        changed
+    }
+
+    /// Hands the Details view what the grid shows; it notifies only when that changed.
+    fn push_details(&mut self, cx: &mut Context<Self>) {
+        let shown = DetailsShown::of(&self.details, strings_version(cx));
+        self.details_view.update(cx, |v, cx| v.set_shown(shown, cx));
+    }
+
+    /// Hands every part what it shows; each renders only when that changed. When a block
+    /// starts or stops having something to show, the flow places the parts again and Add Widget
+    /// lists it or not.
+    fn sync_parts(&mut self, cx: &mut Context<Self>) {
+        let strings = strings_version(cx);
+        let shown = [
+            !self.compressed.is_hidden(),
+            !self.swap_rows.is_empty(),
+            !self.modules.is_hidden(),
+        ];
+        let mut moved = false;
+        for (cell, on) in self.parts.shown.iter().zip(shown) {
+            if cell.get() != on {
+                cell.set(on);
+                moved = true;
+            }
+        }
+        let blocks = [
+            self.compressed_shown(strings),
+            self.swap_devices_shown(),
+            self.modules_shown(strings),
+        ];
+        for (view, s) in self.block_views.iter().zip(blocks) {
+            view.update(cx, |v, cx| v.set_shown(s, cx));
+        }
+        let switch = PartShown {
+            texts: vec![self.words.view_usage.clone(), self.words.view_apps.clone()],
+            flags: vec![self.view == Some(MemoryView::Apps)],
+            ..PartShown::default()
+        };
+        self.switch_view.update(cx, |v, cx| v.set_shown(switch, cx));
+        let parts = page_parts(shown);
+        self.editor.update(cx, |e, _| e.set_page_parts(parts));
+        if moved {
+            self.place_again(cx);
         }
     }
 
-    /// Every chart's spec from the current settings, totals and theme.
-    fn rebuild_all_specs(&self, cx: &mut App) {
-        let (idx, s, t) = (self.row.idx, self.settings, self.totals);
-        let theme = current(cx).clone();
-        let physical = physical_spec(idx, t.mem, &s, &theme);
-        let commit = commit_spec(idx, t.commit_limit, &s, &theme);
-        let swap = swap_spec(idx, t.swap, &s, &theme);
-        self.physical.update(cx, |v, cx| v.set_spec(physical, cx));
-        self.commit.update(cx, |v, cx| v.set_spec(commit, cx));
-        self.swap.update(cx, |v, cx| v.set_spec(swap, cx));
+    /// What the Compressed memory block draws.
+    fn compressed_shown(&self, strings: Option<u64>) -> PartShown {
+        let c = &self.compressed;
+        let mut texts = vec![
+            self.words.block_compressed.clone(),
+            self.words.zswap.clone(),
+        ];
+        texts.extend(c.names.iter().cloned());
+        let mut grids: Vec<DetailsShown> = c
+            .zram
+            .iter()
+            .map(|m| DetailsShown::of(m, strings))
+            .collect();
+        grids.push(DetailsShown::of(&c.zswap, strings));
+        PartShown {
+            texts,
+            grids,
+            flags: vec![c.is_hidden()],
+            ..PartShown::default()
+        }
     }
 
-    /// Shows or hides the Swap chart when `show_swap` or `SwapTotal` moved. The height animates
-    /// over `m_base` unless animations are off.
-    fn sync_swap_shown(&mut self, cx: &mut Context<Self>) {
-        let wanted = self.show_swap && self.swap_total > 0;
-        if wanted == self.swap_shown {
+    /// What the Swap devices block draws besides the table, which renders its rows itself.
+    fn swap_devices_shown(&self) -> PartShown {
+        let mut texts = vec![self.words.block_swap.clone()];
+        texts.extend(self.words.swap_table.columns.iter().cloned());
+        texts.extend(self.words.swap_table.types.iter().cloned());
+        PartShown {
+            texts,
+            numbers: vec![self.swap_rows.len() as u64],
+            ..PartShown::default()
+        }
+    }
+
+    /// What the Memory modules block draws.
+    fn modules_shown(&self, strings: Option<u64>) -> PartShown {
+        let b = &self.modules;
+        let mut texts = vec![self.words.block_modules.clone(), b.slots_line.clone()];
+        texts.extend(b.modules.iter().map(|(t, _)| t.clone()));
+        let mut grids: Vec<DetailsShown> = b
+            .modules
+            .iter()
+            .map(|(_, m)| DetailsShown::of(m, strings))
+            .collect();
+        grids.push(DetailsShown::of(b.details_model(), strings));
+        let mut flags = b.expanded.clone();
+        flags.extend([b.not_reported, b.is_hidden()]);
+        let numbers = match b.anim {
+            Some(a) => vec![
+                1,
+                a.module as u64,
+                u64::from(a.opening),
+                u64::from(a.generation),
+            ],
+            None => Vec::new(),
+        };
+        PartShown {
+            texts,
+            grids,
+            flags,
+            numbers,
+        }
+    }
+
+    /// The layout the page shows now: its saved entry, else its built-in default.
+    fn shown_layout(&self, cx: &App) -> ContainerLayout {
+        page_layout(&self.container_id, cx)
+    }
+
+    /// Shows the saved layout (Apply, Reset Page, a menu item) when the page is not in Edit
+    /// Widgets. The switch and the header follow a new preset.
+    fn sync_layout(&mut self, cx: &mut Context<Self>) {
+        if self.editor.read(cx).is_editing() {
             return;
         }
-        self.swap_shown = wanted;
-        self.anim_generation = self.anim_generation.wrapping_add(1);
-        if animations_on(cx) {
-            let generation = self.anim_generation;
-            self.swap_anim = Some(SwapAnim {
-                showing: wanted,
-                generation,
-            });
-            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                cx.background_executor().timer(M_BASE).await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.anim_generation == generation {
-                        this.swap_anim = None;
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        } else {
-            self.swap_anim = None;
+        let layout = self.shown_layout(cx);
+        let view = layout_view(&layout);
+        self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+        if view != self.view {
+            // A grid layout draws the switch in the header.
+            let header = view.is_none() || self.view.is_none();
+            self.view = view;
+            self.sync_parts(cx);
+            if header {
+                self.notify(cx);
+            }
         }
-        cx.notify();
     }
 
     /// Applies the page's settings when one of their sections changed.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        self.sync_layout(cx);
         let versions = section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -2106,55 +2355,42 @@ impl MemoryPage {
             return;
         }
         self.settings = new;
-        if (new.range_ns, new.smooth, new.rounded) != (old.range_ns, old.smooth, old.rounded) {
-            self.rebuild_all_specs(cx);
-        }
         if new.range_ns != old.range_ns {
             // The header switch shows the new range.
             self.send_demand(cx);
-            cx.notify();
-        }
-        if new.composition != old.composition {
-            self.show_composition = new.composition;
-            self.sync_bar(cx);
-            cx.notify();
-        }
-        if new.swap != old.swap {
-            self.show_swap = new.swap;
-            self.sync_swap_shown(cx);
-        }
-        if new.view != old.view {
-            self.sync_apps(cx);
-            self.send_demand(cx);
-            cx.notify();
+            self.notify(cx);
         }
     }
 
-    /// A new theme: the charts take the new colours.
+    /// A new theme or UI scale: the parts draw again in it.
     fn sync_style(&mut self, cx: &mut Context<Self>) {
         let version = metrics(cx).style_version;
         if version == self.style_version {
             return;
         }
         self.style_version = version;
-        self.rebuild_all_specs(cx);
-        cx.notify();
+        for view in [&self.switch_view, &self.bar_view]
+            .into_iter()
+            .chain(self.block_views.iter())
+        {
+            view.update(cx, |_, cx| cx.notify());
+        }
+        self.notify(cx);
     }
 
-    /// New strings: the chart labels, the header and the menu words.
+    /// New strings: the page's words, Details, the blocks, the swap table and the header.
     fn sync_words(&mut self, cx: &mut Context<Self>) {
-        if !self.words.refresh(cx) {
+        let words = self.words.refresh(cx);
+        let details = self.details.refresh_strings(cx);
+        let compressed = self.compressed.refresh_strings(cx);
+        let modules = self.modules.refresh_strings(cx);
+        if !(words || details || compressed || modules) {
             return;
         }
-        let (physical, commit, swap) = (
-            physical_labels(&self.words),
-            commit_labels(&self.words, self.totals.commit_limit),
-            swap_labels(&self.words),
-        );
-        self.physical.update(cx, |v, cx| v.set_labels(physical, cx));
-        self.commit.update(cx, |v, cx| v.set_labels(commit, cx));
-        self.swap.update(cx, |v, cx| v.set_labels(swap, cx));
+        self.push_details(cx);
         self.header.0 = page_words(cx).memory.clone();
+        let word = self.header.0.clone();
+        self.editor.update(cx, |e, _| e.set_page_name(word));
         if let Some(table) = &self.swap_table {
             let words = self.words.swap_table.clone();
             table.update(cx, |t, cx| {
@@ -2162,33 +2398,79 @@ impl MemoryPage {
                 t.on_new_version(cx);
             });
         }
-        cx.notify();
+        self.sync_parts(cx);
+        self.notify(cx);
     }
 
+    /// Writes `edit` to the page's flow layout; a page without an entry gets one. Nothing with
+    /// a grid layout. The old keys are not written.
+    fn edit_flow(&mut self, edit: impl FnOnce(&mut ContainerLayout), cx: &mut Context<Self>) {
+        if !cx.has_global::<TlSettings>() {
+            return;
+        }
+        let container = self.container_id.to_string();
+        TlSettings::update(cx, |d| {
+            let perf = &mut d.settings.performance;
+            let mut layout =
+                container_layout(perf, &container).unwrap_or_else(|| default_layout(&container));
+            if layout.preset.is_none() {
+                return;
+            }
+            edit(&mut layout);
+            perf.layouts.set(layout);
+        });
+        self.sync_settings(cx);
+    }
+
+    /// The Usage / By app switch: with a flow layout the page takes the view's preset and its
+    /// first part; a page without an entry gets one. With a grid layout it asks "Replace your
+    /// widgets?" first, then saves the view's flow layout with the built-in default's widgets.
+    /// `memory_view` is not written.
+    pub fn set_view(&mut self, view: MemoryView, window: &mut Window, cx: &mut Context<Self>) {
+        if !cx.has_global::<TlSettings>() {
+            return;
+        }
+        if self.view.is_some() {
+            self.edit_flow(|l| set_memory_preset(l, view), cx);
+            return;
+        }
+        let container = self.container_id.to_string();
+        let page = cx.weak_entity();
+        let preset = match view {
+            MemoryView::Usage => self.words.view_usage.clone(),
+            MemoryView::Apps => self.words.view_apps.clone(),
+        };
+        confirm_preset_page(self.header.0.clone(), preset, window, cx, move |_, cx| {
+            let perf = PerformanceSettings {
+                memory_view: view,
+                ..PerformanceSettings::default()
+            };
+            let layout = convert_memory_page(&perf, &container);
+            TlSettings::update(cx, |d| d.settings.performance.layouts.set(layout));
+            let _ = page.update(cx, |p, cx| p.sync_settings(cx));
+        });
+    }
+
+    /// "Show memory composition": adds or removes the bar in the page's flow layout.
     fn on_toggle_composition(
         &mut self,
         _: &PerfToggleMemoryComposition,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        TlSettings::update(cx, |d| {
-            let p = &mut d.settings.performance;
-            p.memory_composition = !p.memory_composition;
-        });
-        self.sync_settings(cx);
+        let on = !self.show_composition(cx);
+        self.edit_flow(|l| set_memory_bar(l, on), cx);
     }
 
+    /// "Show swap usage": adds or removes the Swap chart in the page's flow layout.
     fn on_toggle_swap(
         &mut self,
         _: &PerfToggleMemorySwapGraph,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        TlSettings::update(cx, |d| {
-            let p = &mut d.settings.performance;
-            p.memory_swap_graph = !p.memory_swap_graph;
-        });
-        self.sync_settings(cx);
+        let on = !self.show_swap(cx);
+        self.edit_flow(|l| set_memory_swap(l, on), cx);
     }
 
     fn on_groups_shown(
@@ -2205,7 +2487,29 @@ impl MemoryPage {
         self.sync_settings(cx);
     }
 
-    /// The Usage / By app switch, right-aligned above the first chart.
+    /// "Edit Widgets…" in the page menu.
+    fn on_edit_start(
+        &mut self,
+        _: &PerfWidgetEditStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        start_page_edit(&self.editor, &self.hub, window, cx);
+    }
+
+    /// "Reset Page" in the page menu (ADR-019 phase 3 "Reset"): the entry goes and
+    /// `memory_view`, `memory_swap_graph` and `memory_composition` go back to their defaults.
+    fn on_reset_page(
+        &mut self,
+        _: &PerfWidgetResetPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        reset_page(&self.container_id, self.header.0.clone(), window, cx);
+    }
+
+    /// The Usage / By app switch, right-aligned: above the first part of a flow layout, in the
+    /// header with a grid layout.
     fn view_switch(&self, cx: &App) -> AnyElement {
         let m = metrics(cx);
         let mut row = div().flex().flex_none();
@@ -2220,13 +2524,14 @@ impl MemoryPage {
                     TlButton::new(
                         ElementId::Name(format!("{VIEW_SWITCH_ID}-{id}").into()),
                         TlButtonKind::Segment {
-                            on: self.settings.view == view,
+                            on: self.view == Some(view),
                         },
                     )
                     .size(TlButtonSize::Sm)
                     .label(label)
-                    .on_click(move |_, _, cx| {
-                        weak.update(cx, |page, cx| page.set_view(view, cx)).ok();
+                    .on_click(move |_, window, cx| {
+                        weak.update(cx, |page, cx| page.set_view(view, window, cx))
+                            .ok();
                     }),
                 ),
             );
@@ -2242,7 +2547,7 @@ impl MemoryPage {
             .into_any_element()
     }
 
-    /// Creates the "Swap devices" table on the first render. The Name column then follows the
+    /// Creates the "Swap devices" table on the first draw. The Name column then follows the
     /// body width of the previous frame.
     fn sync_swap_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let scale = metrics(cx).ui_scale;
@@ -2281,36 +2586,85 @@ impl MemoryPage {
         }
     }
 
-    /// `chart` in a full-width box of `height`.
-    fn chart_box(id: &'static str, chart: &Entity<ChartView>, height: f32) -> gpui_kit::Div {
-        div()
-            .tl_selector(move || id.into())
-            .flex_none()
-            .w_full()
-            .h(px(height))
-            .child(chart.clone().cached(StyleRefinement::default().size_full()))
+    /// The "Swap devices" block: its heading and the table. `None` without a swap device.
+    fn swap_element(&self, cx: &App) -> Option<AnyElement> {
+        let table = self
+            .swap_table
+            .as_ref()
+            .filter(|_| !self.swap_rows.is_empty())?;
+        let (m, theme) = (metrics(cx), current(cx));
+        let md = label_style(m, m.text.md, FontWeight::MEDIUM);
+        Some(
+            v_flex()
+                .gap(m.sp[4])
+                .child(heading(self.words.block_swap.clone(), md, theme))
+                .child(
+                    flat_static_table(table, self.swap_rows.len(), SWAP_TABLE_MAX_ROWS, m)
+                        .tl_selector(|| SWAP_TABLE_ID.into()),
+                )
+                .into_any_element(),
+        )
     }
-}
 
-impl MemoryPage {
+    /// The "Compressed memory" block: one grid per zram device, then zswap. `None` while there
+    /// is no zram device and zswap is off.
+    fn compressed_element(&self, cx: &App) -> Option<AnyElement> {
+        if self.compressed.is_hidden() {
+            return None;
+        }
+        let (m, theme) = (metrics(cx), current(cx));
+        let md = label_style(m, m.text.md, FontWeight::MEDIUM);
+        let sm = label_style(m, m.text.sm, FontWeight::MEDIUM);
+        let mut block =
+            v_flex()
+                .gap(m.sp[4])
+                .child(heading(self.words.block_compressed.clone(), md, theme));
+        let grid = |id: ElementId, selector: String, model: &KeyValueModel| {
+            div()
+                .id(id)
+                .tl_selector(move || selector)
+                .child(render_details(model, m, cx))
+        };
+        for (n, (name, model)) in self
+            .compressed
+            .names
+            .iter()
+            .zip(&self.compressed.zram)
+            .enumerate()
+        {
+            block = block
+                .child(heading(name.clone(), sm.clone(), theme))
+                .child(grid(
+                    (ZRAM_GRID_ID, n).into(),
+                    format!("{ZRAM_GRID_ID}-{n}"),
+                    model,
+                ));
+        }
+        block = block
+            .child(heading(self.words.zswap.clone(), sm, theme))
+            .child(grid(
+                ZSWAP_GRID_ID.into(),
+                ZSWAP_GRID_ID.to_owned(),
+                &self.compressed.zswap,
+            ));
+        Some(block.into_any_element())
+    }
+
     /// The "Memory modules" block: heading, slots line, then a header row and grid per module.
     /// `None` while the inventory is warming up.
-    fn modules_element(
-        &self,
-        heading: &dyn Fn(SharedString, gpui_kit::TextStyleRefinement) -> Div,
-        md: &gpui_kit::TextStyleRefinement,
-        sm: &gpui_kit::TextStyleRefinement,
-        m: UiMetrics,
-        cx: &App,
-    ) -> Option<AnyElement> {
+    fn modules_element(&self, cx: &App) -> Option<AnyElement> {
         let block = &self.modules;
         if block.is_hidden() {
             return None;
         }
+        let m = *metrics(cx);
         let theme = current(cx);
-        let mut out = v_flex()
-            .gap(m.sp[4])
-            .child(heading(self.words.block_modules.clone(), md.clone()));
+        let md = label_style(&m, m.text.md, FontWeight::MEDIUM);
+        let sm = label_style(&m, m.text.sm, FontWeight::MEDIUM);
+        let mut out =
+            v_flex()
+                .gap(m.sp[4])
+                .child(heading(self.words.block_modules.clone(), md, theme));
         if block.not_reported {
             return Some(
                 out.child(
@@ -2364,7 +2718,7 @@ impl MemoryPage {
                     .icon_rotation(turn(if open { 1. } else { 0. }))
                     .into_any_element(),
             };
-            let mut header = div()
+            let header = div()
                 .flex()
                 .flex_row()
                 .items_center()
@@ -2375,8 +2729,8 @@ impl MemoryPage {
                         .tl_selector(move || format!("{MODULE_CHEVRON_ID}-{n}"))
                         .flex_none()
                         .child(chevron),
-                );
-            header = header.child(heading(title.clone(), sm.clone()));
+                )
+                .child(heading(title.clone(), sm.clone(), theme));
             out = out.child(header);
             if open {
                 out = out.child(
@@ -2389,6 +2743,23 @@ impl MemoryPage {
         }
         Some(out.into_any_element())
     }
+}
+
+/// The page parts Add Widget lists: Details, the bar, Memory by app, and each block that has
+/// something to show (`shown`, in `BLOCKS` order).
+fn page_parts(shown: [bool; 3]) -> Vec<FixedWidget> {
+    let mut parts = vec![
+        FixedWidget::Details,
+        FixedWidget::MemoryBar,
+        FixedWidget::MemoryByApp,
+    ];
+    parts.extend(
+        BLOCKS
+            .into_iter()
+            .zip(shown)
+            .filter_map(|(kind, on)| on.then_some(kind)),
+    );
+    parts
 }
 
 impl DevicePage for MemoryPage {
@@ -2404,156 +2775,34 @@ impl DevicePage for MemoryPage {
         self.header.clone()
     }
 
-    fn toggles(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 2]> {
-        SmallVec::new()
+    /// With a grid layout the Usage / By app switch sits in the header; a flow layout draws it
+    /// above its first part.
+    fn toggles(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 2]> {
+        if self.view.is_some() {
+            return SmallVec::new();
+        }
+        smallvec![self.view_switch(cx)]
     }
 
-    fn graphs(&self, window: &mut Window, cx: &mut App) -> AnyElement {
-        let m = *metrics(cx);
-        let h = GRAPH_H_STACKED * m.ui_scale;
-
-        // The heading tooltip covers the Commit chart box.
-        let commit = div()
-            .id(ElementId::NamedChild(
-                Arc::new(ElementId::Name(SharedString::from(self.key.0.clone()))),
-                COMMIT_ID.into(),
-            ))
-            .w_full()
-            .child(Self::chart_box(COMMIT_ID, &self.commit, h));
-        let tip = HoverTooltip::state((COMMIT_ID, self.id.as_u64() as usize), window, cx);
-        let commit = HoverTooltip::attach(
-            &tip,
-            commit,
-            DELAY_CONTROL,
-            TlTooltip::text(self.words.commit_tip.clone()).build(),
-            window,
-            cx,
-        );
-
-        let swap = match self.swap_anim {
-            None => self
-                .swap_shown
-                .then(|| Self::chart_box(SWAP_ID, &self.swap, h).into_any_element()),
-            Some(SwapAnim {
-                showing,
-                generation,
-            }) => Some(
-                div()
-                    .flex_none()
-                    .w_full()
-                    .overflow_hidden()
-                    .child(Self::chart_box(SWAP_ID, &self.swap, h))
-                    .with_animation(
-                        ("perf-mem-swap-anim", generation as usize),
-                        Animation::new(M_BASE).with_easing(ease_out_cubic),
-                        move |el, t| el.h(px(h * if showing { t } else { 1. - t })),
-                    )
-                    .into_any_element(),
-            ),
-        };
-
-        // The composition bar after `sp6` when `show_composition`.
-        let bar = self
-            .bar
-            .as_ref()
-            .filter(|_| self.show_composition)
-            .map(|bar| {
-                // Not cached: a cached view with only a width has no height of its own, so the
-                // Details heading below would be drawn over the bar.
-                div()
-                    .tl_selector(|| BAR_WRAP_ID.into())
-                    .w_full()
-                    .pt(m.sp[6] - m.sp[4])
-                    .child(bar.clone())
-            });
-        let first = match (&self.apps, self.settings.view) {
-            (Some(apps), MemoryView::Apps) => apps.clone().into_any_element(),
-            _ => Self::chart_box(PHYSICAL_ID, &self.physical, h).into_any_element(),
-        };
-        v_flex()
-            .w_full()
-            .gap(m.sp[4])
-            .child(v_flex().w_full().child(self.view_switch(cx)).child(first))
-            .child(commit)
-            .children(swap)
-            .children(bar)
-            .into_any_element()
+    fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {
+        // The charts, the bar and Memory by app are widgets of the container.
+        div().into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
         &self.details
     }
 
-    fn blocks(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 3]> {
-        let mut blocks: SmallVec<[AnyElement; 3]> = SmallVec::new();
-        let (m, theme) = (metrics(cx), current(cx));
-        let heading = |text: SharedString, style| {
-            let mut el = div().text_color(theme.text_primary).child(text);
-            *el.text_style() = style;
-            el
-        };
-        let md = label_style(m, m.text.md, FontWeight::MEDIUM);
-        let sm = label_style(m, m.text.sm, FontWeight::MEDIUM);
-        if let Some(table) = self
-            .swap_table
-            .as_ref()
-            .filter(|_| !self.swap_rows.is_empty())
-        {
-            blocks.push(
-                v_flex()
-                    .gap(m.sp[4])
-                    .child(heading(self.words.block_swap.clone(), md.clone()))
-                    .child(
-                        flat_static_table(table, self.swap_rows.len(), SWAP_TABLE_MAX_ROWS, m)
-                            .tl_selector(|| SWAP_TABLE_ID.into()),
-                    )
-                    .into_any_element(),
-            );
-        }
-        if let Some(block) = self.modules_element(&heading, &md, &sm, *m, cx) {
-            blocks.push(block);
-        }
-        if self.compressed.is_hidden() {
-            return blocks;
-        }
-        let mut block = v_flex()
-            .gap(m.sp[4])
-            .child(heading(self.words.block_compressed.clone(), md));
-        let grid = |id: ElementId, selector: String, model: &KeyValueModel| {
-            div()
-                .id(id)
-                .tl_selector(move || selector)
-                .child(render_details(model, m, cx))
-        };
-        for (n, (name, model)) in self
-            .compressed
-            .names
-            .iter()
-            .zip(&self.compressed.zram)
-            .enumerate()
-        {
-            block = block.child(heading(name.clone(), sm.clone())).child(grid(
-                (ZRAM_GRID_ID, n).into(),
-                format!("{ZRAM_GRID_ID}-{n}"),
-                model,
-            ));
-        }
-        block = block
-            .child(heading(self.words.zswap.clone(), sm))
-            .child(grid(
-                ZSWAP_GRID_ID.into(),
-                ZSWAP_GRID_ID.to_owned(),
-                &self.compressed.zswap,
-            ));
-        // The compressed block comes first, then the swap table.
-        blocks.insert(0, block.into_any_element());
-        blocks
+    fn blocks(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 3]> {
+        // The blocks are widgets of the container.
+        SmallVec::new()
     }
 
+    /// "Groups shown" while the page shows Memory by app (UI-PRF-060), then "Show memory
+    /// composition" and "Show swap usage" with a flow layout, checked from it.
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
         let w = &self.words;
-        // UI-PRF-060: the By app chart's context menu sets `top_n`.
-        let menu = if self.settings.view == MemoryView::Apps {
+        let menu = if self.placed(&FixedWidget::MemoryByApp, cx) {
             let top_n = self.settings.top_n;
             menu.submenu(w.groups_shown.clone(), window, cx, move |sub, _, _| {
                 GROUPS_SHOWN.iter().fold(sub, |sub, &n| {
@@ -2568,21 +2817,24 @@ impl DevicePage for MemoryPage {
         } else {
             menu
         };
+        if self.view.is_none() {
+            return menu;
+        }
         menu.check_item(
             w.menu_composition.clone(),
-            self.show_composition,
+            self.show_composition(cx),
             Box::new(PerfToggleMemoryComposition),
         )
         .check_item(
             w.menu_swap.clone(),
-            self.show_swap,
+            self.show_swap(cx),
             Box::new(PerfToggleMemorySwapGraph),
         )
     }
 
     /// The Memory copy text (PERF-011, UI-PRF-022): the header word, the Details rows, then the
-    /// blocks in screen order: Compressed memory, Swap devices, Memory modules. No module serial
-    /// is read (D-007).
+    /// blocks in 1.3.0 order: Compressed memory, Swap devices, Memory modules, whatever the
+    /// layout holds. No module serial is read (D-007).
     fn copy_text(&self, out: &mut String) {
         out.push_str(&self.header.0);
         out.push('\n');
@@ -2645,6 +2897,10 @@ impl DevicePage for MemoryPage {
         self.module_focus.iter().cloned().collect()
     }
 
+    fn widget_editor(&self) -> Option<&Entity<WidgetEditor>> {
+        Some(&self.editor)
+    }
+
     fn set_active(&mut self, active: bool, cx: &mut App) {
         if self.active == active {
             return;
@@ -2675,18 +2931,16 @@ impl Render for MemoryPage {
             self.window = Some(handle);
             self.send_demand(cx);
         }
-        self.details.refresh_strings(cx);
-        self.compressed.refresh_strings(cx);
-        self.modules.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        self.sync_swap_table(window, cx);
         div()
             .size_full()
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle_composition))
             .on_action(cx.listener(Self::on_toggle_swap))
             .on_action(cx.listener(Self::on_groups_shown))
+            .on_action(cx.listener(Self::on_edit_start))
+            .on_action(cx.listener(Self::on_reset_page))
             .child(
                 DevicePageFrame {
                     page: self,

@@ -28,6 +28,7 @@ use super::widget::source::Availability;
 
 pub mod cpu;
 pub mod gpu;
+pub mod memory;
 
 /// The gap between two page parts (`sp4`), logical px.
 pub const PART_GAP: f32 = 8.;
