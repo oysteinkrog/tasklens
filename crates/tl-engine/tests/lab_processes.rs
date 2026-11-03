@@ -8,12 +8,13 @@
 mod fake_sources;
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use asupersync::channel::{mpsc, watch};
@@ -29,13 +30,16 @@ use tl_engine::source::{self, WorkerControl, WorkerIo};
 use tl_engine::supervise::WorkerFactory;
 use tl_engine::update::{EngineMsg, ProcessSweep, SourceUpdate};
 use tl_engine::workers::memory;
+use tl_engine::workers::metric_history::State;
 use tl_engine::workers::processes::{self, ProcessesSource};
 use tl_engine::workers::{WorkerSpec, workers_for};
+use tl_history::metrics::{MetricConfig, MetricHistory, Tier};
 use tl_model::demand::Demand;
+use tl_model::devices::DeviceCatalog;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, MetricId, ProcessKey, SeriesId};
 use tl_model::process::{GroupRowKind, ProcessRecord};
-use tl_model::series::SeriesView;
+use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::time::TimeNs;
@@ -782,7 +786,9 @@ fn cpu_band_values(snap: &Snapshot) -> Vec<(Arc<str>, f64)> {
 /// D-042, UI-PRF-062 "Sweep rate": with only device history on and no window, the 10 s group
 /// sweep keeps each pid's CPU baseline, so the `CPU_GROUP` series get a sample every 10 s with
 /// the process CPU in the groups. Every sample sums to busy CPU of the sweep's `/proc/stat`
-/// window. These are the samples the metric history worker stores in its tiers.
+/// window. The reducer hands each of these batches to the metric sink. Fed through the history
+/// worker's `State` and read back from disk, the 10 s tier holds one point per sweep, and the
+/// points of each 10 s sum to busy CPU.
 #[test]
 fn cpu_group_history_only_sweep() {
     let root = FixtureRoot::new(&["owner-desktop"]);
@@ -818,6 +824,8 @@ fn cpu_group_history_only_sweep() {
 
     let mut seen = 0;
     let mut times = Vec::new();
+    // Each sweep's `CPU_GROUP` samples, as the reducer gives them to the metric sink.
+    let mut batches: Vec<Vec<(SeriesId, Sample)>> = Vec::new();
     while fl.now_ms() < 60_000 {
         fl.advance(Duration::from_millis(100));
         // On the half second, so every 10 s sweep window holds exactly ten of these.
@@ -858,6 +866,15 @@ fn cpu_group_history_only_sweep() {
             .map(|(_, v)| v)
             .sum();
         close(apps, 1.0, "the groups and Other apps");
+        let batch = snap.system.cpu.groups.iter().map(|b| {
+            let id = SeriesId {
+                device: b.device,
+                metric: MetricId::CPU_GROUP,
+            };
+            let last = snap.series.get(id).and_then(|v| v.samples.last().copied());
+            (id, last.expect("a published band has a sample"))
+        });
+        batches.push(batch.collect());
     }
     // The sweep at 0 s has no window, so it gives no CPU values. Each later one does.
     assert_eq!(times, [10_000, 20_000, 30_000, 40_000, 50_000, 60_000]);
@@ -871,6 +888,54 @@ fn cpu_group_history_only_sweep() {
         snap.series.get(id).expect("series").period_ns,
         10_000_000_000
     );
+
+    // The history worker's store: the batches go in under this session's catalog, and closing
+    // the store writes both minutes. A new store on the same folder reads the 10 s tier.
+    const SEC: u64 = 1_000_000_000;
+    // A whole multiple of 60 s, so 10 s and 1 min points start on whole realtime buckets.
+    let offset = 1_699_999_200 * SEC as i64;
+    let open = |now: u64| {
+        let cfg = MetricConfig {
+            root: root.dir.join("metrics"),
+            boot: fake_sources::FAKE_BOOT,
+            realtime_offset_ns: offset,
+            max_disk_bytes: 64 << 20,
+            sync: false,
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        MetricHistory::open(cfg, now, deadline)
+            .expect("the device history opens")
+            .0
+    };
+    let mut st = State::new();
+    st.install(open(0), offset);
+    st.set_catalog(DeviceCatalog::clone(&snap.devices));
+    for batch in &batches {
+        st.push(batch);
+    }
+    st.close(61 * SEC).expect("the device history closes");
+    let span = open(61 * SEC)
+        .read(Tier::S10, offset, offset + 70 * SEC as i64, 61 * SEC)
+        .expect("the 10 s tier reads");
+    assert_eq!(span.step_ns, 10 * SEC);
+    assert_eq!(span.series.len(), snap.system.cpu.groups.len());
+    assert!(
+        span.series
+            .iter()
+            .all(|(key, _)| key.metric == MetricId::CPU_GROUP)
+    );
+    let mut sums: BTreeMap<i64, f64> = BTreeMap::new();
+    for (_, points) in &span.series {
+        for p in points.iter().filter(|p| !p.mean.is_nan()) {
+            *sums.entry(p.t_realtime_ns - offset).or_default() += f64::from(p.mean);
+        }
+    }
+    let stored: Vec<i64> = sums.keys().copied().collect();
+    let want: Vec<i64> = (1..=6).map(|i| i * 10 * SEC as i64).collect();
+    assert_eq!(stored, want, "10 s points with CPU values");
+    for (t, sum) in &sums {
+        close(*sum, 33.0, &format!("the stored bands at {t} ns"));
+    }
 
     handle.abort();
     fl.advance(Duration::from_millis(10));
