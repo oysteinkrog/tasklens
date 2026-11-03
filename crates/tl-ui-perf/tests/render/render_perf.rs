@@ -37,7 +37,7 @@ use tl_ui_perf::performance::cpu::CpuPage;
 use tl_ui_perf::performance::page::PerfSidebar;
 use tl_ui_perf::performance::sidebar::DeviceSidebar;
 use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
-use tl_ui_settings::settings::{Settings, UiState};
+use tl_ui_settings::settings::{CpuGraphMode, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// Where this crate's golden PNGs live.
@@ -69,6 +69,8 @@ const SAMPLES: u64 = 140;
 enum Page {
     Overview,
     Cpu,
+    /// The CPU page in graph mode `mode`.
+    CpuMode(CpuGraphMode),
 }
 
 /// The page, with the entities that keep it fed alive.
@@ -223,8 +225,14 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
     init_strings(cx, "en-US");
     kv_grid::init(cx);
     cx.set_global(EngineGlobal(Arc::clone(&client)));
+    let mut settings = Settings::default();
+    if let Page::CpuMode(mode) = page {
+        settings.performance.cpu_graph_mode = mode;
+        // As the load does: the CPU page's old keys convert to its entry.
+        settings.clamp();
+    }
     cx.set_global(BootSettings {
-        settings: Settings::default(),
+        settings,
         state: UiState::default(),
         persist: None,
         startup_toasts: Vec::new(),
@@ -248,7 +256,7 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
             });
             (page.clone().into(), vec![page.into_any()])
         }
-        Page::Cpu => {
+        Page::Cpu | Page::CpuMode(_) => {
             let key = DeviceKey(Arc::from(DeviceKey::CPU));
             let row = DeviceRow {
                 key: key.clone(),
@@ -374,5 +382,33 @@ fn cpu_page_dark() {
 fn cpu_page_light() {
     run_pinned("render_perf::cpu_page_light", || {
         check(Page::Cpu, "Default Light", "perf_cpu_light")
+    });
+}
+
+/// The all-cores charts show the CPU total ("42.0%") at the top right, as 1.3.0 did
+/// (tasklens-hzire.11).
+#[test]
+fn cpu_all_cores_overlaid_dark() {
+    run_pinned("render_perf::cpu_all_cores_overlaid_dark", || {
+        check_at(
+            Page::CpuMode(CpuGraphMode::AllCoresOverlaid),
+            "Default Dark",
+            "perf_cpu_overlaid_dark",
+            WIDTH,
+            480.,
+        )
+    });
+}
+
+#[test]
+fn cpu_all_cores_stacked_dark() {
+    run_pinned("render_perf::cpu_all_cores_stacked_dark", || {
+        check_at(
+            Page::CpuMode(CpuGraphMode::AllCoresStacked),
+            "Default Dark",
+            "perf_cpu_stacked_dark",
+            WIDTH,
+            480.,
+        )
     });
 }

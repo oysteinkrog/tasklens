@@ -301,11 +301,18 @@ pub(super) fn box_reading(
                     series(MetricId::CPU_CLOCK_MAX),
                 ),
                 METRIC_FREQ_MAX => one(series(MetricId::CPU_CLOCK_MAX)),
-                // No value: available while a core reports a clock, or while a logical CPU is
-                // present (see `refresh`).
-                METRIC_CORE_CLOCKS | METRIC_CORES_OVERLAID | METRIC_CORES_STACKED => {
-                    one(Metric::valid(0.0))
+                // The cores charts show the CPU total as their value. They are available while
+                // a logical CPU is present, whatever the total says (see `refresh`).
+                METRIC_CORES_OVERLAID | METRIC_CORES_STACKED => {
+                    let total = c.util_pct;
+                    one(if total.validity == Validity::Unsupported {
+                        Metric::with(Validity::Missing)
+                    } else {
+                        total
+                    })
                 }
+                // No value: available while a core reports a clock (see `refresh`).
+                METRIC_CORE_CLOCKS => one(Metric::valid(0.0)),
                 _ => unsupported,
             }
         }

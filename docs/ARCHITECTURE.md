@@ -3235,7 +3235,7 @@ Phase 3 makes every device page one widget container: CPU, Memory, each GPU, eac
 
 | Key | Value text in a page container |
 |---|---|
-| `total`, `kernel`, `active`, `engine:*`, `util` | one decimal, "18.6%" (UI-PRF-024, UI-PRF-029, UI-PRF-033) |
+| `total`, `kernel`, `active`, `engine:*`, `util`, `cores_overlaid`, `cores_stacked` | one decimal, "18.6%" (UI-PRF-024, UI-PRF-029, UI-PRF-033) |
 | `swap` | bytes used, "1.20 GiB" (UI-PRF-026) |
 | `io` | read + write, "12.3 MiB/s" (UI-PRF-029); write is the dashed line |
 | `traffic` | download + upload, "1.5 Mbps" (UI-PRF-031); upload is the dashed, tinted line |
@@ -3278,7 +3278,7 @@ The phase 2 keys `active`, `read`, `write` and `io` on `aggregate:disk`, and eve
 
 | Key | Format | Scale | Kind | Bar max | Stats | Value text |
 |---|---|---|---|---|---|---|
-| `cores_overlaid`, `cores_stacked` | `Percent` | `Fixed { 0, 100 }`; stacked `Stacked(n)` | gauge | no bar | none | none (offers chart and name) |
+| `cores_overlaid`, `cores_stacked` | `Percent` | `Fixed { 0, 100 }`; stacked `Stacked(n)` | gauge | no bar | the CPU total, `util_pct`: one decimal on a page ("21.6%"), whole percent in a box (as `total`) | none (offers chart, value and name) |
 | `clock`, `freq_max` | `Mhz` | `StickyUp { hw_max: cpuinfo_max_freq }` | gauge | `freq_max`: the inventory's `max_mhz`; `clock`: no bar | `freq_max` min, avg, peak; `clock` none | "4631 MHz" |
 | `physical` | `Bytes` | `FixedTotal(MemTotal)` | gauge | no bar | none | used, "34.68 GiB" |
 | `commit_pct` | `PercentOf { CommitLimit }` | `Commit(CommitLimit)`, axis text above 100% | gauge | 100% of the limit (the bar stops at full) | min, avg, peak | "69.0%" |
@@ -3330,8 +3330,8 @@ The phase 2 keys `active`, `read`, `write` and `io` on `aggregate:disk`, and eve
 |---|---|---|
 | CPU | `overall` (`cpu_graph_mode`) | `total` [chart, value, label], 300 px |
 | CPU | `per_core` (default) | fixed `cpu_core_grid` |
-| CPU | `all_cores_overlaid` | `cores_overlaid` [chart, label], 300 px |
-| CPU | `all_cores_stacked` | `cores_stacked` [chart, label], 300 px |
+| CPU | `all_cores_overlaid` | `cores_overlaid` [chart, value, label], 300 px |
+| CPU | `all_cores_stacked` | `cores_stacked` [chart, value, label], 300 px |
 | CPU | `board` | `total` [chart, value, label] at `BOARD_CHART_SHARE` of the width, beside fixed `cpu_core_board`, 300 px |
 | CPU | `apps` (D-042) | fixed `cpu_by_app`, 300 px |
 | Memory | `usage` (default, `memory_view`) | `physical` [chart, value, label]; `commit_pct` [chart, value, label]; `swap` [chart, value, label]; fixed `memory_bar`; Details; `memory_compressed`, `swap_devices`, `memory_modules` |

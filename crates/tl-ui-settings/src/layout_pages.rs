@@ -272,8 +272,12 @@ pub fn cpu_mode_widgets(preset: &str) -> Vec<(WidgetContent, FormSet)> {
     let total = || metric(DEVICE_CPU, METRIC_CPU_TOTAL, CHART_VALUE_LABEL);
     match preset {
         PRESET_OVERALL => vec![total()],
-        PRESET_ALL_CORES_OVERLAID => vec![metric(DEVICE_CPU, METRIC_CORES_OVERLAID, CHART_LABEL)],
-        PRESET_ALL_CORES_STACKED => vec![metric(DEVICE_CPU, METRIC_CORES_STACKED, CHART_LABEL)],
+        PRESET_ALL_CORES_OVERLAID => {
+            vec![metric(DEVICE_CPU, METRIC_CORES_OVERLAID, CHART_VALUE_LABEL)]
+        }
+        PRESET_ALL_CORES_STACKED => {
+            vec![metric(DEVICE_CPU, METRIC_CORES_STACKED, CHART_VALUE_LABEL)]
+        }
         PRESET_BOARD => vec![total(), fixed(FixedWidget::CpuCoreBoard)],
         _ => vec![fixed(FixedWidget::CpuCoreGrid)],
     }
@@ -681,8 +685,8 @@ mod tests {
                 let mut want: Vec<String> = match mode {
                     Overall => vec!["cpu total [chart,value,label]".into()],
                     PerCore => vec!["fixed cpu_core_grid".into()],
-                    AllCoresOverlaid => vec!["cpu cores_overlaid [chart,label]".into()],
-                    AllCoresStacked => vec!["cpu cores_stacked [chart,label]".into()],
+                    AllCoresOverlaid => vec!["cpu cores_overlaid [chart,value,label]".into()],
+                    AllCoresStacked => vec!["cpu cores_stacked [chart,value,label]".into()],
                     Board => vec![
                         "cpu total [chart,value,label]".into(),
                         "fixed cpu_core_board".into(),

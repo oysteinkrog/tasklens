@@ -488,14 +488,14 @@ fn page_cpu_old_toggles_give_widgets(cx: &mut TestAppContext) {
             AllCoresOverlaid,
             G::Clocks,
             vec![
-                "cores_overlaid [chart,label]".into(),
+                "cores_overlaid [chart,value,label]".into(),
                 "core_clocks [chart,label]".into(),
             ],
         ),
         (
             AllCoresStacked,
             G::Temperature,
-            vec!["cores_stacked [chart,label]".into(), cvl("temp")],
+            vec!["cores_stacked [chart,value,label]".into(), cvl("temp")],
         ),
         (
             Board,
@@ -1108,4 +1108,60 @@ fn page_cpu_look_survives_edit_and_apply(cx: &mut TestAppContext) {
         r.vcx.update(|_, cx| page.read(cx).editor().clone())
     };
     super::page_look::sweep(r.vcx, &container, &editor, "cpu");
+}
+
+/// The all-cores charts show the CPU total at the top right, as 1.3.0 did, in the page's own
+/// layout and in a widget placed by Edit Widgets (tasklens-hzire.11), and look the same in
+/// Edit Widgets and after Apply.
+#[gpui_kit::test]
+fn page_cpu_all_cores_look_survives_edit_and_apply(cx: &mut TestAppContext) {
+    for (mode, key) in [
+        (CpuGraphMode::AllCoresOverlaid, "cores_overlaid"),
+        (CpuGraphMode::AllCoresStacked, "cores_stacked"),
+    ] {
+        let mut r = open(cx, perf(mode, CpuSecondaryGraph::None));
+        publish_cpu(&r.engine, false, false, 21.6);
+        draw(r.vcx);
+        let container = r.container();
+        let id = r.metric_id(key);
+        let chart = r.vcx.update(|_, cx| {
+            let c = container.read(cx);
+            c.widget(id)
+                .and_then(|w| w.read(cx).chart().cloned())
+                .expect("the cores chart")
+        });
+        let painted = r
+            .vcx
+            .update(|_, cx| chart.read(cx).painted_value_text().map(str::to_owned));
+        assert_eq!(painted.as_deref(), Some("21.6%"), "{key}");
+        let editor = {
+            let page = r.page.clone();
+            r.vcx.update(|_, cx| page.read(cx).editor().clone())
+        };
+        super::page_look::sweep(r.vcx, &container, &editor, "cpu");
+    }
+
+    // A widget placed by Edit Widgets, with the forms Add Widget gives it.
+    let forms = FormSet::CHART | FormSet::VALUE | FormSet::LABEL;
+    let mut perf = PerformanceSettings::default();
+    perf.layouts.set(grid_layout(vec![metric(
+        "cpu",
+        "cores_overlaid",
+        forms,
+        cell(0, 0, 12, 6),
+    )]));
+    let mut r = open(cx, perf);
+    publish_cpu(&r.engine, false, false, 21.6);
+    draw(r.vcx);
+    let container = r.container();
+    let chart = r.vcx.update(|_, cx| {
+        let c = container.read(cx);
+        c.widget(1)
+            .and_then(|w| w.read(cx).chart().cloned())
+            .expect("the placed chart")
+    });
+    let painted = r
+        .vcx
+        .update(|_, cx| chart.read(cx).painted_value_text().map(str::to_owned));
+    assert_eq!(painted.as_deref(), Some("21.6%"), "placed widget");
 }

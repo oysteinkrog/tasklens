@@ -84,8 +84,8 @@ fn cpu_widgets(mode: &str, secondary: &str) -> Vec<String> {
     let mut out: Vec<String> = match mode {
         "overall" => vec![cvl("cpu", "total")],
         "per_core" => vec!["fixed cpu_core_grid".into()],
-        "all_cores_overlaid" => vec!["cpu cores_overlaid [chart,label]".into()],
-        "all_cores_stacked" => vec!["cpu cores_stacked [chart,label]".into()],
+        "all_cores_overlaid" => vec!["cpu cores_overlaid [chart,value,label]".into()],
+        "all_cores_stacked" => vec!["cpu cores_stacked [chart,value,label]".into()],
         "board" => vec![cvl("cpu", "total"), "fixed cpu_core_board".into()],
         _ => unreachable!(),
     };

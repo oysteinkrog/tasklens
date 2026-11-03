@@ -562,13 +562,13 @@ pub const NET_TRAFFIC: MetricMeta = MetricMeta {
 
 // ---- Phase 3: the keys the device pages add (ADR-019 "Metric metadata added in phase 3") ----
 
-/// `cores_overlaid` of the CPU: every logical CPU's load, one line each. Chart and name only.
+/// `cores_overlaid` of the CPU: every logical CPU's load, one line each. The value is the CPU
+/// total, as 1.3.0 showed it at the chart's top right. No bar and no statistics.
 pub const CORES_OVERLAID: MetricMeta = MetricMeta {
-    value_text: ValueText::None,
     bar: BarMax::None,
     stats: StatsRule::None,
     lines: Lines::PerLogical { stacked: false },
-    ..PERCENT
+    ..PAGE_PERCENT
 };
 
 /// `cores_stacked` of the CPU: the same as stacked bands, on a `Stacked(n)` scale.
@@ -1824,8 +1824,8 @@ mod tests {
         let vl = FormSet::VALUE | FormSet::LABEL;
         let bvl = vl | FormSet::BAR;
         let cases = [
-            (DeviceKind::Cpu, METRIC_CORES_OVERLAID, cl),
-            (DeviceKind::Cpu, METRIC_CORES_STACKED, cl),
+            (DeviceKind::Cpu, METRIC_CORES_OVERLAID, cvl),
+            (DeviceKind::Cpu, METRIC_CORES_STACKED, cvl),
             (DeviceKind::Cpu, METRIC_CLOCK, cvl),
             (DeviceKind::Cpu, METRIC_FREQ_MAX, all),
             (DeviceKind::Memory, METRIC_PHYSICAL, cvl),
@@ -1852,6 +1852,12 @@ mod tests {
         ];
         for (kind, key, forms) in cases {
             assert_eq!(at(kind, key).forms(), forms, "{kind:?} {key}");
+        }
+        // The cores charts show the CPU total: one decimal on a page, whole percent in a box.
+        for key in [METRIC_CORES_OVERLAID, METRIC_CORES_STACKED] {
+            let meta = at(DeviceKind::Cpu, key);
+            assert_eq!(meta.value_text_in(true), ValueText::Plain, "{key}");
+            assert_eq!(meta.value_text_in(false), ValueText::WholePercent, "{key}");
         }
         // Totals are counters; the others are gauges.
         for key in [METRIC_TOTAL_READ, METRIC_TOTAL_WRITTEN] {

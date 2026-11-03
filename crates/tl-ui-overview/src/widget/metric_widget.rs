@@ -784,11 +784,14 @@ impl MetricWidget {
     /// The value a page chart shows at the right of its heading when it is not the newest
     /// sample of its line: a value of a total ("2.80 GiB / 15.92 GiB", "31.9 / 300 W",
     /// "1905 / 3105 MHz"), as the 1.3.0 GPU page charts show it. `None` lets the chart write
-    /// its newest sample, as it does while the value is not known.
+    /// its newest sample, as it does while the value is not known. A chart of one line per
+    /// logical CPU shows the CPU total the same way, not the line of CPU 0.
     fn page_value_text(&self, cx: &App) -> Option<SharedString> {
         let src = self.source.read(cx);
         let meta = src.meta()?;
-        (meta.value_text_in(true) == ValueText::OfTotal && src.value().is_some())
+        let total = meta.value_text_in(true) == ValueText::OfTotal
+            || matches!(meta.lines, Lines::PerLogical { .. });
+        (total && src.value().is_some())
             .then(|| src.value_text().clone())
             .filter(|t| !t.is_empty())
     }
