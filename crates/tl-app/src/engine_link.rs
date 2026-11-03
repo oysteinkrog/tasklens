@@ -793,7 +793,8 @@ mod tests {
         let copy = file.try_clone().unwrap();
         drop(file);
         assert!(lock_engine(&path).unwrap().is_none());
-        drop(copy);
+        // Unlock before the close: a child forked by another test thread may hold a copy too.
+        release_lock(copy);
 
         let file = lock_engine(&path).unwrap().expect("lock");
         let copy = file.try_clone().unwrap();
