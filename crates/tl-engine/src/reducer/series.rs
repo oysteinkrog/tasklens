@@ -176,7 +176,8 @@ impl SeriesStore {
         SeriesRing::fast_capacity(period_ns)
     }
 
-    /// Appends; creates the ring on first use; a period change sets `gap_next` and keeps the
+    /// Appends; creates the ring on first use; a period change sets `gap_next` (except for the memory
+    /// and CPU group series, tasklens-r9b7g) and keeps the
     /// ring, grown to the new period's capacity when it is shorter, so a series that started at
     /// 1 s still holds 60 s at 10 Hz (crw.83). Flags without `VALID` append a gap sample (value
     /// 0.0). Returns the stored sample, `GAP_BEFORE` included, for the record sink.
@@ -197,7 +198,10 @@ impl SeriesStore {
         entry.source = source;
         if entry.period_ns != period_ns {
             entry.period_ns = period_ns;
-            entry.gap_next = true;
+            // Memory and CPU group series join across a period change: the process sweep moves
+            // from 10 s to 1 s for every group at once, and a gap would cut a column through
+            // all By app bands (tasklens-r9b7g). Suspend and restart still gap.
+            entry.gap_next |= id.metric != MetricId::MEM_GROUP && id.metric != MetricId::CPU_GROUP;
             entry.ring.grow(SeriesStore::fast_capacity(period_ns));
         }
         if entry.stale {
@@ -585,6 +589,49 @@ mod tests {
         let set = store.publish();
         assert!(
             view(&set, group).samples[2]
+                .flags
+                .contains(SampleFlags::GAP_BEFORE)
+        );
+    }
+
+    #[test]
+    fn group_period_change_does_not_gap() {
+        let mem = sid(0, MetricId::MEM_GROUP);
+        let cpu_g = sid(1, MetricId::CPU_GROUP);
+        let total = sid(2, MetricId::CPU_TOTAL);
+        let ids = [mem, cpu_g, total];
+        let mut store = SeriesStore::new();
+        for t in [10, 20, 30] {
+            for id in ids {
+                store.append(id, t * SEC, 1.0, 10 * SEC, SampleFlags::VALID);
+            }
+        }
+        for t in [31, 32] {
+            for id in ids {
+                store.append(id, t * SEC, 2.0, SEC, SampleFlags::VALID);
+            }
+        }
+        let set = store.publish();
+        for id in [mem, cpu_g] {
+            let v = view(&set, id);
+            assert_eq!(v.period_ns, SEC);
+            assert_eq!(v.samples.len(), 5);
+            assert!(v.samples.iter().all(|s| s.is_valid()));
+            assert!(
+                v.samples
+                    .iter()
+                    .all(|s| !s.flags.contains(SampleFlags::GAP_BEFORE))
+            );
+        }
+        let v = view(&set, total);
+        assert_eq!(v.period_ns, SEC);
+        assert!(v.samples[3].flags.contains(SampleFlags::GAP_BEFORE));
+        // A suspend still gaps the group series.
+        store.mark_gap_all();
+        store.append(mem, 33 * SEC, 3.0, SEC, SampleFlags::VALID);
+        let set = store.publish();
+        assert!(
+            view(&set, mem).samples[5]
                 .flags
                 .contains(SampleFlags::GAP_BEFORE)
         );
