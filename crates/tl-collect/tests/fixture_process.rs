@@ -1448,6 +1448,7 @@ fn mem_only_sweep_keeps_cpu_rates() {
     let io0 = io_reads();
 
     set_stat(&root, 8812, 1204, 351_220);
+    fs::write(root.proc_path("stat"), stat_text(100, 900)).expect("write stat");
     mem_only_cpu_clock::set(10 * SEC, 10 * SEC);
     core.sweep_core(&ctx, &mut out);
     let p = only(&out);
@@ -1456,6 +1457,7 @@ fn mem_only_sweep_keeps_cpu_rates() {
 
     // utime grew by 30 ticks and stime by 20 in 1 s: 50 ticks at 100 Hz on 32 CPUs.
     set_stat(&root, 8812 + 30, 1204 + 20, 351_220);
+    fs::write(root.proc_path("stat"), stat_text(200, 1800)).expect("write stat");
     mem_only_cpu_clock::set(11 * SEC, 11 * SEC);
     core.sweep_core(&ctx, &mut out);
     let p = only(&out);
@@ -1479,7 +1481,7 @@ fn mem_only_sweep_keeps_cpu_rates() {
     .expect("restore statm");
     // utime grew by 10 ticks in 1 s: 10 ticks at 100 Hz on 32 CPUs.
     set_stat(&root, 8812 + 40, 1204 + 20, 351_220);
-    fs::write(root.proc_path("stat"), stat_text(300, 700)).expect("write stat");
+    fs::write(root.proc_path("stat"), stat_text(300, 2700)).expect("write stat");
     mem_only_cpu_clock::set(12 * SEC, 12 * SEC);
     core.sweep_core(&ctx, &mut out);
     let p = only(&out);
