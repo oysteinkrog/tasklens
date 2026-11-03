@@ -1663,7 +1663,7 @@ impl Reducer {
             let idx = self.mem_group_device(&g.group.key, &g.group.name)?;
             self.push(idx, MetricId::MEM_GROUP, t, g.bytes as f32, true, period);
             keep.insert(Arc::clone(&g.group.key));
-            shown.push((Arc::clone(&g.group.key), idx));
+            shown.push(idx);
             published.push(MemGroupBand {
                 key: Arc::clone(&g.group.key),
                 name: Arc::clone(&g.group.name),
