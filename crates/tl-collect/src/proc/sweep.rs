@@ -7,13 +7,20 @@
 //! demanded), `io` only when demanded. Rates follow the ADR-008 counter rules: no rate on the first sample,
 //! after a counter reset or across a suspend. Nothing here logs above `trace` per process.
 //!
-//! In memory-only mode (`set_mem_only`, while only the memory group history needs the sweep:
-//! D-036, UI-PRF-060) each process gets `stat` and `status` read every sweep and no `statm`.
-//! `stat` gives the key (pid, start_ticks), so a reused pid is a new process at once. `status`
-//! gives RssAnon, VmRSS, commit, VmSize and the uid, so a uid change shows at the next sweep.
-//! The metadata (exe, cmdline, cgroup) is re-read for a new key, when `comm` changes and every
-//! [`MEM_ONLY_META_REFRESH`] sweeps, so an exec or a cgroup move shows within that many sweeps.
-//! No rates, `io`, fd counts or cgroup stats.
+//! At the end of each sweep the sweep reads the `cpu` line of `/proc/stat` once (a kept file,
+//! first line only) and keeps the previous read. [`CpuWindow`] is the share of all CPUs per
+//! field between the two reads (D-042, UI-PRF-062 "Sweep window"). There is no window on the
+//! first sweep, when a counter of the `cpu` line goes down, across a suspend and after
+//! `reset_baselines`.
+//!
+//! In memory-only mode (`set_mem_only`, while only the memory and CPU group history needs the
+//! sweep: D-036, D-042, UI-PRF-060, UI-PRF-062) each process gets `stat` and `status` read every
+//! sweep and no `statm`. `stat` gives the key (pid, start_ticks) and the utime and stime
+//! baseline, so a reused pid is a new process at once and the CPU rates (`cpu_pct`) work as in
+//! a full sweep. `status` gives RssAnon, VmRSS, commit, VmSize and the uid, so a uid change shows
+//! at the next sweep. The metadata (exe, cmdline, cgroup) is re-read for a new key, when `comm`
+//! changes and every [`MEM_ONLY_META_REFRESH`] sweeps, so an exec or a cgroup move shows within
+//! that many sweeps. No `io`, I/O rates, fd counts or app unit stats.
 //!
 //! `ProcessSampler` (E05-A1) adds metadata, app groups, flags, the P1 extra columns, the app
 //! unit samples and the Frozen state of unit cgroups on top of `SweepCore`. Command lines, paths and user names are never logged
@@ -22,6 +29,7 @@
 use std::cell::Cell;
 use std::fmt::Write as _;
 use std::mem::MaybeUninit;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -48,6 +56,7 @@ use crate::apps::naming::{
 };
 use crate::apps::{AppInfo, AppPaths, AppResolver, ResolveInput, is_app_primary};
 use crate::counters::{Clock, resumed_between};
+use crate::parse::stat::{CpuTimes, parse_cpu_line};
 use crate::parse::topology::parse_cpu_list;
 use crate::pkg::{PackageIndex, Pacman};
 use crate::proc::cgroup::{
@@ -183,6 +192,105 @@ pub struct SweptProc {
     pub validity: FieldValidity,
 }
 
+/// Shares of all CPUs between the `/proc/stat` reads at the ends of two sweeps, each
+/// `100 × Δfield / Δtotal` (D-042, UI-PRF-062 "Sweep window").
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CpuWindow {
+    /// Δtotal (`CpuTimes::total`) in clock ticks, more than 0.
+    pub total_ticks: u64,
+    /// user + nice + system.
+    pub user_nice_system_pct: f64,
+    pub irq_pct: f64,
+    pub softirq_pct: f64,
+    pub steal_pct: f64,
+    /// `CpuTimes::busy`: user + nice + system + irq + softirq + steal. The Utilization value
+    /// over the same window.
+    pub busy_pct: f64,
+}
+
+impl CpuWindow {
+    /// The window from `old` to `new`, or `None` when Δtotal is 0 or a counter went down.
+    /// iowait is left out of the check: Linux can move it backwards (as in the CPU sampler).
+    pub fn between(old: &CpuTimes, new: &CpuTimes) -> Option<Self> {
+        let down = new.user < old.user
+            || new.nice < old.nice
+            || new.system < old.system
+            || new.idle < old.idle
+            || new.irq < old.irq
+            || new.softirq < old.softirq
+            || new.steal < old.steal
+            || new.total() < old.total();
+        if down {
+            return None;
+        }
+        let total_ticks = new.total() - old.total();
+        if total_ticks == 0 {
+            return None;
+        }
+        let pct = |d: u64| 100.0 * d as f64 / total_ticks as f64;
+        let uns = |t: &CpuTimes| t.user + t.nice + t.system;
+        Some(Self {
+            total_ticks,
+            user_nice_system_pct: pct(uns(new) - uns(old)),
+            irq_pct: pct(new.irq - old.irq),
+            softirq_pct: pct(new.softirq - old.softirq),
+            steal_pct: pct(new.steal - old.steal),
+            busy_pct: pct(new.busy() - old.busy()),
+        })
+    }
+}
+
+/// Bytes read from the start of `/proc/stat`. The `cpu` line is at most 5 + 10 × 21 bytes.
+const STAT_HEAD: usize = 256;
+
+/// The `cpu` line of `/proc/stat`: kept open, read from offset 0 once per sweep, first line
+/// only.
+struct StatHead {
+    path: PathBuf,
+    fd: Option<OwnedFd>,
+    buf: [u8; STAT_HEAD],
+    /// The last good read and the clock right before it.
+    prev: Option<(Clock, CpuTimes)>,
+}
+
+impl StatHead {
+    fn new(root: &SysRoot) -> Self {
+        Self {
+            path: root.proc_path("stat"),
+            fd: None,
+            buf: [0; STAT_HEAD],
+            prev: None,
+        }
+    }
+
+    /// One read. On an error the file is closed and the next read opens it again.
+    fn read(&mut self) -> Result<CpuTimes, CollectError> {
+        let fd = match self.fd.take() {
+            Some(fd) => fd,
+            None => rustix::fs::open(&self.path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?,
+        };
+        let n = rustix::io::pread(&fd, &mut self.buf, 0)?;
+        let times = parse_cpu_line(&self.buf[..n])?;
+        self.fd = Some(fd);
+        Ok(times)
+    }
+
+    /// Reads the `cpu` line at `clock` and returns the window since the last good read. A failed
+    /// read drops the baseline, so the next window starts at the next good read.
+    fn window(&mut self, clock: Clock) -> Option<CpuWindow> {
+        let cur = self
+            .read()
+            .inspect_err(|e| tracing::trace!(error = %e, "/proc/stat cpu line not read"))
+            .ok();
+        let prev = std::mem::replace(&mut self.prev, cur.map(|t| (clock, t)));
+        let ((was, old), new) = (prev?, cur?);
+        if resumed_between(was, clock) {
+            return None;
+        }
+        CpuWindow::between(&old, &new)
+    }
+}
+
 /// Per-process state kept between sweeps.
 pub struct SweepCore {
     root: SysRoot,
@@ -200,11 +308,16 @@ pub struct SweepCore {
     clock: fn() -> (TimeNs, u64),
     /// Memory-only mode: see the module doc.
     mem_only: bool,
+    stat_head: StatHead,
+    /// The window of the last sweep.
+    window: Option<CpuWindow>,
 }
 
 impl SweepCore {
     pub fn new(root: SysRoot) -> Self {
         Self {
+            stat_head: StatHead::new(&root),
+            window: None,
             root,
             prev: FxHashMap::default(),
             next: FxHashMap::default(),
@@ -235,9 +348,15 @@ impl SweepCore {
         self
     }
 
-    /// Forgets every baseline, so the next sweep gives no rates.
+    /// Forgets every baseline, so the next sweep gives no rates and no CPU window.
     pub fn reset_baselines(&mut self) {
         self.prev.clear();
+        self.stat_head.prev = None;
+    }
+
+    /// The CPU window of the last sweep (see the module doc).
+    pub fn cpu_window(&self) -> Option<CpuWindow> {
+        self.window
     }
 
     /// Test hook: true when `key` has a baseline for the next sweep.
@@ -247,8 +366,9 @@ impl SweepCore {
     }
 
     /// Reads every process into `out` (cleared first) and returns (observed_start,
-    /// observed_end). A pid that goes away during the sweep is skipped. A missing `<proc>`
-    /// directory gives an empty result.
+    /// observed_end), then reads the `cpu` line of `/proc/stat` for [`Self::cpu_window`]. A pid
+    /// that goes away during the sweep is skipped. A missing `<proc>` directory gives an empty
+    /// result.
     pub fn sweep_core(&mut self, ctx: &SweepCtx, out: &mut Vec<SweptProc>) -> (TimeNs, TimeNs) {
         self.sweep_core_with(ctx, out, &mut |_, _| {})
     }
@@ -305,8 +425,9 @@ impl SweepCore {
         self.next.clear();
         let live = &self.prev;
         self.status.retain(|k, _| live.contains_key(k));
-        let observed_end = (self.clock)().0;
-        (observed_start, observed_end)
+        let (boot_ns, mono_ns) = (self.clock)();
+        self.window = self.stat_head.window(Clock { boot_ns, mono_ns });
+        (observed_start, boot_ns)
     }
 }
 
@@ -576,9 +697,9 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
         validity,
     };
 
-    // Memory-only mode gives no rates: the series it feeds need none, and `io` is not read.
-    let base = if mem_only { None } else { prev.get(&key) };
-    let io_rates = match base.and_then(|old| rate_base(old, &cur)) {
+    // Memory-only mode keeps the CPU rates too (D-042): the CPU group series need `cpu_pct`.
+    // It reads no `io`, so `cur.io` is `None` there and the I/O rates stay WarmingUp.
+    let io_rates = match prev.get(&key).and_then(|old| rate_base(old, &cur)) {
         Some((old, dt_s)) => {
             apply_rates(ctx, old, &cur, dt_s, &mut p);
             p.validity.set(ProcessField::Cpu, Validity::Valid);
@@ -734,6 +855,8 @@ pub struct SweepOutput {
     pub extras_p2: Vec<ProcessExtrasP2>,
     pub apps: Vec<AppUnitSample>,
     pub coverage: Coverage,
+    /// The `/proc/stat` window of this sweep, `None` when it has none (see the module doc).
+    pub cpu_window: Option<CpuWindow>,
 }
 
 /// What the engine passes to `ProcessSampler::sweep` besides `SweepCtx`.
@@ -889,9 +1012,9 @@ impl ProcessSampler {
         self.app_prev.clear();
     }
 
-    /// Memory-only mode (see the module doc): for the memory group series alone. The metadata
-    /// is re-read every `MEM_ONLY_META_REFRESH` sweeps and no app unit is sampled. A change
-    /// forgets every baseline.
+    /// Memory-only mode (see the module doc): for the memory and CPU group series alone. The
+    /// metadata is re-read every `MEM_ONLY_META_REFRESH` sweeps and no app unit is sampled. A
+    /// change forgets every baseline.
     pub fn set_mem_only(&mut self, on: bool) {
         if self.core.mem_only != on {
             self.core.set_mem_only(on);
@@ -969,6 +1092,7 @@ impl ProcessSampler {
         let (start, end) = core.sweep_core_with(ctx, swept, &mut |p, dir| build.push(p, dir));
         out.observed_start = start;
         out.observed_end = end;
+        out.cpu_window = self.core.cpu_window();
 
         self.set_flags(ctx, inp, out);
         if !self.core.mem_only {

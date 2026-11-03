@@ -144,6 +144,18 @@ pub fn parse_stat(buf: &[u8], out: &mut StatData) -> Result<(), CollectError> {
     if seen_total { Ok(()) } else { Err(NO_CPU_LINE) }
 }
 
+/// Parses the `cpu` line at the start of `head`, the first bytes of /proc/stat. The rest of the
+/// file is not read (UI-PRF-062 "Sweep window"). `head` must hold the whole first line with its
+/// newline: a line cut short is `Parse { what: "cpu line" }`, and a first line that is not the
+/// `cpu` line is `Parse { what: "no cpu line" }`.
+pub fn parse_cpu_line(head: &[u8]) -> Result<CpuTimes, CollectError> {
+    let end = memchr(b'\n', head).ok_or(CPU_LINE)?;
+    match split_key(&head[..end]) {
+        (b"cpu", rest) => parse_cpu_fields(rest),
+        _ => Err(NO_CPU_LINE),
+    }
+}
+
 /// Splits a line at its first space or tab: (key, the rest).
 fn split_key(line: &[u8]) -> (&[u8], &[u8]) {
     match line.iter().position(|&b| b == b' ' || b == b'\t') {
@@ -274,6 +286,46 @@ mod tests {
         let err = parse_stat(b"cpu  18446744073709551616 0 0 0\n", &mut out).unwrap_err();
         assert!(matches!(err, CollectError::Parse { what: "number", .. }));
         assert!(parse_stat(b"cpu  18446744073709551615 0 0 0\n", &mut out).is_ok());
+    }
+
+    #[test]
+    fn cpu_line_only() {
+        let mut full = StatData::default();
+        parse_stat(OWNER_DESKTOP, &mut full).unwrap();
+        // The whole file and its first line alone give the same times.
+        assert_eq!(parse_cpu_line(OWNER_DESKTOP).unwrap(), full.total);
+        let end = OWNER_DESKTOP.iter().position(|&b| b == b'\n').unwrap();
+        assert_eq!(parse_cpu_line(&OWNER_DESKTOP[..=end]).unwrap(), full.total);
+        // Cut before its newline.
+        let err = parse_cpu_line(&OWNER_DESKTOP[..end]).unwrap_err();
+        assert!(matches!(
+            err,
+            CollectError::Parse {
+                what: "cpu line",
+                ..
+            }
+        ));
+        // The first line is not the cpu line.
+        let err = parse_cpu_line(b"cpu0 1 1 1 1\ncpu  1 1 1 1\n").unwrap_err();
+        assert!(matches!(
+            err,
+            CollectError::Parse {
+                what: "no cpu line",
+                ..
+            }
+        ));
+        assert!(parse_cpu_line(b"").is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn prop_parse_cpu_line_never_panics(
+            arbitrary in prop::collection::vec(any::<u8>(), 0..=512),
+            mutated in mutated_owner_desktop(),
+        ) {
+            let _ = parse_cpu_line(&arbitrary);
+            let _ = parse_cpu_line(&mutated);
+        }
     }
 
     #[test]

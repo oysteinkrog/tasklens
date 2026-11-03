@@ -1089,7 +1089,7 @@ fn meta_comm_falls_back_to_stat() {
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tl_collect::proc::fdcount::fd_count_fallbacks;
-use tl_collect::proc::sweep::{IoState, SweepCore, SweepCtx, SweptProc};
+use tl_collect::proc::sweep::{CpuWindow, IoState, SweepCore, SweepCtx, SweptProc};
 use tl_model::validity::{ProcessField, Validity};
 
 /// A settable clock for `SweepCore::with_clock`, one per test so parallel tests do not share it.
@@ -1380,7 +1380,14 @@ fn sweep_mem_only_reads_stat_and_status() {
         assert_eq!(p.rss_anon_bytes, 1234 * 1024);
         assert_eq!(p.rss_bytes, 244_936 * 1024);
         assert_eq!(p.validity.get(ProcessField::RssAnon), Validity::Valid);
-        assert_eq!(p.validity.get(ProcessField::Cpu), Validity::WarmingUp);
+        // CPU rates from the second sweep on (D-042); no io, so the I/O rates stay WarmingUp.
+        let cpu = if i == 1 {
+            Validity::WarmingUp
+        } else {
+            Validity::Valid
+        };
+        assert_eq!(p.validity.get(ProcessField::Cpu), cpu);
+        assert_eq!(p.validity.get(ProcessField::IoRead), Validity::WarmingUp);
         assert_eq!(status_reads(), status0 + i, "status read every sweep");
     }
     assert_eq!(io_reads(), io0);
@@ -1423,6 +1430,168 @@ fn sweep_mem_only_reads_stat_and_status() {
     assert_eq!(p.rss_anon_bytes, (61_234 - 60_925) * page);
     assert_eq!(status_reads(), status1 + 1);
     assert_eq!(io_reads(), io0 + 1);
+}
+
+sweep_clock!(mem_only_cpu_clock);
+
+/// D-042, UI-PRF-062 "Sweep rate": memory-only mode keeps each pid's utime and stime baseline
+/// from the `stat` it already reads, so the second sweep has `cpu_pct`. It still reads no
+/// `statm`, `io` or fd count.
+#[test]
+fn mem_only_sweep_keeps_cpu_rates() {
+    let (_tmp, root) = sweep_root();
+    fs::remove_file(root.proc_path("4201/statm")).expect("remove statm");
+    let mut core = SweepCore::new(root.clone()).with_clock(mem_only_cpu_clock::now);
+    core.set_mem_only(true);
+    let ctx = sweep_ctx(false);
+    let mut out = Vec::new();
+    let io0 = io_reads();
+
+    set_stat(&root, 8812, 1204, 351_220);
+    mem_only_cpu_clock::set(10 * SEC, 10 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert_eq!(p.cpu_pct, 0.0);
+    assert_eq!(p.validity.get(ProcessField::Cpu), Validity::WarmingUp);
+
+    // utime grew by 30 ticks and stime by 20 in 1 s: 50 ticks at 100 Hz on 32 CPUs.
+    set_stat(&root, 8812 + 30, 1204 + 20, 351_220);
+    mem_only_cpu_clock::set(11 * SEC, 11 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert!((p.cpu_pct - 1.5625).abs() < 0.001, "cpu_pct {}", p.cpu_pct);
+    assert!((p.cpu_relative_pct - 50.0).abs() < 0.001);
+    assert!((p.cpu_user_pct - 0.9375).abs() < 0.001);
+    assert!((p.cpu_kernel_pct - 0.625).abs() < 0.001);
+    assert_eq!(p.validity.get(ProcessField::Cpu), Validity::Valid);
+    assert_eq!(p.validity.get(ProcessField::IoRead), Validity::WarmingUp);
+    assert_eq!(p.rss_anon_bytes, 1234 * 1024, "RssAnon from status");
+    assert!(p.fd_count.is_none());
+    assert_eq!(io_reads(), io0, "no io read");
+
+    // Turning the mode off forgets the baseline, as before.
+    core.set_mem_only(false);
+    fs::write(
+        root.proc_path("4201/statm"),
+        fixture_bytes("process-edge", "proc/4201/statm"),
+    )
+    .expect("restore statm");
+    mem_only_cpu_clock::set(12 * SEC, 12 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    assert_eq!(
+        only(&out).validity.get(ProcessField::Cpu),
+        Validity::WarmingUp
+    );
+}
+
+sweep_clock!(window_clock);
+
+/// One sweep at the given clock; the CPU window it gives.
+fn window_at(core: &mut SweepCore, boot_ns: u64, mono_ns: u64) -> Option<CpuWindow> {
+    window_clock::set(boot_ns, mono_ns);
+    core.sweep_core(&sweep_ctx(false), &mut Vec::new());
+    core.cpu_window()
+}
+
+/// A `/proc/stat` whose `cpu` line has only user and idle set.
+fn stat_text(user: u64, idle: u64) -> String {
+    format!("cpu  {user} 0 0 {idle} 0 0 0 0 0 0\ncpu0 {user} 0 0 {idle} 0 0 0 0 0 0\nctxt 1\n")
+}
+
+/// D-042, UI-PRF-062 "Sweep window": two `/proc/stat` reads give the share of each field over
+/// the window. The first sweep, a counter that goes down, a resume, `reset_baselines` and a
+/// failed read give no window.
+#[test]
+fn cpu_window_from_stat() {
+    let (_tmp, root) = sweep_root();
+    let stat = root.proc_path("stat");
+    let mut core = SweepCore::new(root.clone()).with_clock(window_clock::now);
+
+    // Δ: user 300, nice 50, system 100, idle 430, iowait 50, irq 20, softirq 30, steal 20, so
+    // Δtotal is 1000. guest and guest_nice are already in user and nice and are not counted.
+    fs::write(
+        &stat,
+        "cpu  1000 200 300 8000 100 40 60 20 5 1\ncpu0 1000 200 300 8000 100 40 60 20 5 1\n\
+         intr 1 2 3\nctxt 10\n",
+    )
+    .expect("write stat");
+    assert_eq!(window_at(&mut core, SEC, SEC), None, "first sweep");
+    fs::write(
+        &stat,
+        "cpu  1300 250 400 8430 150 60 90 40 7 3\ncpu0 1300 250 400 8430 150 60 90 40 7 3\n\
+         intr 1 2 3\nctxt 20\n",
+    )
+    .expect("write stat");
+    let w = window_at(&mut core, 2 * SEC, 2 * SEC).expect("a window");
+    assert_eq!(w.total_ticks, 1000);
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    assert!(close(w.user_nice_system_pct, 45.0), "{w:?}");
+    assert!(close(w.irq_pct, 2.0), "{w:?}");
+    assert!(close(w.softirq_pct, 3.0), "{w:?}");
+    assert!(close(w.steal_pct, 2.0), "{w:?}");
+    assert!(close(w.busy_pct, 52.0), "{w:?}");
+    assert!(close(
+        w.busy_pct,
+        w.user_nice_system_pct + w.irq_pct + w.softirq_pct + w.steal_pct
+    ));
+
+    // No time on the cpu line (Δtotal 0): no window.
+    assert_eq!(window_at(&mut core, 3 * SEC, 3 * SEC), None);
+
+    // A counter that goes down (the counter-reset fixture: user 9800 to 5320), then the next
+    // read has a window again. A fresh core, so step0 is its first read.
+    let mut core = SweepCore::new(root.clone()).with_clock(window_clock::now);
+    fs::write(&stat, fixture_bytes("counter-reset", "step0/proc/stat")).expect("write stat");
+    assert_eq!(window_at(&mut core, 4 * SEC, 4 * SEC), None, "first sweep");
+    fs::write(&stat, fixture_bytes("counter-reset", "step1/proc/stat")).expect("write stat");
+    assert_eq!(
+        window_at(&mut core, 5 * SEC, 5 * SEC),
+        None,
+        "counter reset"
+    );
+    fs::write(&stat, "cpu  5420 200 4090 81500 390 98 161 0 0 0\n").expect("write stat");
+    let w = window_at(&mut core, 6 * SEC, 6 * SEC).expect("a window after the reset");
+    assert_eq!(w.total_ticks, 200);
+    assert!(close(w.user_nice_system_pct, 50.0), "{w:?}");
+    assert!(close(w.busy_pct, 50.0), "{w:?}");
+
+    // A resume: 5 s of boottime and 10 ms of monotonic time.
+    fs::write(&stat, stat_text(100, 100)).expect("write stat");
+    window_at(&mut core, 10 * SEC, 10 * SEC);
+    fs::write(&stat, stat_text(150, 150)).expect("write stat");
+    assert_eq!(
+        window_at(&mut core, 15 * SEC, 10 * SEC + 10_000_000),
+        None,
+        "resume"
+    );
+    fs::write(&stat, stat_text(200, 200)).expect("write stat");
+    let w = window_at(&mut core, 16 * SEC, 11 * SEC).expect("a window after the resume");
+    assert!(close(w.busy_pct, 50.0), "{w:?}");
+
+    // reset_baselines.
+    core.reset_baselines();
+    fs::write(&stat, stat_text(300, 200)).expect("write stat");
+    assert_eq!(window_at(&mut core, 17 * SEC, 12 * SEC), None, "reset");
+    fs::write(&stat, stat_text(400, 200)).expect("write stat");
+    let w = window_at(&mut core, 18 * SEC, 13 * SEC).expect("a window after reset_baselines");
+    assert!(close(w.busy_pct, 100.0), "{w:?}");
+
+    // A failed read (a cpu line that does not parse) drops the baseline: no window at the
+    // failure and none at the next read.
+    fs::write(&stat, "cpu  x\n").expect("write stat");
+    assert_eq!(
+        window_at(&mut core, 19 * SEC, 14 * SEC),
+        None,
+        "failed read"
+    );
+    fs::write(&stat, stat_text(500, 300)).expect("write stat");
+    assert_eq!(
+        window_at(&mut core, 20 * SEC, 15 * SEC),
+        None,
+        "no baseline"
+    );
+    fs::write(&stat, stat_text(600, 300)).expect("write stat");
+    assert!(window_at(&mut core, 21 * SEC, 16 * SEC).is_some());
 }
 
 use tl_collect::proc::detail::{DetailRead, ThreadInfo, ThreadReader, WchanValue, thread_exists};
@@ -2790,6 +2959,44 @@ fn sweep_2000_under_gate() {
         times[0],
         times[times.len() - 1]
     );
+}
+
+/// The D-036 budget for the memory-only sweep, which now keeps CPU baselines (D-042, UI-PRF-062
+/// "Sweep rate"): on the 2,000-process root (more than the 1,500 of the budget) the median CPU
+/// time of 50 sweeps is at most 60 ms and the longest at most 100 ms. Owner machine:
+/// `cargo test -p tl-collect --test fixture_process mem_only_sweep_within_budget -- --ignored`.
+#[test]
+#[ignore = "perf gate: owner machine"]
+fn mem_only_sweep_within_budget() {
+    use rustix::time::{ClockId, clock_gettime};
+    const MEDIAN: std::time::Duration = std::time::Duration::from_millis(60);
+    const MAX: std::time::Duration = std::time::Duration::from_millis(100);
+    let mut scaled = scaled_root::scaled();
+    // The sweep reads the cpu line of /proc/stat at its end.
+    fs::write(
+        scaled.root_dir.path().join("proc/stat"),
+        fixture_bytes("owner-desktop", "proc/stat"),
+    )
+    .expect("write stat");
+    scaled.sampler.set_mem_only(true);
+    scaled.sweep(false);
+    let cpu_time = || {
+        let t = clock_gettime(ClockId::ThreadCPUTime);
+        std::time::Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+    };
+    let mut times: Vec<std::time::Duration> = (0..50)
+        .map(|_| {
+            let t = cpu_time();
+            scaled.sweep(false);
+            cpu_time() - t
+        })
+        .collect();
+    assert_eq!(scaled.out.records.len(), scaled_root::SCALED_PIDS);
+    times.sort_unstable();
+    let (median, max) = (times[times.len() / 2], times[times.len() - 1]);
+    eprintln!("memory-only sweep CPU time: median {median:?}, max {max:?}");
+    assert!(median <= MEDIAN, "median {median:?} over {MEDIAN:?}");
+    assert!(max <= MAX, "max {max:?} over {MAX:?}");
 }
 
 #[test]
