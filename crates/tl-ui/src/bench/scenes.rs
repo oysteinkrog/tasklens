@@ -37,22 +37,22 @@ use super::stats::{
     process_cpu_pct, read_rss_pss_mb, write_json,
 };
 use super::synth::SEED;
-use crate::anim::{AnimationDriver, PaintRecord};
 use crate::app::TasklensUi;
-use crate::app_env::{AppEnv, UiInit};
-use crate::chart::view::ChartView;
-use crate::chart::{
+use tl_ui_base::anim::{AnimationDriver, PaintRecord};
+use tl_ui_base::app_env::{AppEnv, UiInit};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::shell::APP_ID;
+use tl_ui_base::theme::current;
+use tl_ui_chart::chart::view::ChartView;
+use tl_ui_chart::chart::{
     ChartLabels, ChartSeries, ChartSpec, GridStyle, ValueAlign, ValueFormat, YScale,
 };
-use crate::components::icons::TlAssets;
-use crate::host::HostContext;
-use crate::pages::performance::cpu::CpuPage;
-use crate::pages::performance::{DeviceKey, PerformancePage};
-use crate::pages::processes::ProcessesPage;
-use crate::pages::processes::delegate::ProcessDelegate;
-use crate::shell::APP_ID;
-use crate::table::tree_table::TlTreeTable;
-use crate::theme::current;
+use tl_ui_kit::components::icons::TlAssets;
+use tl_ui_perf::performance::cpu::CpuPage;
+use tl_ui_perf::performance::{DeviceKey, PerformancePage};
+use tl_ui_procs::pages::processes::ProcessesPage;
+use tl_ui_procs::pages::processes::delegate::ProcessDelegate;
+use tl_ui_table::table::tree_table::TlTreeTable;
 
 /// Phase-0 fixture window size, logical px.
 pub const WINDOW_W: f32 = 1600.;

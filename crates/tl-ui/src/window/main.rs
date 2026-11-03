@@ -56,7 +56,6 @@ use tracing::{debug, error, info, warn};
 
 use super::filter::{FilterBox, ReturnFocus, shown_on};
 use super::host_tabs::{HostTabInfo, HostTabs, cpu_percent};
-use super::registry::{GlobalRegistry, WindowKey};
 use super::settings;
 use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChip};
 use super::tabstrip::{TabStrip, tween_progress};
@@ -66,60 +65,61 @@ use super::titlebar::{
     TitleBarView, bar_height_of, is_client, keep_above_supported, minimize_main, zoom,
 };
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
-use crate::action_tracker::reconnecting_refusal;
-use crate::actions::{
+use crate::app::{OpenHooks, UiExit, request_exit};
+use crate::pages::information::InformationPage;
+use crate::pages::information::actions::CopyInformationAll;
+use crate::pages::information::section::InfoSectionId;
+use tl_ui_base::action_tracker::reconnecting_refusal;
+use tl_ui_base::anim::{AnimationDriver, FrameStats};
+use tl_ui_base::app_env::{AppRequestHandler, BootSettings, StartOptions, ToastKindTag};
+use tl_ui_base::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
+use tl_ui_base::host::{HostContext, HostRegistry, HostTab};
+use tl_ui_base::hosts_edit;
+use tl_ui_base::hub::{ComponentMask, LinkChanged, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings, animations_on};
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::numeric_style;
+use tl_ui_base::theme::store::apply_metrics;
+use tl_ui_base::theme::{ThemeStore, UiMetrics, bump_style_version, current, metrics};
+use tl_ui_kit::actions::{
     CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, DisconnectHost, EditHost,
     EscapeChain, FocusFilter, GLOBAL_CONTEXT, MinimizeWindow, NextTab, PICKER_CONTEXT, PrevTab,
     Quit, ReconnectHost, RefreshCurrentTab, RemoveHost, SHELL_FILTER_CONTEXT, ScaleDown,
     ScaleReset, ScaleUp, SelectHost, SelectTab, SetViewMode, ShowMainWindow, ShowSystemInformation,
     StartWindowPick, ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow, ZoomWindow,
 };
-use crate::anim::{AnimationDriver, FrameStats};
-use crate::app::{OpenHooks, UiExit, request_exit};
-use crate::app_env::{AppRequestHandler, BootSettings, StartOptions, ToastKindTag};
-use crate::components::banner::{TlBanner, TlBannerKind};
-use crate::components::dialog::CONTEXT as DIALOG_CONTEXT;
-use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
-use crate::components::shield::StartHelperSession;
-use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
-use crate::components::window_frame::ToggleAlwaysOnTop;
-use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
-use crate::host::{HostContext, HostRegistry, HostTab};
-use crate::hosts_edit;
-use crate::hub::{ComponentMask, LinkChanged, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args, tr_en};
-use crate::pages::connections::ConnectionsPage;
-use crate::pages::connections::actions::GoToConnection;
-use crate::pages::information::InformationPage;
-use crate::pages::information::actions::CopyInformationAll;
-use crate::pages::information::section::InfoSectionId;
-use crate::pages::performance::status_bar::{self as machine_status, Slot, StatusBar};
-use crate::pages::performance::{PerformancePage, SummaryToggled};
-use crate::pages::processes::ProcessesPage;
-use crate::pages::processes::jump::JumpTexts;
-use crate::pages::processes::pick::{self, PickModifier, PickStep, PickWatch};
-use crate::pages::processes::toolbar::ProcessesToolbar;
-use crate::pages::services::ServicesPage;
-use crate::pages::services::actions::{GoToService, ManagerArg};
-use crate::pages::startup::StartupPage;
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings, animations_on};
-use crate::table::actions::TABLE_CONTEXT;
-use crate::template::Template;
-use crate::text::style::numeric_style;
-use crate::theme::store::apply_metrics;
-use crate::theme::{ThemeStore, UiMetrics, bump_style_version, current, metrics};
-pub(crate) use crate::tray_bridge::tray_available;
-use crate::tray_bridge::{TrayBridge, TrayStatus};
+use tl_ui_kit::components::banner::{TlBanner, TlBannerKind};
+use tl_ui_kit::components::dialog::CONTEXT as DIALOG_CONTEXT;
+use tl_ui_kit::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
+use tl_ui_kit::components::shield::StartHelperSession;
+use tl_ui_kit::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::ToggleAlwaysOnTop;
+use tl_ui_perf::performance::status_bar::{self as machine_status, Slot, StatusBar};
+use tl_ui_perf::performance::{PerformancePage, SummaryToggled};
+pub(crate) use tl_ui_perf_core::tray_bridge::tray_available;
+use tl_ui_perf_core::tray_bridge::{TrayBridge, TrayStatus};
+use tl_ui_procs::pages::processes::ProcessesPage;
+use tl_ui_procs::pages::processes::jump::JumpTexts;
+use tl_ui_procs::pages::processes::pick::{self, PickModifier, PickStep, PickWatch};
+use tl_ui_procs::pages::processes::toolbar::ProcessesToolbar;
+use tl_ui_sys::pages::connections::ConnectionsPage;
+use tl_ui_sys::pages::connections::actions::GoToConnection;
+use tl_ui_sys::pages::services::ServicesPage;
+use tl_ui_sys::pages::services::actions::{GoToService, ManagerArg};
+use tl_ui_sys::pages::startup::StartupPage;
+use tl_ui_table::table::actions::TABLE_CONTEXT;
 
 pub use super::tabstrip::TAB_STRIP_H;
 pub use super::titlebar::TITLEBAR_H;
-use crate::shell::PICK_NONE_TEXT;
-pub use crate::shell::{
+use tl_ui_base::shell::PICK_NONE_TEXT;
+pub use tl_ui_base::shell::{
     APP_ID, FilterChanged, GlobalShellEvents, HelperInstalled, MemGroupCleared, PauseChanged,
     ShellEvents, ShellPage, ShellState, WINDOW_TITLE, main_window_title,
 };
-use crate::shell::{DiskEject, ProcessJump, PublicIpFetch, ShellApi};
+use tl_ui_base::shell::{DiskEject, ProcessJump, PublicIpFetch, ShellApi};
 
 /// Key contexts that keep a typed key from going to the filter even below a "Table": the kit
 /// and tl-ui names of inputs, the filter itself, menus and dialogs (E20-A2).
@@ -134,7 +134,7 @@ const NO_TYPE_TO_FILTER: [&str; 7] = [
 ];
 
 /// The main window's key context with more than one host: "Global" plus
-/// [`crate::actions::HOSTS_CONTEXT`], where Ctrl+1 to Ctrl+9 select hosts (UI-SHL-008).
+/// [`tl_ui_kit::actions::HOSTS_CONTEXT`], where Ctrl+1 to Ctrl+9 select hosts (UI-SHL-008).
 const GLOBAL_WITH_HOSTS: &str = "Global Hosts";
 
 /// How often the host tabs read the link status and flip the connecting pulse (1 Hz pulse).
@@ -1051,7 +1051,7 @@ pub fn main_window_options(cx: &App) -> WindowOptions {
         }),
         window_background: WindowBackgroundAppearance::Opaque,
         window_min_size: Some(size(px(MIN_W), px(MIN_H))),
-        app_id: Some(crate::app_env::window_app_id(cx)),
+        app_id: Some(tl_ui_base::app_env::window_app_id(cx)),
         window_bounds: Some(restored_bounds(&TlSettings::state(cx).window)),
         focus: !start_hidden,
         show: !start_hidden,
@@ -1161,8 +1161,8 @@ pub fn install_shell_api(cx: &mut App) {
         },
         process_jump: |window, cx, jump| run_process_jump(window, cx, jump),
         disk_eject: |cx, e: DiskEject| {
-            let key = crate::pages::performance::DeviceKey(e.key);
-            crate::windows::disk_in_use::start_eject(&e.host, key, e.idx, e.hub, e.label, cx);
+            let key = tl_ui_perf::performance::DeviceKey(e.key);
+            tl_ui_procs::windows::disk_in_use::start_eject(&e.host, key, e.idx, e.hub, e.label, cx);
         },
     });
 }
@@ -1171,7 +1171,7 @@ pub fn install_shell_api(cx: &mut App) {
 /// timeline). Selecting the tab builds the page when it is not built yet.
 fn run_process_jump(window: &mut Window, cx: &mut App, jump: ProcessJump) {
     if let ProcessJump::HistoryAt(t) = jump {
-        crate::pages::processes::history::open_at(t, window, cx);
+        tl_ui_procs::pages::processes::history::open_at(t, window, cx);
         return;
     }
     let built = ShellApi::page::<ProcessesPage>(cx, Tab::Processes).is_some();
@@ -1382,7 +1382,7 @@ impl MainWindow {
         let toasts = cx.new(|cx| ToastQueue::new(window, cx, top));
         let anim = cx.new(AnimationDriver::new);
         AnimationDriver::register(&anim, window, cx);
-        crate::theme::store::set_anim_window(window.window_handle(), cx);
+        tl_ui_base::theme::store::set_anim_window(window.window_handle(), cx);
         let hosts: Vec<HostSlot> = tabs
             .into_iter()
             .map(|tab| Self::host_slot(tab, window, cx))

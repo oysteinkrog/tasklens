@@ -18,7 +18,7 @@ use smallvec::SmallVec;
 
 use super::section::InfoRow;
 use super::sections::BLOCK_FIRST_LABELS;
-use crate::components::kv_grid::{KvWords, shown_text_in};
+use tl_ui_kit::components::kv_grid::{KvWords, shown_text_in};
 
 /// The rows of one section that stay visible for `needle`, which is already lowercased. An
 /// empty result hides the section.

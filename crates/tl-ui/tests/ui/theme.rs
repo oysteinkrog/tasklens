@@ -5,9 +5,9 @@ use std::rc::Rc;
 
 use gpui_kit::component::theme::Theme;
 use gpui_kit::{App, Hsla, TestAppContext, rgb};
-use tl_ui::theme::store::{init, init_with_file};
-use tl_ui::theme::user_store::{PersistTheme, ThemePersist};
-use tl_ui::theme::{ThemeError, ThemeEvent, ThemeMode, ThemeStore, UiMetrics, current};
+use tl_ui_base::theme::store::{init, init_with_file};
+use tl_ui_base::theme::user_store::{PersistTheme, ThemePersist};
+use tl_ui_base::theme::{ThemeError, ThemeEvent, ThemeMode, ThemeStore, UiMetrics, current};
 use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 fn hex(v: u32) -> Hsla {
@@ -74,12 +74,12 @@ fn init_user(json: &str, cx: &mut App) -> Rc<RefCell<Vec<PersistTheme>>> {
 
 /// A themes file with one light user theme "Ocean": Default Light's colours with a new name.
 fn ocean_light_file() -> String {
-    let builtin = tl_ui::theme::builtin::load();
+    let builtin = tl_ui_base::theme::builtin::load();
     let light = &builtin[1];
     assert_eq!(&*light.name, "Default Light");
     let mut def = light.clone();
     def.name = "Ocean".into();
-    tl_ui::theme::user_store::serialize_user_themes(&[def])
+    tl_ui_base::theme::user_store::serialize_user_themes(&[def])
 }
 
 #[gpui_kit::test]
@@ -147,8 +147,8 @@ fn scheme_change_from_snapshot_switches_theme(cx: &mut TestAppContext) {
     use std::sync::Arc;
 
     use tl_model::client::EngineClient;
-    use tl_ui::theme::metrics;
     use tl_ui::{AppEnv, TasklensUi, UiInit};
+    use tl_ui_base::theme::metrics;
     use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 

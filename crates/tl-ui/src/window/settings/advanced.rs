@@ -16,17 +16,17 @@ use tracing::warn;
 use super::{
     PageBuilder, PageId, PickValue, SettingsWindow, info_toast, kind_toast, read, value_matches,
 };
-use crate::action_tracker::ToastTexts;
-use crate::app_env::{AdapterInfo, AppEnv};
-use crate::components::button::TlButtonKind;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::i18n::{tr, tr_args};
-use crate::settings_global::{SettingKey, SettingValue, TlSettings};
-use crate::theme::ThemeStore;
 use crate::window::about::{file_uri, send_open_uri};
 use crate::window::confirm::ResetSettings;
 use crate::window::menus_settings::{adapter_setting_value, probe_adapters};
+use tl_ui_base::action_tracker::ToastTexts;
+use tl_ui_base::app_env::{AdapterInfo, AppEnv};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_base::theme::ThemeStore;
+use tl_ui_kit::components::button::TlButtonKind;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
 
 gpui_kit::actions!(tasklens, [OpenSettingsFolder]);
 

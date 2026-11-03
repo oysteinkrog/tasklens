@@ -13,9 +13,9 @@ use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
 use tl_model::time::now_boot_ns;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::cpu_grid::CpuGrid;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_perf::performance::cpu_grid::CpuGrid;
 use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -85,17 +85,17 @@ fn hover(vcx: &mut VisualTestContext, x: f32, y: f32) {
 fn rig(cx: &mut TestAppContext) -> (gpui_kit::Entity<Root>, &mut VisualTestContext) {
     let grid = cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         let client: Arc<dyn EngineClient> = FakeEngine::new();
         let hub = cx.new(|cx| SnapshotHub::new(client, cx));
-        let theme = tl_ui::theme::current(cx).clone();
+        let theme = tl_ui_base::theme::current(cx).clone();
         let devices: Vec<DeviceIdx> = (0..16).map(|id| DeviceIdx(100 + id)).collect();
         CpuGrid::new(
             &hub,

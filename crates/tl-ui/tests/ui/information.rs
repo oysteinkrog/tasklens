@@ -11,11 +11,11 @@ use gpui_kit::{
     TestAppContext, VisualTestContext, Window, div, px,
 };
 use tl_model::validity::Validity;
-use tl_ui::components::kv_grid::{KvWords, TlValue, UnsupportedWord, kv_words, value_look_in};
-use tl_ui::i18n::init_strings;
 use tl_ui::pages::information::actions::CopyInformationSection;
 use tl_ui::pages::information::section::{InfoRow, InfoSection, InfoSectionId, value_copy_text};
-use tl_ui::theme::{current, metrics};
+use tl_ui_base::i18n::init_strings;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::kv_grid::{KvWords, TlValue, UnsupportedWord, kv_words, value_look_in};
 use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 type Dispatched = Rc<RefCell<Vec<InfoSectionId>>>;
@@ -26,8 +26,8 @@ fn setup(cx: &mut App, scale_pct: u16) {
         ui_scale_pct: scale_pct,
         ..AppearanceSettings::default()
     };
-    tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-    tl_ui::components::kv_grid::init(cx);
+    tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+    tl_ui_kit::components::kv_grid::init(cx);
     init_strings(cx, "en-US");
 }
 
@@ -277,7 +277,7 @@ fn info_block_indent_12(cx: &mut TestAppContext) {
             ui_scale_pct: 150,
             ..AppearanceSettings::default()
         };
-        tl_ui::theme::metrics::recompute(&appearance, cx);
+        tl_ui_base::theme::metrics::recompute(&appearance, cx);
         cx.refresh_windows();
     });
     assert_eq!(indent(cx), px(18.), "indent at 150%");
@@ -496,7 +496,7 @@ mod row_builders {
         let words = KvWords::default();
         rows.iter()
             .map(|r| {
-                let text = tl_ui::components::kv_grid::shown_text_in(&r.value, &words)
+                let text = tl_ui_kit::components::kv_grid::shown_text_in(&r.value, &words)
                     .map(|t| t.to_string())
                     .unwrap_or_default();
                 (r.label.to_string(), text)
@@ -961,7 +961,7 @@ mod row_builders {
 mod names_and_tips {
     use super::*;
     use gpui_kit::point;
-    use tl_ui::components::tooltip::DELAY_CONTROL;
+    use tl_ui_kit::components::tooltip::DELAY_CONTROL;
 
     #[gpui_kit::test]
     fn info_copy_button_accessible_name(cx: &mut TestAppContext) {
@@ -979,7 +979,7 @@ mod names_and_tips {
 
     #[gpui_kit::test]
     fn info_copy_button_name_follows_strings(cx: &mut TestAppContext) {
-        use tl_ui::i18n::set_test_catalogue;
+        use tl_ui_base::i18n::set_test_catalogue;
 
         let (section, _, cx) = host(cx, InfoSectionId::Processor, 100, os_rows());
         draw(cx);
@@ -1249,7 +1249,7 @@ mod hardware_builders {
         let words = KvWords::default();
         rows.iter()
             .map(|r| {
-                let text = tl_ui::components::kv_grid::shown_text_in(&r.value, &words)
+                let text = tl_ui_kit::components::kv_grid::shown_text_in(&r.value, &words)
                     .map(|t| t.to_string())
                     .unwrap_or_default();
                 (r.block, r.label.to_string(), text)
@@ -1530,7 +1530,7 @@ mod hardware_builders {
         assert_eq!(r.fetch, Some(true));
 
         let r = last(fetched(Some("203.0.113.4"), None));
-        let time = tl_ui::pages::performance::net::local_hh_mm(1_792_000_000);
+        let time = tl_ui_perf::performance::net::local_hh_mm(1_792_000_000);
         assert_eq!(
             r.value.text.as_ref(),
             format!("203.0.113.4 (fetched {time})")
@@ -1557,8 +1557,8 @@ mod hardware_builders {
 
     #[test]
     fn info_public_ip_shared_with_network_page() {
-        use tl_ui::pages::performance::net::public_ip_text;
-        use tl_ui::template::Template;
+        use tl_ui_base::template::Template;
+        use tl_ui_perf::performance::net::public_ip_text;
         let template = Template::en("perf-net-ip-fetched", &["ip", "time"]);
         for (v4, v6) in [
             (Some("203.0.113.4"), None),
@@ -1624,14 +1624,14 @@ mod page {
     use tl_model::demand::Demand;
     use tl_model::health::SourceId;
     use tl_model::snapshot::{InventorySnapshot, SystemSnapshot};
-    use tl_ui::actions::{ClearFilter, RefreshCurrentTab};
     use tl_ui::app::EngineGlobal;
-    use tl_ui::components::toast::{self, ToastQueue};
-    use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator};
-    use tl_ui::host::HostContext;
-    use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::information::actions::{CopyInformationSection, bind_keys_information};
     use tl_ui::pages::information::{InformationPage, REFRESH_TOAST_AFTER};
+    use tl_ui_base::demand::{DEMAND_COALESCE, DemandAggregator};
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::hub::SnapshotHub;
+    use tl_ui_kit::actions::{ClearFilter, RefreshCurrentTab};
+    use tl_ui_kit::components::toast::{self, ToastQueue};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const S: u64 = 1_000_000_000;
@@ -2517,13 +2517,13 @@ mod main_window {
     use tl_model::command::{Command, DeviceCommand, Tab};
     use tl_model::health::SourceId;
     use tl_model::snapshot::{InventorySnapshot, SystemSnapshot};
-    use tl_ui::actions::ShowSystemInformation;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::demand::DEMAND_COALESCE;
     use tl_ui::pages::information::InformationPage;
     use tl_ui::pages::information::actions::CopyInformationAll;
     use tl_ui::window::filter::FILTER_DEBOUNCE;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
+    use tl_ui_base::demand::DEMAND_COALESCE;
+    use tl_ui_kit::actions::ShowSystemInformation;
     use tl_ui_settings::settings::{Settings, StartTab, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -2836,7 +2836,7 @@ impl Render for SetupHost {
             .track_focus(&self.focus)
             .w(px(600.))
             .h(px(400.))
-            .on_action(move |_: &tl_ui::actions::OpenAdditionalSetup, _, _| {
+            .on_action(move |_: &tl_ui_kit::actions::OpenAdditionalSetup, _, _| {
                 setups.set(setups.get() + 1)
             })
             .child(self.section.clone().cached(StyleRefinement::default()))

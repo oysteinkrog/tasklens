@@ -45,13 +45,13 @@ use super::stats::{
     process_cpu_pct, read_rss_pss_mb,
 };
 use super::synth::{BenchRng, SEED};
-use crate::anim::AnimationDriver;
 use crate::app::TasklensUi;
-use crate::app_env::{AppEnv, UiInit};
-use crate::host::HostContext;
-use crate::pages::processes::ProcessesPage;
-use crate::pages::processes::history::HistoryPage;
-use crate::shell::APP_ID;
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::app_env::{AppEnv, UiInit};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::shell::APP_ID;
+use tl_ui_procs::pages::processes::ProcessesPage;
+use tl_ui_procs::pages::processes::history::HistoryPage;
 
 const NS_PER_S: u64 = 1_000_000_000;
 const NS_PER_MS: f64 = 1_000_000.0;

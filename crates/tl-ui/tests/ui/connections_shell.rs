@@ -104,9 +104,9 @@ fn connections_page_registered(cx: &mut TestAppContext) {
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::pages::connections::ConnectionsPage;
     use tl_ui::window::main::{main_window_view, open_main_window};
     use tl_ui_settings::settings::{Settings, StartTab, UiState};
+    use tl_ui_sys::pages::connections::ConnectionsPage;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     let engine = FakeEngine::new();
@@ -155,14 +155,14 @@ mod jump {
         Manager, ProcessTableView, SysTable, TableRow, Total, UnitRef, UnitType,
     };
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::pages::connections::ConnectionsPage;
-    use tl_ui::pages::connections::actions::{
+    use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_procs::pages::processes::ProcessesPage;
+    use tl_ui_settings::settings::{Settings, UiState};
+    use tl_ui_sys::pages::connections::ConnectionsPage;
+    use tl_ui_sys::pages::connections::actions::{
         ConnectionGoToService, ConnectionJumpToProcess, GoToConnection,
     };
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::settings_global::TlSettings;
-    use tl_ui::window::main::{main_window_view, open_main_window_on};
-    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
@@ -213,7 +213,7 @@ mod jump {
         };
         cx.update(|cx| {
             TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_reduce_motion(true);
         });
         let handle = cx
@@ -432,7 +432,7 @@ mod jump {
             self.draw();
         }
 
-        fn selected(&mut self) -> Vec<tl_ui::pages::processes::delegate::ProcRowId> {
+        fn selected(&mut self) -> Vec<tl_ui_procs::pages::processes::delegate::ProcRowId> {
             self.vcx.update(|_, cx| {
                 let view = main_window_view(cx).expect("main window");
                 let page = view
@@ -462,7 +462,7 @@ mod jump {
         rig.answer(&[super::key(4321)]);
         assert_eq!(
             rig.selected(),
-            [tl_ui::pages::processes::delegate::ProcRowId::Process(
+            [tl_ui_procs::pages::processes::delegate::ProcRowId::Process(
                 super::key(4321)
             )]
         );
@@ -511,7 +511,7 @@ mod jump {
         // The Show button dispatches this action and clears the filter.
         let before = rig.table_queries().len();
         rig.vcx
-            .dispatch_action(tl_ui::pages::processes::actions::ProcessesShowHidden);
+            .dispatch_action(tl_ui_procs::pages::processes::actions::ProcessesShowHidden);
         rig.draw();
         let queries = rig.table_queries();
         assert!(queries.len() > before, "Show sends a new query");
@@ -607,15 +607,15 @@ mod main_window {
     use tl_model::snapshot::ConnCounts;
     use tl_model::table::{ProcessTableView, SysTable, TableRow};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::menu::{MenuEntryInfo, TlMenuPopup, open_context_menu};
-    use tl_ui::demand::DEMAND_COALESCE;
-    use tl_ui::pages::connections::ConnectionsPage;
-    use tl_ui::pages::connections::delegate::ConnectionsDelegate;
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::processes::delegate::ProcRowId;
-    use tl_ui::table::tree_table::TreeTableDelegate as _;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
+    use tl_ui_base::demand::DEMAND_COALESCE;
+    use tl_ui_kit::components::menu::{MenuEntryInfo, TlMenuPopup, open_context_menu};
+    use tl_ui_procs::pages::processes::ProcessesPage;
+    use tl_ui_procs::pages::processes::delegate::ProcRowId;
     use tl_ui_settings::settings::{Settings, StartTab, UiState};
+    use tl_ui_sys::pages::connections::ConnectionsPage;
+    use tl_ui_sys::pages::connections::delegate::ConnectionsDelegate;
+    use tl_ui_table::table::tree_table::TreeTableDelegate as _;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const FIREFOX_COOKIE: u64 = 2;
@@ -645,7 +645,7 @@ mod main_window {
         };
         cx.update(|cx| {
             TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_reduce_motion(true);
         });
         cx.run_until_parked();
@@ -723,7 +723,9 @@ mod main_window {
             })
         }
 
-        fn table(&mut self) -> Entity<tl_ui::table::tree_table::TlTreeTable<ConnectionsDelegate>> {
+        fn table(
+            &mut self,
+        ) -> Entity<tl_ui_table::table::tree_table::TlTreeTable<ConnectionsDelegate>> {
             let page = self.page().expect("the Connections page exists");
             self.vcx.read_entity(&page, |page, _| page.table().clone())
         }
@@ -815,7 +817,7 @@ mod main_window {
                 .expect("the table body");
             let row_h = self
                 .vcx
-                .update(|_, cx| tl_ui::theme::metrics(cx).row_height);
+                .update(|_, cx| tl_ui_base::theme::metrics(cx).row_height);
             let at = point(
                 body.origin.x + px(40.),
                 body.origin.y + row_h * (ix as f32 + 0.5),
@@ -1006,15 +1008,15 @@ mod props {
     use tl_model::command::Tab;
     use tl_model::snapshot::{ConnCounts, ProcessSnapshot};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::demand::GlobalDemand;
-    use tl_ui::host::HostContext;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
-    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
-    use tl_ui::windows::connection_properties::{
+    use tl_ui_base::demand::GlobalDemand;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_settings::settings::{Decorations, Settings, UiState};
+    use tl_ui_sys::windows::connection_properties::{
         ConnectionPropertiesView, open_connection_properties,
     };
-    use tl_ui_settings::settings::{Decorations, Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
@@ -1047,7 +1049,7 @@ mod props {
         };
         cx.update(|cx| {
             TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_reduce_motion(true);
         });
         let handle = cx

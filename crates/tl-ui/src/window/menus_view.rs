@@ -31,25 +31,27 @@ use tl_ui_settings::settings::{ColumnResize, ProcessesSettings};
 
 use super::main::{ShellState, WINDOW_TITLE};
 use super::menubar::{HEAT_INTENSITY, MenuSliders, ROW_HEIGHT, SHADOW_INTENSITY, UI_SCALE};
-use super::registry::{GlobalRegistry, WindowKey};
 use super::titlebar::keep_above_supported;
-use crate::actions::{SetSetting, SetViewMode, ToggleMiniWindow, ToggleSetting};
-use crate::components::icons::TlIcon;
-use crate::components::menu::{MenuSuffixAction, TlMenu, TlMenuPopup};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::ToggleAlwaysOnTop;
-use crate::host::HostContext;
-use crate::i18n::{tr, tr_args};
-use crate::pages::minigraph::actions::ResetMinigraphLayout;
-use crate::settings_global::{SettingKey, SettingValue, TlSettings};
-use crate::table::actions::{CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
-use crate::table::columns::TableId;
-use crate::theme::share_code::{ShareCodeError, import_text};
-use crate::theme::store::{self, ActivateSource, ActivateTheme, ThemeError, ThemeStore};
-use crate::theme::{ThemeDef, ThemeEvent};
 use crate::window::confirm::confirm_delete_theme;
 use crate::window::share_theme::ShareTheme;
 use crate::window::theme_editor::EditTheme;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_base::theme::share_code::{ShareCodeError, import_text};
+use tl_ui_base::theme::store::{self, ActivateSource, ActivateTheme, ThemeError, ThemeStore};
+use tl_ui_base::theme::{ThemeDef, ThemeEvent};
+use tl_ui_kit::actions::{SetSetting, SetViewMode, ToggleMiniWindow, ToggleSetting};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::{MenuSuffixAction, TlMenu, TlMenuPopup};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::ToggleAlwaysOnTop;
+use tl_ui_perf_core::minigraph::actions::ResetMinigraphLayout;
+use tl_ui_table::table::actions::{
+    CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit,
+};
+use tl_ui_table::table::columns::TableId;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]
@@ -96,7 +98,7 @@ pub fn init(cx: &mut App) {
 
 fn copy_theme(name: &str, cx: &mut App) {
     match ThemeStore::copy_theme(name, cx) {
-        Ok(crate::theme::ThemeEvent::Copied { name }) => {
+        Ok(tl_ui_base::theme::ThemeEvent::Copied { name }) => {
             TlSettings::update(cx, |d| d.settings.theme.active = name.to_string());
             toast(ToastKind::Success, "shell-toast-theme-copied", cx);
         }
@@ -646,8 +648,8 @@ pub fn theme_rows(cx: &App) -> Vec<ThemeRow> {
             Some(ThemeRow {
                 name: SharedString::from(name.to_string()),
                 label: label.into(),
-                bg: def.slots[crate::theme::ThemeSlot::MenuBg as usize],
-                fg: def.slots[crate::theme::ThemeSlot::TextPrimary as usize],
+                bg: def.slots[tl_ui_base::theme::ThemeSlot::MenuBg as usize],
+                fg: def.slots[tl_ui_base::theme::ThemeSlot::TextPrimary as usize],
                 selected,
             })
         })

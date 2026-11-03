@@ -22,19 +22,19 @@ use gpui_kit::{
 use tracing::warn;
 
 use super::about::{file_uri, send_open_uri};
-use super::registry::{GlobalRegistry, WindowKey};
-use crate::action_tracker::ToastTexts;
-use crate::app_env::AppEnv;
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::icons::{TlIcon, icon};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::{
+use tl_ui_base::action_tracker::ToastTexts;
+use tl_ui_base::app_env::AppEnv;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::text::style::{t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
+use tl_ui_kit::components::icons::{TlIcon, icon};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
-use crate::i18n::tr;
-use crate::text::style::{t_base, t_sm};
-use crate::theme::{current, metrics};
-use crate::util::clipboard_write;
 
 gpui_kit::actions!(
     tasklens,

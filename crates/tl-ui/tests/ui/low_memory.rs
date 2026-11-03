@@ -23,15 +23,15 @@ use tl_model::process::{
 };
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
-use tl_ui::action_tracker::GlobalActionTracker;
 use tl_ui::app::{AppEnv, OpenHooks, TasklensUi, UiExit, UiExitSlot, UiInit, start_for_test};
-use tl_ui::components::window_frame::TlSecondaryWindow;
-use tl_ui::host::HostContext;
-use tl_ui::settings_global::{SettingKey, TlSettings};
-use tl_ui::theme::current;
 use tl_ui::window::settings::{PageId, all_pages};
 use tl_ui::windows::low_memory::{LowMemoryWindow, MAX_ROWS, RowId, init_low_memory};
 use tl_ui::{OpenMode, StartOptions, UiLaunch};
+use tl_ui_base::action_tracker::GlobalActionTracker;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::settings_global::{SettingKey, TlSettings};
+use tl_ui_base::theme::current;
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
 use tl_ui_settings::settings::{Decorations, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -200,9 +200,9 @@ fn lowmem_texts_and_title(cx: &mut TestAppContext) {
     assert_eq!(names, ["Firefox (3)", "Konsole (3)"]);
 
     // A second frame makes no `tr` call.
-    let before = tl_ui::i18n::tr_calls();
+    let before = tl_ui_base::i18n::tr_calls();
     draw(&mut vcx);
-    assert_eq!(tl_ui::i18n::tr_calls(), before);
+    assert_eq!(tl_ui_base::i18n::tr_calls(), before);
 }
 
 #[gpui_kit::test]
@@ -606,7 +606,7 @@ fn lowmem_title_follows_language(cx: &mut TestAppContext) {
     );
 
     vcx.update(|_, cx| {
-        tl_ui::i18n::set_test_catalogue(cx, "lowmem-window-title = [Low memory]\n");
+        tl_ui_base::i18n::set_test_catalogue(cx, "lowmem-window-title = [Low memory]\n");
     });
     vcx.run_until_parked();
     draw(&mut vcx);
@@ -620,7 +620,7 @@ fn lowmem_title_follows_language(cx: &mut TestAppContext) {
     );
 
     // Back to English.
-    vcx.update(|_, cx| tl_ui::i18n::set_language(cx, "en-US"));
+    vcx.update(|_, cx| tl_ui_base::i18n::set_language(cx, "en-US"));
     vcx.run_until_parked();
     assert_eq!(
         vcx.read(|cx| frame.read(cx).title().to_string()),
@@ -629,9 +629,9 @@ fn lowmem_title_follows_language(cx: &mut TestAppContext) {
 
     // A second frame makes no `tr` call.
     draw(&mut vcx);
-    let before = tl_ui::i18n::tr_calls();
+    let before = tl_ui_base::i18n::tr_calls();
     draw(&mut vcx);
-    assert_eq!(tl_ui::i18n::tr_calls(), before);
+    assert_eq!(tl_ui_base::i18n::tr_calls(), before);
 }
 
 /// A test context whose text system records every added face.
@@ -914,9 +914,9 @@ fn lowmem_app_row_name_and_percent(cx: &mut TestAppContext) {
 
     // A frame formats nothing.
     draw(&mut vcx);
-    let before = tl_ui::i18n::tr_calls();
+    let before = tl_ui_base::i18n::tr_calls();
     draw(&mut vcx);
-    assert_eq!(tl_ui::i18n::tr_calls(), before);
+    assert_eq!(tl_ui_base::i18n::tr_calls(), before);
 }
 
 #[gpui_kit::test]

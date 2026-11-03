@@ -10,12 +10,12 @@ use gpui_kit::{App, IntoElement as _};
 use tl_model::health::HelperState;
 
 use super::{PageBuilder, PageId};
-use crate::actions::OpenAdditionalSetup;
-use crate::components::button::TlButtonKind;
-use crate::host::HostContext;
-use crate::i18n::tr;
-use crate::settings_global::SettingKey;
 use crate::window::menus_settings::{TogglePasswordless, passwordless_running};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::SettingKey;
+use tl_ui_kit::actions::OpenAdditionalSetup;
+use tl_ui_kit::components::button::TlButtonKind;
 
 pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(host, PageId::Privileges);

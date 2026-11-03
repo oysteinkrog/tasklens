@@ -18,20 +18,20 @@ use tl_model::command::Tab;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
 use tl_model::table::TableMode;
-use tl_ui::actions::{OpenAdditionalSetup, OpenSettings};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::dialog::{DialogButton, TlDialogView};
-use tl_ui::components::slider::TlSliderEvent;
-use tl_ui::components::toast::ToastQueue;
-use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
-use tl_ui::host::HostContext;
-use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
-use tl_ui::theme::ThemeStore;
 use tl_ui::window::main::ShellState;
-use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::settings::{
     PageBuilder, PageId, SIDEBAR_W, SettingsWindow, TestPages, all_pages,
 };
+use tl_ui_base::host::HostContext;
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_base::theme::ThemeStore;
+use tl_ui_kit::actions::{OpenAdditionalSetup, OpenSettings};
+use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+use tl_ui_kit::components::slider::TlSliderEvent;
+use tl_ui_kit::components::toast::ToastQueue;
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind};
 use tl_ui_settings::settings::{Decorations, NetworkUnit, Settings, StartTab, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -240,7 +240,7 @@ fn settings_window_size_and_sidebar(cx: &mut TestAppContext) {
     setup(cx);
     let (_, mut vcx) = open(cx, 1);
     let viewport = vcx.update(|window, _| window.viewport_size());
-    let extra = tl_ui::components::window_frame::client_frame_extra(Decorations::Client);
+    let extra = tl_ui_kit::components::window_frame::client_frame_extra(Decorations::Client);
     assert_eq!(viewport, size(px(900.) + extra, px(640.) + extra));
     assert_eq!(SIDEBAR_W, 220.);
     assert!(vcx.debug_bounds("SettingsWindowBody").is_some());
@@ -594,7 +594,7 @@ fn processes_refresh_dropdown(cx: &mut TestAppContext) {
     assert_eq!(writes.len(), 1, "the engine gets the interval");
     assert_eq!((writes[0].0, writes[0].1.interval_ms), (1, Some(2000)));
     assert_eq!(
-        cx.update(|cx| tl_ui::host_settings::values(&HostContext::local(cx), cx).interval_ms),
+        cx.update(|cx| tl_ui_base::host_settings::values(&HostContext::local(cx), cx).interval_ms),
         2000
     );
     assert!(engine.settings().is_empty());
@@ -941,7 +941,7 @@ fn graphs_reset_button(cx: &mut TestAppContext) {
     let count = resets.clone();
     cx.update(|cx| {
         cx.on_action(
-            move |_: &tl_ui::pages::minigraph::actions::ResetMinigraphLayout, _| {
+            move |_: &tl_ui_perf_core::minigraph::actions::ResetMinigraphLayout, _| {
                 count.set(count.get() + 1)
             },
         );
@@ -1106,10 +1106,10 @@ impl DeviceProbe {
             .into_iter()
             .find(|p| p.id() == PageId::Performance)
             .expect("Performance page");
-        let hub = cx.global::<tl_ui::hub::GlobalHub>().0.clone();
+        let hub = cx.global::<tl_ui_base::hub::GlobalHub>().0.clone();
         let subs = vec![
             cx.observe_global::<TlSettings>(|_, cx| cx.notify()),
-            cx.subscribe(&hub, |_, _, _: &tl_ui::hub::SnapshotChanged, cx| {
+            cx.subscribe(&hub, |_, _, _: &tl_ui_base::hub::SnapshotChanged, cx| {
                 cx.notify()
             }),
         ];
@@ -1696,7 +1696,7 @@ fn startup_window_always_on_top_dispatch(cx: &mut TestAppContext) {
     let log = seen.clone();
     cx.update(|cx| {
         cx.on_action(
-            move |a: &tl_ui::components::window_frame::ToggleAlwaysOnTop, _| {
+            move |a: &tl_ui_kit::components::window_frame::ToggleAlwaysOnTop, _| {
                 log.borrow_mut()
                     .push((a.window.clone(), a.caption.to_string()))
             },
@@ -1927,7 +1927,7 @@ fn advanced_rendering_gpu_row(cx: &mut TestAppContext) {
     );
     // Past the 1 s toast coalesce window, so a repeated toast shows as a second entry.
     let past_coalesce =
-        tl_ui::components::toast::COALESCE_WINDOW + std::time::Duration::from_millis(500);
+        tl_ui_kit::components::toast::COALESCE_WINDOW + std::time::Duration::from_millis(500);
     vcx.executor().advance_clock(past_coalesce);
     vcx.run_until_parked();
     vcx.update(|_, cx| advanced.pick(SettingKey::RenderingGpu, "NVIDIA GeForce RTX 4070", cx));
@@ -2216,7 +2216,7 @@ fn appearance_theme_dropdown_dispatches_activate(cx: &mut TestAppContext) {
     assert_eq!(theme.active, "Dracula");
     assert!(!theme.follow_system, "an explicit choice turns sync off");
     assert_eq!(
-        cx.update(|cx| tl_ui::theme::current(cx).name.to_string()),
+        cx.update(|cx| tl_ui_base::theme::current(cx).name.to_string()),
         "Dracula"
     );
     assert_eq!(window_toasts(&mut vcx), ["Theme sync turned off"]);
@@ -2397,7 +2397,7 @@ fn fans_remove_entry(cx: &mut TestAppContext) {
     let (engine, _) = setup(cx);
     publish_fan(&engine, true, cx);
     cx.update(|cx| {
-        tl_ui::settings_global::TlSettings::update(cx, |d| {
+        tl_ui_base::settings_global::TlSettings::update(cx, |d| {
             d.settings.fans.insert(
                 FAN_KEY.into(),
                 tl_ui_settings::settings::FanOverride {
@@ -2614,7 +2614,8 @@ fn ts_import_themes_file(cx: &mut TestAppContext) {
     assert!(!cx.update(|cx| TlSettings::settings(cx).debug.show_fps));
 
     // A refused themes file is the failure toast.
-    let past = tl_ui::components::toast::COALESCE_WINDOW + std::time::Duration::from_millis(500);
+    let past =
+        tl_ui_kit::components::toast::COALESCE_WINDOW + std::time::Duration::from_millis(500);
     vcx.executor().advance_clock(past);
     import_env(cx, Ok((0, 0)), Err("too large".to_owned()));
     press_import(&mut vcx, "/home/u/themes.json");

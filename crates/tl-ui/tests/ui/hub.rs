@@ -19,18 +19,18 @@ use tl_ui::app::{
     AppRequestHandler, BootSettings, EngineGlobal, QuitCalls, UiExitSlot, open_first_for_test,
     start_for_test,
 };
-use tl_ui::components::icons::TlAssets;
-use tl_ui::demand::GlobalDemand;
-use tl_ui::hub::GlobalHub;
-use tl_ui::hub::{ComponentMask, HiddenChanged, SnapshotChanged, SnapshotHub};
-use tl_ui::i18n::Strings;
-use tl_ui::text::fonts::BundledFontStatus;
-use tl_ui::theme::{ThemeStore, UiMetrics};
 use tl_ui::window::main::FailMainOpen;
 use tl_ui::windows::low_memory::{FailLowMemoryOpen, init_low_memory};
 use tl_ui::{
     AppEnv, OpenHooks, OpenMode, StartOptions, TasklensUi, UiExit, UiInit, UiLaunch, request_exit,
 };
+use tl_ui_base::demand::GlobalDemand;
+use tl_ui_base::hub::GlobalHub;
+use tl_ui_base::hub::{ComponentMask, HiddenChanged, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::Strings;
+use tl_ui_base::text::fonts::BundledFontStatus;
+use tl_ui_base::theme::{ThemeStore, UiMetrics};
+use tl_ui_kit::components::icons::TlAssets;
 use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -401,8 +401,8 @@ fn init_installs_globals(cx: &mut TestAppContext) {
         let boot = cx.global::<BootSettings>();
         // TlSettings::init takes the persist callback out of BootSettings (jqk.3).
         assert!(boot.persist.is_none());
-        assert!(cx.has_global::<tl_ui::settings_global::TlSettings>());
-        assert!(cx.has_global::<tl_ui::theme::user_store::ThemePersist>());
+        assert!(cx.has_global::<tl_ui_base::settings_global::TlSettings>());
+        assert!(cx.has_global::<tl_ui_base::theme::user_store::ThemePersist>());
     });
 }
 
@@ -494,7 +494,7 @@ fn set_low_memory_enabled_reverts_switch_and_store(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update(|cx| {
         assert!(
-            !tl_ui::settings_global::TlSettings::settings(cx)
+            !tl_ui_base::settings_global::TlSettings::settings(cx)
                 .lowmem
                 .enabled
         );
@@ -523,9 +523,9 @@ fn init_activates_theme_without_crossfade(cx: &mut TestAppContext) {
     settings.theme.active = "Default Light".to_owned();
     run_init(cx, settings);
     cx.update(|cx| {
-        assert_eq!(&*tl_ui::theme::current(cx).name, "Default Light");
+        assert_eq!(&*tl_ui_base::theme::current(cx).name, "Default Light");
         // `init_metrics` sets 1; nothing else bumped it.
-        assert_eq!(tl_ui::theme::metrics(cx).style_version, 1);
+        assert_eq!(tl_ui_base::theme::metrics(cx).style_version, 1);
     });
 }
 

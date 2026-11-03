@@ -17,7 +17,7 @@ use tl_model::table::{ProcessTableView, TableRow, TableTotals, Total};
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::{FieldValidity, Validity};
 
-use crate::pages::processes::table::GroupHeader;
+use tl_ui_procs::pages::processes::table::GroupHeader;
 
 /// PRNG seed for every bench scene.
 pub const SEED: u64 = 42;

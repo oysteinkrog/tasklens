@@ -5,11 +5,11 @@ use gpui_kit::{App, SharedString};
 use tl_model::command::Tab;
 
 use super::{PageBuilder, PageId};
-use crate::host::HostContext;
-use crate::i18n::tr;
-use crate::settings_global::{SettingKey, SettingValue};
 use crate::window::main::ShellState;
 use crate::window::menus_settings::SHIPPED_LANGUAGES;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::{SettingKey, SettingValue};
 
 pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(host, PageId::General);

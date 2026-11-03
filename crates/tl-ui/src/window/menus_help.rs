@@ -10,11 +10,11 @@
 
 use gpui_kit::{App, Entity, FocusHandle, Window};
 
-use crate::action_tracker::ToastTexts;
-use crate::actions::{OpenAdditionalSetup, OpenShortcuts, ShowSystemInformation};
-use crate::components::menu::{TlMenu, TlMenuPopup};
-use crate::i18n::tr;
 use crate::window::about::{OpenAbout, send_open_uri};
+use tl_ui_base::action_tracker::ToastTexts;
+use tl_ui_base::i18n::tr;
+use tl_ui_kit::actions::{OpenAdditionalSetup, OpenShortcuts, ShowSystemInformation};
+use tl_ui_kit::components::menu::{TlMenu, TlMenuPopup};
 
 gpui_kit::actions!(
     tasklens,

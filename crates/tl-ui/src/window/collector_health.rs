@@ -18,18 +18,18 @@ use tl_model::health::{HealthSnapshot, SourceHealth, SourceId, SourceState};
 use tl_model::time::TimeNs;
 use tl_model::units::{count, short_age};
 
-use super::registry::{GlobalRegistry, WindowKey};
-use crate::actions::OpenCollectorHealth;
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, HostClock, SnapshotChanged};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::template::Template;
-use crate::text::style::{numeric_style, t_sm};
-use crate::text::untrusted::debug_assert_clean;
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, HostClock, SnapshotChanged};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{numeric_style, t_sm};
+use tl_ui_base::text::untrusted::debug_assert_clean;
+use tl_ui_base::theme::{TlTheme, current, metrics};
+use tl_ui_kit::actions::OpenCollectorHealth;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 
 /// Window size, × ui_scale.
 const SIZE: (f32, f32) = (720., 360.);

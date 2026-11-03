@@ -15,20 +15,22 @@ use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::time::now_boot_ns;
-use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::chart::ChartState;
-use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
-use tl_ui::host::HostContext;
-use tl_ui::hub::{GlobalHub, SnapshotHub};
-use tl_ui::pages::minigraph::GraphColor;
-use tl_ui::pages::minigraph::sources::{GraphColumn, MinigraphEntry, MinigraphId, MinigraphSource};
-use tl_ui::settings_global::TlSettings;
 use tl_ui::window::main::APP_ID;
-use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::titlebar::TitleBarProbe;
-use tl_ui::windows::detached_graph::{
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_chart::chart::ChartState;
+use tl_ui_perf_core::detached_graph::{
     DetachedGraphWindow, detached_window_options, open_detached, window_size,
+};
+use tl_ui_perf_core::minigraph::GraphColor;
+use tl_ui_perf_core::minigraph::sources::{
+    GraphColumn, MinigraphEntry, MinigraphId, MinigraphSource,
 };
 use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
@@ -83,9 +85,9 @@ fn setup(cx: &mut TestAppContext) -> Arc<FakeEngine> {
     cx.update(|cx| {
         gpui_kit::init(cx);
         let appearance = AppearanceSettings::default();
-        tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-        tl_ui::theme::metrics::init_metrics(&appearance, cx);
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+        tl_ui_base::theme::metrics::init_metrics(&appearance, cx);
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         cx.set_global(EngineGlobal(Arc::clone(&client)));
         cx.set_global(BootSettings {
             settings: Settings::default(),
@@ -234,19 +236,19 @@ mod detach {
     };
     use tl_model::client::EngineClient;
     use tl_ui::app::{BootSettings, EngineGlobal};
-    use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
-    use tl_ui::components::toast::ToastKind;
-    use tl_ui::demand::DemandAggregator;
-    use tl_ui::host::HostContext;
-    use tl_ui::hub::{GlobalHub, SnapshotHub};
-    use tl_ui::pages::minigraph::actions::{
+    use tl_ui_base::demand::DemandAggregator;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+    use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_kit::components::menu::{MenuEntryKind, open_context_menu};
+    use tl_ui_kit::components::toast::ToastKind;
+    use tl_ui_perf_core::detached_graph::{DetachedGraphWindow, window_size};
+    use tl_ui_perf_core::minigraph::actions::{
         MinigraphAddToWindow, MinigraphAttach, MinigraphCloseDetachedWindow, MinigraphDetach,
     };
-    use tl_ui::pages::minigraph::panel::{MinigraphPanel, any_detached_open};
-    use tl_ui::pages::minigraph::sources::{MinigraphId, MinigraphSource};
-    use tl_ui::settings_global::TlSettings;
-    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
-    use tl_ui::windows::detached_graph::{DetachedGraphWindow, window_size};
+    use tl_ui_perf_core::minigraph::panel::{MinigraphPanel, any_detached_open};
+    use tl_ui_perf_core::minigraph::sources::{MinigraphId, MinigraphSource};
     use tl_ui_settings::settings::{
         AppearanceSettings, DetachedWindowState, MinigraphState, Settings, ThemeSettings, UiState,
     };
@@ -257,7 +259,7 @@ mod detach {
     use tl_model::command::{Command, KWinCommand};
     use tl_model::snapshot::{ComponentHeader, FrameGeometry, WindowEntry, WindowsSnapshot};
     use tl_model::validity::Validity;
-    use tl_ui::pages::minigraph::bridge::OwnWindowBridge;
+    use tl_ui_perf_core::minigraph::bridge::OwnWindowBridge;
 
     /// Hosts the panel cached over a 1000 × 600 box, as the Processes page does.
     struct PanelHost {
@@ -310,9 +312,9 @@ mod detach {
         cx.update(|cx| {
             gpui_kit::init(cx);
             let appearance = AppearanceSettings::default();
-            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-            tl_ui::theme::metrics::init_metrics(&appearance, cx);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui_base::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_global(EngineGlobal(Arc::clone(&client)));
             cx.set_global(BootSettings {
                 settings: Settings::default(),
@@ -448,11 +450,11 @@ mod detach {
     /// No E26 test is `#[ignore]`d any more.
     #[gpui_kit::test]
     fn detached_and_mini_smoke(cx: &mut TestAppContext) {
-        use tl_ui::actions::ToggleMiniWindow;
-        use tl_ui::demand::GlobalDemand;
-        use tl_ui::pages::performance::actions::PerfShowMiniWindow;
         use tl_ui::window::menus_view::mini_window_open;
-        use tl_ui::windows::mini::is_mini_open;
+        use tl_ui_base::demand::GlobalDemand;
+        use tl_ui_kit::actions::ToggleMiniWindow;
+        use tl_ui_perf::mini::is_mini_open;
+        use tl_ui_perf::performance::actions::PerfShowMiniWindow;
 
         let mut r = rig(cx, UiState::default());
         let memory = r.id_of(&MinigraphSource::Memory);
@@ -464,7 +466,7 @@ mod detach {
 
         cx.update(|cx| {
             cx.set_global(GlobalDemand(r.demand.clone()));
-            tl_ui::windows::mini::init(cx);
+            tl_ui_perf::mini::init(cx);
         });
         let mini = |cx: &mut TestAppContext| {
             cx.read(|cx| {
@@ -957,28 +959,26 @@ mod mini {
     };
     use tl_model::time::now_boot_ns;
     use tl_model::validity::Validity;
-    use tl_ui::actions::ToggleMiniWindow;
     use tl_ui::app::{BootSettings, EngineGlobal};
-    use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
-    use tl_ui::components::toast;
-    use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
-    use tl_ui::hub::{GlobalHub, SnapshotHub};
-    use tl_ui::i18n::tr;
-    use tl_ui::pages::minigraph::actions::ToggleMiniAlwaysOnTop;
-    use tl_ui::pages::performance::PerformancePage;
-    use tl_ui::pages::performance::actions::PerfShowMiniWindow;
-    use tl_ui::pages::performance::overview::OVERVIEW_KEY;
-    use tl_ui::pages::performance::sidebar::DeviceSidebar;
-    use tl_ui::pages::performance::{DeviceKey, DeviceKind};
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{
         self as shell, ShellState, main_window_view, open_main_window, set_test_page,
     };
     use tl_ui::window::menus_view::mini_window_open;
-    use tl_ui::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-    use tl_ui::windows::mini::{
-        MINI_WINDOW_TITLE, MiniWindow, is_mini_open, mini_height, open_mini,
-    };
+    use tl_ui_base::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
+    use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+    use tl_ui_base::i18n::tr;
+    use tl_ui_base::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_kit::actions::ToggleMiniWindow;
+    use tl_ui_kit::components::menu::{MenuEntryKind, open_context_menu};
+    use tl_ui_kit::components::toast;
+    use tl_ui_perf::mini::{MINI_WINDOW_TITLE, MiniWindow, is_mini_open, mini_height, open_mini};
+    use tl_ui_perf::performance::PerformancePage;
+    use tl_ui_perf::performance::actions::PerfShowMiniWindow;
+    use tl_ui_perf::performance::overview::OVERVIEW_KEY;
+    use tl_ui_perf::performance::sidebar::DeviceSidebar;
+    use tl_ui_perf::performance::{DeviceKey, DeviceKind};
+    use tl_ui_perf_core::minigraph::actions::ToggleMiniAlwaysOnTop;
     use tl_ui_settings::settings::{
         AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
     };
@@ -1081,9 +1081,9 @@ mod mini {
         let (hub, demand) = cx.update(|cx| {
             gpui_kit::init(cx);
             let appearance = AppearanceSettings::default();
-            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-            tl_ui::theme::metrics::init_metrics(&appearance, cx);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui_base::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_global(EngineGlobal(Arc::clone(&client)));
             cx.set_global(BootSettings {
                 settings,
@@ -1097,9 +1097,9 @@ mod mini {
             cx.set_global(GlobalHub(hub.clone()));
             cx.set_global(GlobalDemand(demand.clone()));
             if main {
-                tl_ui::action_tracker::install(Arc::clone(&client), Some(hub.clone()), cx);
+                tl_ui_base::action_tracker::install(Arc::clone(&client), Some(hub.clone()), cx);
                 toast::init(cx);
-                tl_ui::actions::bind_keys_global(cx);
+                tl_ui_kit::actions::bind_keys_global(cx);
                 for tab in Tab::ALL {
                     if tab != Tab::Performance {
                         set_test_page(cx, tab, super::keep::FAKES[tab as usize]);
@@ -1108,7 +1108,7 @@ mod mini {
                 shell::init(cx);
             }
             GlobalRegistry::init(cx);
-            tl_ui::windows::mini::init(cx);
+            tl_ui_perf::mini::init(cx);
             (hub, demand)
         });
         if main {
@@ -1380,12 +1380,12 @@ mod mini {
     #[cfg(target_os = "linux")]
     #[gpui_kit::test]
     fn mini_window_visible_width_is_260_inside_the_frame(cx: &mut TestAppContext) {
-        cx.update(|cx| cx.set_global(tl_ui::components::window_frame::TestClientFrame));
+        cx.update(|cx| cx.set_global(tl_ui_kit::components::window_frame::TestClientFrame));
         let _rig = setup(cx);
         let (mut vcx, _view) = open(cx);
         draw(&mut vcx);
         draw(&mut vcx);
-        let frame = f32::from(tl_ui::components::window_frame::client_frame_extra(
+        let frame = f32::from(tl_ui_kit::components::window_frame::client_frame_extra(
             tl_ui_settings::settings::Decorations::Client,
         ));
         assert_eq!(frame, 42.);
@@ -1707,21 +1707,21 @@ mod keep {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_ui::actions::CloseWindow;
     use tl_ui::app::{BootSettings, EngineGlobal, UiExitSlot};
-    use tl_ui::components::toast;
-    use tl_ui::demand::{DemandAggregator, GlobalDemand};
-    use tl_ui::host::HostContext;
-    use tl_ui::hub::{GlobalHub, SnapshotHub};
-    use tl_ui::pages::minigraph::panel::any_detached_open;
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageFactory, PageSlot, ShellPage, ShellState, open_main_window,
         set_test_page,
     };
-    use tl_ui::window::registry::GlobalRegistry;
     use tl_ui::window::status::StatusChanged;
-    use tl_ui::windows::detached_graph::open_detached;
+    use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+    use tl_ui_base::registry::GlobalRegistry;
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_kit::actions::CloseWindow;
+    use tl_ui_kit::components::toast;
+    use tl_ui_perf_core::detached_graph::open_detached;
+    use tl_ui_perf_core::minigraph::panel::any_detached_open;
     use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -1774,9 +1774,9 @@ mod keep {
         cx.update(|cx| {
             gpui_kit::init(cx);
             let appearance = AppearanceSettings::default();
-            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-            tl_ui::theme::metrics::init_metrics(&appearance, cx);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui_base::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             let mut settings = Settings::default();
             settings.motion.tab_switch_ms = 0;
             settings.graphs.keep_detached_on_close = true;
@@ -1789,12 +1789,12 @@ mod keep {
             TlSettings::init(cx);
             cx.set_global(EngineGlobal(client.clone()));
             let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
-            tl_ui::action_tracker::install(client.clone(), Some(hub.clone()), cx);
+            tl_ui_base::action_tracker::install(client.clone(), Some(hub.clone()), cx);
             let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
             cx.set_global(GlobalHub(hub));
             cx.set_global(GlobalDemand(demand));
             toast::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
             for tab in Tab::ALL {
                 set_test_page(cx, tab, FAKES[tab as usize]);
             }

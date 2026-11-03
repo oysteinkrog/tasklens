@@ -13,12 +13,12 @@ use gpui_kit::{App, SharedString, Window};
 use tl_ui_settings::settings::Settings;
 use tracing::warn;
 
-use crate::app_env::AppEnv;
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::tr;
-use crate::settings_global::TlSettings;
-use crate::theme::store::{ActivateSource, ThemeEvent, ThemeStore, activate};
+use tl_ui_base::app_env::AppEnv;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::store::{ActivateSource, ThemeEvent, ThemeStore, activate};
+use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
 
 gpui_kit::actions!(tasklens, [ResetSettings]);
 

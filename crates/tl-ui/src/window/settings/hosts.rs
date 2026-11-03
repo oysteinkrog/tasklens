@@ -3,7 +3,7 @@
 //! One row per `[[hosts]]` entry: On switch, name, ssh destination, "Test connection", Move up,
 //! Move down and Remove. Under the rows, a form adds a host. Enter or leaving a field applies a
 //! change to the row's name or destination; a value that is not valid shows its reason under
-//! the row and writes nothing. Every write goes through [`crate::hosts_edit`], and the main
+//! the row and writes nothing. Every write goes through [`tl_ui_base::hosts_edit`], and the main
 //! window adds, removes and renames the host tabs from the settings change, with no restart.
 //!
 //! The page keeps its state in one entity that lives in a Global, because the Settings window
@@ -19,17 +19,17 @@ use gpui_kit::{
 use tl_ui_settings::settings::HostEntry;
 
 use super::{PageBuilder, PageId};
-use crate::app_env::AppEnv;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::input::{TlInputSize, TlTextInput};
-use crate::components::switch::TlSwitch;
-use crate::host::HostContext;
-use crate::hosts_edit;
-use crate::i18n::{tr, tr_args};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::text::style::t_sm;
-use crate::theme::{current, metrics};
+use tl_ui_base::app_env::AppEnv;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hosts_edit;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::t_sm;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::input::{TlInputSize, TlTextInput};
+use tl_ui_kit::components::switch::TlSwitch;
 
 const NAME_W: f32 = 140.0;
 const TARGET_W: f32 = 220.0;

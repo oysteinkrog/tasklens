@@ -3482,7 +3482,7 @@ Oystein approved splitting tl-ui into layered crates and moving the UI settings 
 | `tl-ui-testkit` | `fake_engine.rs`; `render.rs` behind feature `render` |
 | `tl-ui-pagehost` | `host.rs` |
 
-The shell's `pages/mod.rs` and `windows/mod.rs` re-export the page and window modules of the lower crates at their old paths. Its `lib.rs` re-exports the lower crates' root modules that the shell, tl-app or the `ui` tests still name (`tl_ui::theme`, `tl_ui::components` and the like). CS-E10 removed the root re-exports nothing named. CS-J1 rewrites the users to direct crate paths.
+CS-J1 (tasklens-zljr5.50) rewrote the shell's own code and the `ui` tests to direct crate paths (`tl_ui_base::theme`, `tl_ui_kit::components` and the like) and deleted the other re-exports. The re-exports that remain are the shell's public API on purpose, because tl-app depends on tl-ui only (ADR-001, the tl-app row above): in `lib.rs`, `demand`, `engine_link`, `host`, `host_settings`, `hosts_api`, `hub`, `i18n`, `settings_global`, `theme` (all from tl-ui-base), `net_totals` (tl-ui-chart) and `table` (tl-ui-table); in `pages/mod.rs`, `processes`, `services`, `startup` and `sys_table`. `windows/mod.rs` declares only the shell's own windows. `rg -n '^pub use tl_ui_' crates/*/src/lib.rs` shows exactly the `lib.rs` list.
 
 A new file goes to the crate that holds its directory. A new file at the root of `src/`, or in `pages/` or `windows/` outside a listed subdirectory, needs a row in this table, added by the bead that creates it.
 

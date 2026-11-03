@@ -29,20 +29,20 @@ use tracing::warn;
 
 use super::main::{ShellState, push_main_toast};
 use super::menus_view::import_from_clipboard;
-use super::registry::{GlobalRegistry, WindowKey};
 use super::share_theme::open_share_window;
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::input::TlTextInput;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::{
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::{TNUM, t_base, t_sm, t_xs};
+use tl_ui_base::theme::preview::PreviewToken;
+use tl_ui_base::theme::{ThemeDef, ThemeError, ThemeSlot, ThemeStore, builtin, current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
+use tl_ui_kit::components::input::TlTextInput;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
-use crate::i18n::{Strings, tr, tr_args};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::text::style::{TNUM, t_base, t_sm, t_xs};
-use crate::theme::preview::PreviewToken;
-use crate::theme::{ThemeDef, ThemeError, ThemeSlot, ThemeStore, builtin, current, metrics};
 
 /// The key context of the window content.
 pub const CONTEXT: &str = "TlThemeEditor";
@@ -206,7 +206,7 @@ pub fn open_editor(def: ThemeDef, parent: AnyWindowHandle, cx: &mut App) {
 }
 
 /// Cancels the open editor's preview and closes its window.
-fn close_open_editor(registry: &Entity<super::registry::WindowRegistry>, cx: &mut App) {
+fn close_open_editor(registry: &Entity<tl_ui_base::registry::WindowRegistry>, cx: &mut App) {
     let Some(handle) = registry.read(cx).get(&WindowKey::ThemeEditor) else {
         return;
     };
@@ -1239,8 +1239,8 @@ impl ThemeEditor {
     /// The preview column: mini tabs, a mini table and a static graph, painted from `theme`.
     fn preview_pane(
         &mut self,
-        theme: &crate::theme::TlTheme,
-        m: &crate::theme::UiMetrics,
+        theme: &tl_ui_base::theme::TlTheme,
+        m: &tl_ui_base::theme::UiMetrics,
     ) -> impl IntoElement {
         let s = m.ui_scale;
         let text = |t: SharedString, color: Hsla, xs: bool| {
@@ -1566,7 +1566,7 @@ impl Render for ThemeEditor {
 }
 
 /// A readout line in small tabular text.
-fn readout(text: SharedString, m: &crate::theme::UiMetrics, color: Hsla) -> impl IntoElement {
+fn readout(text: SharedString, m: &tl_ui_base::theme::UiMetrics, color: Hsla) -> impl IntoElement {
     let mut d = div();
     *d.text_style() = t_sm(m);
     d.text_style().font_features = Some(TNUM.clone());

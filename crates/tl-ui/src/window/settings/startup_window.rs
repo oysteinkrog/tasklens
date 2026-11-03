@@ -12,17 +12,17 @@ use gpui_kit::{App, SharedString};
 use tracing::warn;
 
 use super::{LocalSwitch, PageBuilder, PageId};
-use crate::app_env::AppEnv;
-use crate::components::window_frame::ToggleAlwaysOnTop;
-use crate::host::HostContext;
-use crate::i18n::tr;
-use crate::settings_global::{SettingKey, TlSettings};
 use crate::window::main::WINDOW_TITLE;
 use crate::window::menus_settings::{
     TogglePublicIpAutoFetch, ToggleStartAtLogin, ToggleStartMinimized,
 };
-use crate::window::registry::WindowKey;
 use crate::window::titlebar::keep_above_supported;
+use tl_ui_base::app_env::AppEnv;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::registry::WindowKey;
+use tl_ui_base::settings_global::{SettingKey, TlSettings};
+use tl_ui_kit::components::window_frame::ToggleAlwaysOnTop;
 
 /// The key combination "Open with Ctrl+Esc" reads and writes.
 const CTRL_ESC: &str = "Ctrl+Esc";

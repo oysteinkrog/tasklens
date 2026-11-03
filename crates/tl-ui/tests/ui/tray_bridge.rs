@@ -17,11 +17,11 @@ use tl_model::tray::{
 };
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
-use tl_ui::host::HostContext;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::settings_global::{SettingKey, TlSettings};
-use tl_ui::tray_bridge::{
+use tl_ui_base::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::settings_global::{SettingKey, TlSettings};
+use tl_ui_perf_core::tray_bridge::{
     self, AddTrayGraph, RemoveTrayGraph, TRAY_TICK, TrayBridge, TrayStatus, main_window_target,
     tray_source_of_card,
 };
@@ -129,9 +129,9 @@ fn rig(cx: &mut TestAppContext, graphs: Vec<TrayGraphEntry>, always_show: bool) 
     cx.update(|cx| {
         gpui_kit::init(cx);
         let appearance = AppearanceSettings::default();
-        tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-        tl_ui::theme::metrics::init_metrics(&appearance, cx);
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+        tl_ui_base::theme::metrics::init_metrics(&appearance, cx);
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         cx.set_global(EngineGlobal(Arc::clone(&c)));
         cx.set_global(BootSettings {
             settings,
@@ -618,7 +618,7 @@ fn named_and_accent_colours(cx: &mut TestAppContext) {
     let m = r.one(cx);
     assert_eq!(m.graphs[0].line_rgb, [0x14, 0xA0, 0x98]);
     assert_eq!(&*m.graphs[0].color, "teal");
-    let theme = cx.read(|cx| tl_ui::theme::current(cx).clone());
+    let theme = cx.read(|cx| tl_ui_base::theme::current(cx).clone());
     let c = theme.graph.cpu_line.to_rgb();
     let byte = |v: f32| (v * 255.0).round() as u8;
     assert_eq!(m.graphs[1].line_rgb, [byte(c.r), byte(c.g), byte(c.b)]);
@@ -653,13 +653,13 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::VisualTestContext;
-use tl_ui::actions::{Quit, ShowMainWindow, ToggleMainWindow, ToggleMiniWindow};
 use tl_ui::app::{AppEnv, StartOptions, TasklensUi, UiInit};
-use tl_ui::components::toast::ToastQueue;
-use tl_ui::pages::performance::DeviceKey;
-use tl_ui::pages::performance::actions::PerfAddTrayGraph;
 use tl_ui::window::main::open_main_window;
 use tl_ui::window::settings::{PageId, all_pages};
+use tl_ui_kit::actions::{Quit, ShowMainWindow, ToggleMainWindow, ToggleMiniWindow};
+use tl_ui_kit::components::toast::ToastQueue;
+use tl_ui_perf::performance::DeviceKey;
+use tl_ui_perf::performance::actions::PerfAddTrayGraph;
 
 fn saved(cx: &mut TestAppContext) -> Vec<(String, String, String, u16)> {
     cx.read(|cx| {
@@ -1017,10 +1017,10 @@ fn shell_action_goes_to_open_main_window(cx: &mut TestAppContext) {
 // ---- E31-009: close to tray and minimize to tray ----
 
 use tl_model::command::Tab;
-use tl_ui::actions::{CloseWindow, MinimizeWindow, SelectTab};
 use tl_ui::app::{UiExit, UiExitSlot};
 use tl_ui::window::main::main_window_view;
 use tl_ui::window::titlebar::TitleBarProbe;
+use tl_ui_kit::actions::{CloseWindow, MinimizeWindow, SelectTab};
 
 impl Full {
     /// Runs one tray tick and returns the last model it sent.
@@ -1209,10 +1209,10 @@ mod row_menu_tray {
     use tl_model::process::{GroupKind, GroupRow, GroupRowKind, ProcFlags};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu};
-    use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
-    use tl_ui::pages::processes::menu::{MenuCaps, row_menu};
-    use tl_ui::table::tree_table::RowKind;
+    use tl_ui_kit::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu};
+    use tl_ui_procs::pages::processes::actions::{CapturedTarget, CapturedTargets};
+    use tl_ui_procs::pages::processes::menu::{MenuCaps, row_menu};
+    use tl_ui_table::table::tree_table::RowKind;
 
     const SOURCE: &str = "process:0000000000000007:4321:4242";
 
@@ -1408,10 +1408,10 @@ mod row_menu_tray {
 mod minigraph_menu_tray {
     use super::*;
     use gpui_kit::VisualTestContext;
-    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu};
-    use tl_ui::pages::minigraph::GraphColor;
-    use tl_ui::pages::minigraph::menu::{CardMenuCtx, card_menu};
-    use tl_ui::pages::minigraph::sources::{GraphColumn, MinigraphId};
+    use tl_ui_kit::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu};
+    use tl_ui_perf_core::minigraph::GraphColor;
+    use tl_ui_perf_core::minigraph::menu::{CardMenuCtx, card_menu};
+    use tl_ui_perf_core::minigraph::sources::{GraphColumn, MinigraphId};
 
     const SOURCE: &str = "process:0000000000000007:4321:4242";
 

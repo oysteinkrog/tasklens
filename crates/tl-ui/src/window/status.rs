@@ -42,19 +42,19 @@ use tl_model::command::Tab;
 use tl_model::health::{HealthSnapshot, SourceId, SourceState};
 use tl_model::time::TimeNs;
 
-use crate::actions::OpenCollectorHealth;
-use crate::components::badge::{TlBadge, TlBadgeKind};
-use crate::components::focus::TlFocusRing;
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::engine_link::{self, EngineLinkGlobal, EngineLinkState, SwitchToEngineService};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::template::Template;
-use crate::text::style::numeric_style;
-use crate::text::untrusted::debug_assert_clean;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::engine_link::{self, EngineLinkGlobal, EngineLinkState, SwitchToEngineService};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::numeric_style;
+use tl_ui_base::text::untrusted::debug_assert_clean;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::actions::OpenCollectorHealth;
+use tl_ui_kit::components::badge::{TlBadge, TlBadgeKind};
+use tl_ui_kit::components::focus::TlFocusRing;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
-pub use crate::shell::{CHIP_H, StatusAction, StatusActionKind, StatusChanged};
+pub use tl_ui_base::shell::{CHIP_H, StatusAction, StatusActionKind, StatusChanged};
 
 /// The chip's max width is the page width minus this, × ui_scale.
 pub const CHIP_RESERVE: f32 = 200.0;
@@ -776,7 +776,8 @@ impl StatusChip {
                     drawn.push((action.label.clone(), theme.text_primary));
                 }
                 StatusActionKind::Badge => {
-                    let colors = crate::components::badge::badge_colors(TlBadgeKind::Info, theme);
+                    let colors =
+                        tl_ui_kit::components::badge::badge_colors(TlBadgeKind::Info, theme);
                     drawn.push((" ".into(), theme.text_primary));
                     drawn.push((action.label.clone(), colors.text));
                 }

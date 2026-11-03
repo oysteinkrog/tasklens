@@ -27,25 +27,25 @@ use tl_model::command::{
 use tl_model::health::SourceId;
 use tracing::warn;
 
-use super::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-use crate::action_tracker::host_send_allowed;
-use crate::actions::OpenAdditionalSetup;
-pub use crate::actions::SetupRow;
-use crate::components::badge::{TlBadge, TlBadgeKind};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::components::motion::M_SLOW;
-use crate::components::progress::TlSpinner;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged};
-use crate::i18n::{Strings, tr, tr_args};
-use crate::text::fonts::MONO_FAMILY;
-use crate::text::style::{t_md, t_sm};
-use crate::theme::{current, metrics};
-use crate::util::clipboard_write;
+use tl_ui_base::action_tracker::host_send_allowed;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use tl_ui_base::text::fonts::MONO_FAMILY;
+use tl_ui_base::text::style::{t_md, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::actions::OpenAdditionalSetup;
+pub use tl_ui_kit::actions::SetupRow;
+use tl_ui_kit::components::badge::{TlBadge, TlBadgeKind};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
+use tl_ui_kit::components::motion::M_SLOW;
+use tl_ui_kit::components::progress::TlSpinner;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 
 /// The packaged `tasklens-setup` script, embedded at build time. The UI reads no system file
 /// (E29-OI-15).

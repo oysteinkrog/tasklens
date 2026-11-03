@@ -2,7 +2,7 @@
 //! Esc chain decision table, and the Tab order.
 
 use gpui_kit::TestAppContext;
-use tl_ui::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
+use tl_ui_base::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 
 #[gpui_kit::test]
 fn focus_initial_prefers_primary(cx: &mut TestAppContext) {
@@ -69,16 +69,16 @@ mod esc_chain {
     };
     use tl_model::command::Tab;
     use tl_model::table::TableMode;
-    use tl_ui::actions::{EscapeChain, RefreshCurrentTab};
     use tl_ui::app::{BootSettings, UiExit, UiExitSlot};
-    use tl_ui::components::menu::{TlMenu, context_menu_open, open_context_menu_at};
-    use tl_ui::components::toast;
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{
         self as shell, FilterChanged, GlobalShellEvents, MainWindow, PageSlot, ShellPage,
         main_window_view, open_main_window, set_test_page,
     };
     use tl_ui::window::status::StatusChanged;
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_kit::actions::{EscapeChain, RefreshCurrentTab};
+    use tl_ui_kit::components::menu::{TlMenu, context_menu_open, open_context_menu_at};
+    use tl_ui_kit::components::toast;
     use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 
     struct FakePage {
@@ -123,8 +123,8 @@ mod esc_chain {
         cx.update(|cx| {
             gpui_kit::init(cx);
             let appearance = AppearanceSettings::default();
-            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_global(BootSettings {
                 settings: Settings::default(),
                 state: UiState::default(),
@@ -133,7 +133,7 @@ mod esc_chain {
             });
             TlSettings::init(cx);
             toast::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
             set_test_page(cx, Tab::Processes, fake);
             set_test_page(cx, Tab::Services, fake);
             shell::init(cx);

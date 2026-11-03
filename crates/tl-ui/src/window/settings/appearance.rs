@@ -11,14 +11,14 @@ use gpui_kit::{App, SharedString};
 use tracing::warn;
 
 use super::{PageBuilder, PageId};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::i18n::tr;
-use crate::settings_global::{SettingKey, SettingValue};
-use crate::theme::ActivateTheme;
 use crate::window::main::UI_SCALE_TOAST;
 use crate::window::menubar::scale_toast_text;
 use crate::window::menus_view::theme_rows;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::{SettingKey, SettingValue};
+use tl_ui_base::theme::ActivateTheme;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
 
 fn pct(v: i64) -> SharedString {
     format!("{v}%").into()

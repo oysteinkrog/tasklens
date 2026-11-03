@@ -63,20 +63,20 @@ use self::actions::{
 use self::filter::filter_section;
 use self::section::{InfoRow, InfoSection, InfoSectionId};
 use self::sections::{InfoInputs, InfoWords};
-use crate::actions::{ClearFilter, RefreshCurrentTab};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::empty::TlEmptyState;
-use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
-use crate::demand::DemandAggregator;
-use crate::host::HostContext;
-use crate::hub::{SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_en};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::shell::{FilterChanged, ShellPage, StatusChanged};
-use crate::text::style::t_base;
-use crate::theme::{current, metrics};
-use crate::util::clipboard_write;
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::shell::{FilterChanged, ShellPage, StatusChanged};
+use tl_ui_base::text::style::t_base;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::actions::{ClearFilter, RefreshCurrentTab};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::empty::TlEmptyState;
+use tl_ui_kit::components::toast::{ToastKey, ToastKind, ToastQueue};
 
 /// Content width from which the sections sit in two columns, × ui_scale.
 const TWO_COLUMNS_FROM: f32 = 880.;

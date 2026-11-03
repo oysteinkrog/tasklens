@@ -13,25 +13,25 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::time::{TimeNs, now_boot_ns};
-use tl_ui::actions::{OpenCollectorHealth, OpenShortcuts};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::toast::ToastQueue;
-use tl_ui::components::tooltip::DELAY_CONTROL;
-use tl_ui::components::window_frame::{
-    CloseSecondaryWindow, TestClientFrame, TlSecondaryWindow, TlWindowKind, frame_bottom,
-    has_modal_child,
-};
-use tl_ui::i18n::{set_test_catalogue, tr_calls};
-use tl_ui::theme::share_code::{decode_tl1, encode_tl1};
-use tl_ui::theme::user_store::serialize_user_themes;
-use tl_ui::theme::{ThemeDef, ThemeStore, builtin, current, metrics};
 use tl_ui::window::collector_health::{CollectorHealthWindow, StateLook};
-use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::share_theme::{ShareTheme, ShareThemeView};
 use tl_ui::window::shortcuts::{
     Heading, LISTED_CONTEXTS, ShortcutsWindow, build_rows, first_context,
 };
 use tl_ui::window::theme_editor::{EditTheme, ThemeEditor, ThemeEditorDone};
+use tl_ui_base::i18n::{set_test_catalogue, tr_calls};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::theme::share_code::{decode_tl1, encode_tl1};
+use tl_ui_base::theme::user_store::serialize_user_themes;
+use tl_ui_base::theme::{ThemeDef, ThemeStore, builtin, current, metrics};
+use tl_ui_kit::actions::{OpenCollectorHealth, OpenShortcuts};
+use tl_ui_kit::components::toast::ToastQueue;
+use tl_ui_kit::components::tooltip::DELAY_CONTROL;
+use tl_ui_kit::components::window_frame::{
+    CloseSecondaryWindow, TestClientFrame, TlSecondaryWindow, TlWindowKind, frame_bottom,
+    has_modal_child,
+};
 use tl_ui_settings::settings::{Decorations, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -1307,13 +1307,13 @@ mod reset_settings {
     };
     use tl_model::client::EngineClient;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::dialog::{DialogButton, TlDialogView};
-    use tl_ui::components::window_frame::{
+    use tl_ui::window::confirm::ResetSettings;
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_base::theme::ThemeStore;
+    use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui_kit::components::window_frame::{
         TestClientFrame, TlSecondaryWindow, TlWindowKind, TlWindowSpec, frame_bottom,
     };
-    use tl_ui::settings_global::TlSettings;
-    use tl_ui::theme::ThemeStore;
-    use tl_ui::window::confirm::ResetSettings;
     use tl_ui_settings::settings::{Decorations, Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -1533,7 +1533,7 @@ mod reset_settings {
     fn reset_cancel_label_translated(cx: &mut TestAppContext) {
         let mut r = rig(cx, true);
         r.pcx.update(|_, cx| {
-            tl_ui::i18n::set_test_catalogue(cx, "shell-confirm-cancel = <cancel>\n")
+            tl_ui_base::i18n::set_test_catalogue(cx, "shell-confirm-cancel = <cancel>\n")
         });
         let (_, view, vcx) = open_confirm(&mut r, cx);
         let cancel = vcx.read(|cx| view.read(cx).dialog().cancel_text().to_string());
@@ -1636,11 +1636,11 @@ mod crash_report {
     use tl_model::client::EngineClient;
     use tl_model::command::Command;
     use tl_ui::app::{AppEnv, CrashReport, TasklensUi, UiInit};
-    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
     use tl_ui::window::crash_report::{
         CopyCrashReport, CrashReportWindow, OpenCrashLogFolder, show_pending,
     };
-    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind};
     use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -1858,10 +1858,10 @@ mod public_ip {
     };
     use tl_model::client::EngineClient;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::dialog::{DialogButton, TlDialogView};
-    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::public_ip::request_public_ip_fetch;
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
     use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -2071,7 +2071,7 @@ struct EditorRig {
 /// Sets up the themes and a parent window with a Root and a toast queue, as the main window has.
 fn editor_rig(cx: &mut TestAppContext, themes: &[ThemeDef]) -> EditorRig {
     setup_themes(cx, themes);
-    cx.update(tl_ui::components::toast::init);
+    cx.update(tl_ui_kit::components::toast::init);
     let parent = cx.add_window(|window, cx| Root::new(cx.new(|_| Parent), window, cx));
     let mut parent = VisualTestContext::from_window(parent.into(), cx);
     let toasts =
@@ -2226,7 +2226,7 @@ fn editor_done_saves(cx: &mut TestAppContext) {
                 .map(|d| d.name.to_string())
                 .collect::<Vec<_>>(),
             store.active.name.to_string(),
-            tl_ui::settings_global::TlSettings::settings(cx)
+            tl_ui_base::settings_global::TlSettings::settings(cx)
                 .theme
                 .active
                 .clone(),
@@ -2277,14 +2277,14 @@ fn editor_slot_list_keys(cx: &mut TestAppContext) {
     let f = frame.clone();
     assert_eq!(
         vcx.read(|cx| f.read(cx).content().read(cx).selected_slot()),
-        tl_ui::theme::ThemeSlot::WindowBg
+        tl_ui_base::theme::ThemeSlot::WindowBg
     );
     vcx.simulate_keystrokes("down");
     vcx.run_until_parked();
     let f = frame.clone();
     assert_eq!(
         vcx.read(|cx| f.read(cx).content().read(cx).selected_slot()),
-        tl_ui::theme::ThemeSlot::Titlebar
+        tl_ui_base::theme::ThemeSlot::Titlebar
     );
 }
 
@@ -2309,7 +2309,7 @@ fn editor_on_titlebar(
 }
 
 fn style_version(cx: &mut TestAppContext) -> u64 {
-    cx.update(|cx| tl_ui::theme::metrics(cx).style_version)
+    cx.update(|cx| tl_ui_base::theme::metrics(cx).style_version)
 }
 
 fn type_hex(vcx: &mut VisualTestContext, text: &str) {
@@ -2328,7 +2328,7 @@ fn editor_readouts_for_slot(cx: &mut TestAppContext) {
     let ed = editor_content(&frame, &mut vcx);
     vcx.read(|cx| {
         let e = ed.read(cx);
-        assert_eq!(e.selected_slot(), tl_ui::theme::ThemeSlot::Titlebar);
+        assert_eq!(e.selected_slot(), tl_ui_base::theme::ThemeSlot::Titlebar);
         assert_eq!(e.readouts(), ("R 39 G 41 B 43", "H 210 S 009 V 017"));
     });
     let hex = vcx.read(|cx| ed.read(cx).hex_text(cx));
@@ -2392,9 +2392,9 @@ fn editor_hue_shift_step(cx: &mut TestAppContext) {
 fn editor_drag_coalesced(cx: &mut TestAppContext) {
     let mut r = editor_rig(cx, &[mine()]);
     let _driver = r.parent.update(|window, cx| {
-        let driver = cx.new(tl_ui::anim::AnimationDriver::new);
-        tl_ui::anim::AnimationDriver::register(&driver, window, cx);
-        tl_ui::theme::store::set_anim_window(window.window_handle(), cx);
+        let driver = cx.new(tl_ui_base::anim::AnimationDriver::new);
+        tl_ui_base::anim::AnimationDriver::register(&driver, window, cx);
+        tl_ui_base::theme::store::set_anim_window(window.window_handle(), cx);
         driver
     });
     edit(&mut r, "Mine");
@@ -2437,7 +2437,7 @@ fn click_editor_button(vcx: &mut VisualTestContext, id: &str) {
 fn current_slots(cx: &mut TestAppContext) -> Vec<gpui_kit::Hsla> {
     cx.update(|cx| {
         let t = current(cx);
-        tl_ui::theme::ThemeSlot::ALL
+        tl_ui_base::theme::ThemeSlot::ALL
             .iter()
             .map(|s| s.get(t))
             .collect()
@@ -2530,7 +2530,7 @@ fn editor_share_encodes_preview(cx: &mut TestAppContext) {
     let def = decode_tl1(&code).expect("decodes");
     assert_eq!(&*def.name, "Mine");
     assert_eq!(
-        def.slots[tl_ui::theme::ThemeSlot::Titlebar as usize],
+        def.slots[tl_ui_base::theme::ThemeSlot::Titlebar as usize],
         builtin::parse_hex("#123456").expect("hex")
     );
 }
@@ -2542,7 +2542,7 @@ fn editor_import_loads_preview(cx: &mut TestAppContext) {
     let (frame, mut vcx) = editor_vcx(cx);
     let mut def = builtin::load()[0].clone();
     def.name = "Imported".into();
-    def.slots[tl_ui::theme::ThemeSlot::RowSelected as usize] =
+    def.slots[tl_ui_base::theme::ThemeSlot::RowSelected as usize] =
         builtin::parse_hex("#FF0000").expect("hex");
     set_clipboard(&mut vcx, &encode_tl1(&def));
     click_editor_button(&mut vcx, "import");

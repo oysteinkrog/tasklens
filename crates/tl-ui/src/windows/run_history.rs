@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::app_env::{RunHistoryEntry, RunHistoryStore};
+use tl_ui_base::app_env::{RunHistoryEntry, RunHistoryStore};
 
 /// The most entries the history keeps (PROC-095).
 pub const RUN_HISTORY_MAX: usize = 50;

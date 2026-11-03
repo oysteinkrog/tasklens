@@ -12,15 +12,15 @@ use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{CpuSet, CpuTopology, GpuTotals, Metric};
-use tl_ui::components::menu::{close_context_menu, open_context_menu};
-use tl_ui::pages::performance::overview::layout::BoxKind;
-use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage, edge_id};
-use tl_ui::pages::performance::sidebar::DeviceSidebar;
-use tl_ui::pages::performance::status_bar::rules::{ChipKind, MachineState, Tone};
-use tl_ui::pages::performance::status_bar::{BAR_ID, PILL_ID, StatusBar, WARNINGS_ID, chip_id};
-use tl_ui::pages::performance::{DeviceKey, PerformancePage};
-use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_kit::components::menu::{close_context_menu, open_context_menu};
 use tl_ui_pagehost::PageHost;
+use tl_ui_perf::performance::overview::layout::BoxKind;
+use tl_ui_perf::performance::overview::{OVERVIEW_KEY, OverviewPage, edge_id};
+use tl_ui_perf::performance::sidebar::DeviceSidebar;
+use tl_ui_perf::performance::status_bar::rules::{ChipKind, MachineState, Tone};
+use tl_ui_perf::performance::status_bar::{BAR_ID, PILL_ID, StatusBar, WARNINGS_ID, chip_id};
+use tl_ui_perf::performance::{DeviceKey, PerformancePage};
 use tl_ui_settings::settings::{Settings, StatusBarPlacement};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -207,7 +207,7 @@ mod performance_tab {
             focus.focus(window, cx);
         });
         r.vcx
-            .dispatch_action(tl_ui::pages::performance::actions::PerfSetStatusBar {
+            .dispatch_action(tl_ui_perf::performance::actions::PerfSetStatusBar {
                 placement: StatusBarPlacement::Overview,
             });
         draw(r.vcx);
@@ -223,7 +223,7 @@ mod performance_tab {
     /// border, at both smoke sizes.
     #[gpui_kit::test]
     fn status_row_aligned_with_boxes(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::overview::cpu_box::CPU_BOX_ID;
+        use tl_ui_perf::performance::overview::cpu_box::CPU_BOX_ID;
         let r = &mut open(cx);
         for (w, h) in [(1920., 1200.), (1280., 800.)] {
             r.vcx.simulate_resize(size(px(w), px(h)));
@@ -487,7 +487,7 @@ mod overview {
         });
         draw(vcx);
         let page = vcx.read_entity(&host, |h, _| h.page.clone());
-        let theme = vcx.update(|_, cx| tl_ui::theme::current(cx).clone());
+        let theme = vcx.update(|_, cx| tl_ui_base::theme::current(cx).clone());
         let edge = |vcx: &mut VisualTestContext, kind| {
             vcx.read_entity(&page, |p, cx| p.edge_color(kind, cx))
         };
@@ -546,11 +546,11 @@ mod main_window {
     use super::*;
     use gpui_kit::{EventEmitter, FocusHandle, InteractiveElement as _};
     use tl_model::command::Tab;
-    use tl_ui::demand::GlobalDemand;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageSlot, ShellPage, open_main_window, set_test_page,
     };
     use tl_ui::window::status::StatusChanged;
+    use tl_ui_base::demand::GlobalDemand;
 
     struct FakePage {
         focus: FocusHandle,
@@ -592,8 +592,8 @@ mod main_window {
         // The page host installs the hub and demand globals; `shell::init` replaces its ShellApi.
         let _pages = PageHost::install(cx, Arc::clone(&engine), settings);
         cx.update(|cx| {
-            tl_ui::components::toast::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
+            tl_ui_kit::components::toast::init(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
             for tab in [Tab::Processes, Tab::Services] {
                 set_test_page(cx, tab, fake);
             }

@@ -5,14 +5,14 @@ use std::sync::Arc;
 use gpui_kit::{Action, TestAppContext};
 use tl_model::ids::ProcessKey;
 use tl_model::time::BootId;
-use tl_ui::pages::minigraph::GraphColor;
-use tl_ui::pages::minigraph::actions::{
+use tl_ui_perf_core::minigraph::GraphColor;
+use tl_ui_perf_core::minigraph::actions::{
     AddAppGraph, AddMinigraph, AddNameGraph, AddRandomMinigraphs, CloseMiniWindow,
     MinigraphAddToWindow, MinigraphAttach, MinigraphAttachAll, MinigraphCloseDetachedWindow,
     MinigraphDetach, MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor,
     MinigraphSetRange, ResetMinigraphLayout, ToggleMiniAlwaysOnTop,
 };
-use tl_ui::pages::minigraph::sources::{GraphColumn, MinigraphId, MinigraphSource};
+use tl_ui_perf_core::minigraph::sources::{GraphColumn, MinigraphId, MinigraphSource};
 
 fn id() -> MinigraphId {
     MinigraphId(3)
@@ -89,7 +89,7 @@ fn minigraph_action_round_trip(cx: &mut TestAppContext) {
     );
     let add = MinigraphAddToWindow {
         window: 2,
-        source: MinigraphSource::Gpu(Some(tl_ui::pages::performance::DeviceKey(Arc::from(
+        source: MinigraphSource::Gpu(Some(tl_ui_perf::performance::DeviceKey(Arc::from(
             "gpu:GPU-1",
         )))),
     };
@@ -187,14 +187,14 @@ mod card {
     use tl_model::snapshot::{ComponentHeader, ProcessSeriesSet, ProcessSnapshot, SeriesSet};
     use tl_model::time::{BootId, now_boot_ns};
     use tl_model::validity::{FieldValidity, ProcessField, Validity};
-    use tl_ui::chart::{ChartState, YScale};
-    use tl_ui::hub::SnapshotHub;
-    use tl_ui::pages::minigraph::GraphColor;
-    use tl_ui::pages::minigraph::card::{CardState, MinigraphCard, card_shadow};
-    use tl_ui::pages::minigraph::sources::{
+    use tl_ui_base::hub::SnapshotHub;
+    use tl_ui_chart::chart::{ChartState, YScale};
+    use tl_ui_perf::performance::DeviceKey;
+    use tl_ui_perf_core::minigraph::GraphColor;
+    use tl_ui_perf_core::minigraph::card::{CardState, MinigraphCard, card_shadow};
+    use tl_ui_perf_core::minigraph::sources::{
         GraphColumn, MinigraphEntry, MinigraphId, MinigraphSource,
     };
-    use tl_ui::pages::performance::DeviceKey;
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -286,9 +286,9 @@ mod card {
         };
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-            tl_ui::theme::metrics::init_metrics(&appearance, cx);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui_base::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui_base::i18n::init_strings(cx, "en-US");
         });
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
@@ -1041,7 +1041,7 @@ mod card {
     #[gpui_kit::test]
     fn card_shadow_follows_intensity(cx: &mut TestAppContext) {
         let _r = rig(cx, 50);
-        let shadow = cx.update(|cx| card_shadow(tl_ui::theme::current(cx), 1.0));
+        let shadow = cx.update(|cx| card_shadow(tl_ui_base::theme::current(cx), 1.0));
         let shadow = shadow.expect("a shadow at 50 %");
         assert!((shadow.color.a - 0.175).abs() < 1e-6, "{}", shadow.color.a);
         assert_eq!(shadow.offset.y, gpui_kit::px(4.));
@@ -1153,20 +1153,20 @@ mod panel {
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
     use tl_model::ids::DeviceIdx;
     use tl_ui::app::{BootSettings, EngineGlobal};
-    use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
-    use tl_ui::components::toast::ToastKind;
-    use tl_ui::demand::DemandAggregator;
-    use tl_ui::host::HostContext;
-    use tl_ui::hub::SnapshotHub;
-    use tl_ui::pages::minigraph::GraphColor;
-    use tl_ui::pages::minigraph::actions::{
+    use tl_ui_base::demand::DemandAggregator;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::hub::SnapshotHub;
+    use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+    use tl_ui_kit::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
+    use tl_ui_kit::components::toast::ToastKind;
+    use tl_ui_perf_core::minigraph::GraphColor;
+    use tl_ui_perf_core::minigraph::actions::{
         MinigraphHide, MinigraphSetColor, MinigraphSetRange, ResetMinigraphLayout,
     };
-    use tl_ui::pages::minigraph::panel::{MinigraphPanel, PanelFull, toast_full};
-    use tl_ui::pages::minigraph::sources::{
+    use tl_ui_perf_core::minigraph::panel::{MinigraphPanel, PanelFull, toast_full};
+    use tl_ui_perf_core::minigraph::sources::{
         MinigraphEntry, MinigraphId, MinigraphSource, default_entries,
     };
-    use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
     use tl_ui_settings::settings::{
         AppearanceSettings, MinigraphState, Settings, ThemeSettings, UiState,
     };
@@ -1241,9 +1241,9 @@ mod panel {
         cx.update(|cx| {
             gpui_kit::init(cx);
             let appearance = AppearanceSettings::default();
-            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-            tl_ui::theme::metrics::init_metrics(&appearance, cx);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui_base::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_global(EngineGlobal(Arc::clone(&client)));
             cx.set_global(BootSettings {
                 settings: Settings::default(),
@@ -2407,13 +2407,13 @@ mod panel {
         use tl_model::table::{Manager, UnitRef};
         use tl_model::time::BootId;
         use tl_model::validity::{FieldValidity, Validity};
-        use tl_ui::components::menu::{MenuEntryInfo, TlMenu};
-        use tl_ui::pages::minigraph::actions::AddRandomMinigraphs;
-        use tl_ui::pages::minigraph::panel::AddError;
-        use tl_ui::pages::minigraph::sources::GraphColumn;
-        use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
-        use tl_ui::pages::processes::menu::{GraphKind, MenuCaps, graph_source, row_menu};
-        use tl_ui::table::tree_table::RowKind;
+        use tl_ui_kit::components::menu::{MenuEntryInfo, TlMenu};
+        use tl_ui_perf_core::minigraph::actions::AddRandomMinigraphs;
+        use tl_ui_perf_core::minigraph::panel::AddError;
+        use tl_ui_perf_core::minigraph::sources::GraphColumn;
+        use tl_ui_procs::pages::processes::actions::{CapturedTarget, CapturedTargets};
+        use tl_ui_procs::pages::processes::menu::{GraphKind, MenuCaps, graph_source, row_menu};
+        use tl_ui_table::table::tree_table::RowKind;
 
         fn key(pid: u32) -> ProcessKey {
             ProcessKey {
@@ -2866,11 +2866,11 @@ mod mounted {
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::app::{AppEnv, StartOptions, TasklensUi, UiInit};
-    use tl_ui::pages::minigraph::actions::{MinigraphHide, ResetMinigraphLayout};
-    use tl_ui::pages::minigraph::panel::MinigraphPanel;
-    use tl_ui::pages::minigraph::sources::{MinigraphSource, default_entries};
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{main_window_view, open_main_window};
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_perf_core::minigraph::actions::{MinigraphHide, ResetMinigraphLayout};
+    use tl_ui_perf_core::minigraph::panel::MinigraphPanel;
+    use tl_ui_perf_core::minigraph::sources::{MinigraphSource, default_entries};
     use tl_ui_settings::settings::{Settings, StartTab, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 

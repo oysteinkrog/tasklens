@@ -47,14 +47,14 @@ mod filter {
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, Tab};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::host::HostContext;
-    use tl_ui::pages::startup::StartupPage;
-    use tl_ui::pages::startup::actions::bind_keys_startup;
     use tl_ui::window::filter::FILTER_DEBOUNCE;
     use tl_ui::window::main::{
         MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
     };
+    use tl_ui_base::host::HostContext;
     use tl_ui_settings::settings::{Settings, UiState};
+    use tl_ui_sys::pages::startup::StartupPage;
+    use tl_ui_sys::pages::startup::actions::bind_keys_startup;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn startup_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
@@ -134,10 +134,10 @@ fn startup_keymap_registered(cx: &mut TestAppContext) {
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::pages::startup::StartupPage;
-    use tl_ui::pages::startup::actions::StartupDelete;
     use tl_ui::window::main::{main_window_view, open_main_window};
     use tl_ui_settings::settings::{Settings, StartTab, UiState};
+    use tl_ui_sys::pages::startup::StartupPage;
+    use tl_ui_sys::pages::startup::actions::StartupDelete;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     let engine = FakeEngine::new();
@@ -190,12 +190,12 @@ mod main_window {
     use tl_model::table::{SysNodeId, SysRow, SysTable};
     use tl_model::validity::Validity;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::demand::DEMAND_COALESCE;
-    use tl_ui::pages::startup::StartupPage;
-    use tl_ui::pages::startup::delegate::StartupDelegate;
-    use tl_ui::table::tree_table::TreeTableDelegate as _;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
+    use tl_ui_base::demand::DEMAND_COALESCE;
     use tl_ui_settings::settings::{Settings, StartTab, UiState};
+    use tl_ui_sys::pages::startup::StartupPage;
+    use tl_ui_sys::pages::startup::delegate::StartupDelegate;
+    use tl_ui_table::table::tree_table::TreeTableDelegate as _;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
@@ -223,7 +223,7 @@ mod main_window {
         };
         cx.update(|cx| {
             TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_reduce_motion(true);
         });
         cx.run_until_parked();
@@ -271,7 +271,9 @@ mod main_window {
             })
         }
 
-        fn table(&mut self) -> Entity<tl_ui::table::tree_table::TlTreeTable<StartupDelegate>> {
+        fn table(
+            &mut self,
+        ) -> Entity<tl_ui_table::table::tree_table::TlTreeTable<StartupDelegate>> {
             let page = self.page().expect("the Startup page exists");
             self.vcx.read_entity(&page, |page, _| page.table().clone())
         }

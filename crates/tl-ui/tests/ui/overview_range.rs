@@ -14,22 +14,22 @@ use tl_model::command::Tab;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
 use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
-use tl_ui::chart::ChartView;
-use tl_ui::components::kv_grid;
-use tl_ui::demand::{DemandAggregator, GlobalDemand};
-use tl_ui::hub::{GlobalHub, SnapshotHub};
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::overview::range::{segment_id, trigger_id};
-use tl_ui::pages::performance::overview::{
-    BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage, RANGE_HEADER_ID,
-};
-use tl_ui::pages::performance::status_bar::BAR_ID;
-use tl_ui::pages::performance::{DeviceKey, PerformancePage};
-use tl_ui::settings_global::TlSettings;
 use tl_ui::window::main::{
     self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
 };
 use tl_ui::window::titlebar::TitleBarProbe;
+use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
+use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+use tl_ui_base::i18n::init_strings;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_chart::chart::ChartView;
+use tl_ui_kit::components::kv_grid;
+use tl_ui_perf::performance::overview::range::{segment_id, trigger_id};
+use tl_ui_perf::performance::overview::{
+    BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage, RANGE_HEADER_ID,
+};
+use tl_ui_perf::performance::status_bar::BAR_ID;
+use tl_ui_perf::performance::{DeviceKey, PerformancePage};
 use tl_ui_settings::settings::{
     AppearanceSettings, OverviewRange, Settings, ThemeSettings, UiState,
 };
@@ -136,13 +136,13 @@ pub(crate) fn open(cx: &mut TestAppContext) -> Rig<'_> {
         gpui_kit::init(cx);
         cx.set_reduce_motion(true);
         let theme_settings = ThemeSettings::default();
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &theme_settings,
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         kv_grid::init(cx);
         cx.set_global(EngineGlobal(Arc::clone(&client)));
@@ -160,9 +160,9 @@ pub(crate) fn open(cx: &mut TestAppContext) -> Rig<'_> {
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
         cx.set_global(GlobalHub(hub));
         cx.set_global(GlobalDemand(demand.clone()));
-        tl_ui::components::toast::init(cx);
-        tl_ui::actions::bind_keys_global(cx);
-        tl_ui::pages::performance::actions::bind_keys_performance(cx);
+        tl_ui_kit::components::toast::init(cx);
+        tl_ui_kit::actions::bind_keys_global(cx);
+        tl_ui_perf::performance::actions::bind_keys_performance(cx);
         cx.set_global(StartOptions::default());
         set_test_page(cx, Tab::Processes, |_, cx: &mut Context<MainWindow>| {
             let page = cx.new(|cx| FakeProcesses {
@@ -185,7 +185,7 @@ pub(crate) fn open(cx: &mut TestAppContext) -> Rig<'_> {
     vcx.update(|window, _| window.activate_window());
     draw(vcx);
     let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
-    vcx.dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
+    vcx.dispatch_action(tl_ui_kit::actions::SelectTab(Tab::Performance as usize));
     draw(vcx);
     let page = vcx
         .read_entity(&main, |m, _| {
@@ -364,9 +364,9 @@ fn plot_cover(plots: &[gpui_kit::Bounds<gpui_kit::Pixels>]) -> (f32, usize) {
 #[gpui_kit::test]
 fn overview_box_chrome_at_most_40(cx: &mut TestAppContext) {
     use gpui_kit::{Bounds, EntityId, Pixels};
-    use tl_ui::chart::element::take_plots;
-    use tl_ui::pages::performance::overview::gpu_box::vram_id;
-    use tl_ui::pages::performance::overview::layout::BoxKind;
+    use tl_ui_chart::chart::element::take_plots;
+    use tl_ui_perf::performance::overview::gpu_box::vram_id;
+    use tl_ui_perf::performance::overview::layout::BoxKind;
 
     let mut r = open(cx);
     // Three disks and a GPU with six engines in two rows, as on the owner's machine. Catalog entries sit

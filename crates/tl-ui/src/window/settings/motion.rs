@@ -4,10 +4,10 @@
 use gpui_kit::App;
 
 use super::{PageBuilder, PageId};
-use crate::components::banner::TlBannerKind;
-use crate::host::HostContext;
-use crate::i18n::tr;
-use crate::settings_global::{SettingKey, TlSettings, system_reduce_motion};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::{SettingKey, TlSettings, system_reduce_motion};
+use tl_ui_kit::components::banner::TlBannerKind;
 
 pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(host, PageId::Motion);

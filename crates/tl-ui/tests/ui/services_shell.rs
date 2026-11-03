@@ -21,7 +21,7 @@ use tl_model::table::{Manager, UnitRef, UnitType};
 
 use tl_model::time::BootId;
 
-use tl_ui::pages::services::actions::*;
+use tl_ui_sys::pages::services::actions::*;
 
 use tl_ui_settings::settings::UiState;
 
@@ -106,7 +106,7 @@ mod flows {
 
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 
-    use tl_ui::pages::services::flows::run_jump_to_process;
+    use tl_ui_sys::pages::services::flows::run_jump_to_process;
 
     use tl_ui::window::main::{main_window_view, open_main_window_on};
 
@@ -142,7 +142,7 @@ mod flows {
         };
         cx.update(|cx| {
             TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_reduce_motion(true);
         });
         let handle = cx
@@ -460,18 +460,18 @@ mod page {
 
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 
-    use tl_ui::host::HostContext;
+    use tl_ui_base::host::HostContext;
 
-    use tl_ui::pages::services::actions::{
+    use tl_ui_sys::pages::services::actions::{
         GoToService, JumpOrigin, ManagerArg, ServicesClearAllFilters, ServicesShowHidden,
         ServicesToggleStateFilter, StateFilterArg,
     };
 
-    use tl_ui::pages::services::ServicesPage;
+    use tl_ui_sys::pages::services::ServicesPage;
 
-    use tl_ui::pages::sys_table::SysBody;
+    use tl_ui_table::table::sys_table::SysBody;
 
-    use tl_ui::table::tree_table::TreeTableDelegate as _;
+    use tl_ui_table::table::tree_table::TreeTableDelegate as _;
 
     use tl_ui::window::filter::FILTER_DEBOUNCE;
 
@@ -906,14 +906,14 @@ mod page {
         );
         publish_view(&engine, 3, &units, units.len(), generation(&engine));
         draw(&mut vcx);
-        let id = tl_ui::pages::services::delegate::row_key(&SysNodeId::Unit(sshd().unit));
+        let id = tl_ui_sys::pages::services::delegate::row_key(&SysNodeId::Unit(sshd().unit));
         assert_eq!(selected_ids(&mut vcx, &page), [id]);
     }
 
     /// Child process rows run the process row commands through the shared entry point
     /// (tasklens-pdu.58): the requests, confirmations and toasts match the Processes tab's.
     mod child_actions {
-        use tl_ui::pages::processes::actions::GoToParent;
+        use tl_ui_procs::pages::processes::actions::GoToParent;
 
         use super::*;
 
@@ -975,7 +975,7 @@ mod main_window {
 
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 
-    use tl_ui::pages::services::ServicesPage;
+    use tl_ui_sys::pages::services::ServicesPage;
 
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
 

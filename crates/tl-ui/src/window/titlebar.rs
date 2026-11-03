@@ -33,23 +33,25 @@ use tl_model::health::HelperState;
 use tl_model::table::TableMode;
 
 use super::main::{WINDOW_TITLE, hide_main_to_tray, tray_available};
-use super::registry::WindowKey;
 use super::toolbar::{DefaultToolbar, Toolbar, ToolbarContent, ToolbarModel, toolbar_toggle};
-use crate::actions::{CancelWindowPick, CloseWindow, MinimizeWindow, StartWindowPick, ZoomWindow};
-use crate::components::icons::{AppIcon, TlIcon};
-use crate::components::shield::TlShield;
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::components::window_frame::ToggleAlwaysOnTop;
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged};
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::registry::WindowKey;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::actions::{
+    CancelWindowPick, CloseWindow, MinimizeWindow, StartWindowPick, ZoomWindow,
+};
+use tl_ui_kit::components::icons::{AppIcon, TlIcon};
+use tl_ui_kit::components::shield::TlShield;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_kit::components::window_frame::ToggleAlwaysOnTop;
 
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-pub use crate::shell::TitleBarProbe;
-pub use crate::shell::keep_above_supported;
+pub use tl_ui_base::shell::TitleBarProbe;
+pub use tl_ui_base::shell::keep_above_supported;
 
 /// Title bar height, × ui_scale.
 pub const TITLEBAR_H: f32 = 34.0;

@@ -55,17 +55,17 @@ use super::confirm::{ResetSettings, confirm_passwordless};
 use super::main::ShellState;
 use super::menubar::{MenuSliders, TAB_SWITCH};
 use super::public_ip::request_public_ip_fetch;
-use crate::action_tracker::host_send_allowed;
-use crate::actions::{OpenSettings, SetSetting, ToggleSetting};
-use crate::app_env::{AdapterInfo, AppEnv};
-use crate::components::menu::{TlMenu, TlMenuPopup};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::host_settings;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{tr, tr_args};
-use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::window::main::push_main_toast;
+use tl_ui_base::action_tracker::host_send_allowed;
+use tl_ui_base::app_env::{AdapterInfo, AppEnv};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::host_settings;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_kit::actions::{OpenSettings, SetSetting, ToggleSetting};
+use tl_ui_kit::components::menu::{TlMenu, TlMenuPopup};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
 
 /// The Refresh items: label key and `processes.interval_ms`, in `PROCESS_INTERVAL_MENU_MS` order.
 pub(crate) const REFRESH_KEYS: [&str; 6] = [

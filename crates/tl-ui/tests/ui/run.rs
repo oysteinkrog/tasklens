@@ -66,11 +66,11 @@ mod window {
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, Tab};
     use tl_ui::app::{AppEnv, RunHistoryEntry, RunHistoryStore, TasklensUi, UiInit};
-    use tl_ui::components::toast::ToastQueue;
-    use tl_ui::components::window_frame::{TestClientFrame, client_frame_extra, frame_bottom};
-    use tl_ui::host::HostContext;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::windows::run::{POPUP_ID, ROW_H, RunWindow, VISIBLE_ROWS, open_run_window};
+    use tl_ui_base::host::HostContext;
+    use tl_ui_kit::components::toast::ToastQueue;
+    use tl_ui_kit::components::window_frame::{TestClientFrame, client_frame_extra, frame_bottom};
     use tl_ui_settings::settings::{Decorations, Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -135,7 +135,7 @@ mod window {
         };
         cx.update(|cx| {
             TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_reduce_motion(true);
         });
         let handle = cx
@@ -419,7 +419,9 @@ mod window {
         assert_eq!(text(&mut rig), "cmd0", "the first command fills the input");
         draw(&mut rig.run);
         let popup = rig.run.debug_bounds(POPUP_ID).expect("popup drawn");
-        let s = rig.run.update(|_, cx| tl_ui::theme::metrics(cx).ui_scale);
+        let s = rig
+            .run
+            .update(|_, cx| tl_ui_base::theme::metrics(cx).ui_scale);
         let want = ROW_H * s * VISIBLE_ROWS as f32;
         assert!(
             (f32::from(popup.size.height) - want).abs() < 0.5,

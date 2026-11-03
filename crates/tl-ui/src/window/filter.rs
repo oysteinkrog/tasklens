@@ -47,17 +47,17 @@ use tl_model::command::Tab;
 use tl_model::table::TableMode;
 
 use super::main::{FilterChanged, MemGroupCleared, ShellEvents};
-use crate::actions::{FilterAccept, FilterEscape, SHELL_FILTER_CONTEXT, ToggleSetting};
-use crate::components::checkbox::TlCheckbox;
-use crate::components::icons::{TlIcon, icon};
-use crate::components::input::{FILTER_GROW, FILTER_WIDTH, FILTER_WIDTH_WIDE};
-use crate::components::motion::ease_out_cubic;
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, SettingKey, TlSettings};
-use crate::text::style::{t_base, t_sm};
-use crate::theme::{current, metrics};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, SettingKey, TlSettings};
+use tl_ui_base::text::style::{t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::actions::{FilterAccept, FilterEscape, SHELL_FILTER_CONTEXT, ToggleSetting};
+use tl_ui_kit::components::checkbox::TlCheckbox;
+use tl_ui_kit::components::icons::{TlIcon, icon};
+use tl_ui_kit::components::input::{FILTER_GROW, FILTER_WIDTH, FILTER_WIDTH_WIDE};
+use tl_ui_kit::components::motion::ease_out_cubic;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 /// Quiet time after the last keystroke before `FilterChanged` goes out (ADR-009).
 pub const FILTER_DEBOUNCE: Duration = Duration::from_millis(100);

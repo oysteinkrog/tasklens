@@ -12,8 +12,8 @@ use tl_model::client::EngineClient;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::ids::ProcessKey;
 use tl_model::time::BootId;
-use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator};
-use tl_ui::hub::SnapshotHub;
+use tl_ui_base::demand::{DEMAND_COALESCE, DemandAggregator};
+use tl_ui_base::hub::SnapshotHub;
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Rig {
@@ -245,8 +245,8 @@ fn detached_part_survives_hidden(cx: &mut TestAppContext) {
 /// Save power on battery (wlf.32): the merged demand and the charts' [`PowerSaving`].
 mod battery {
     use tl_ui::app::{BootSettings, EngineGlobal};
-    use tl_ui::demand::power_saving;
-    use tl_ui::settings_global::TlSettings;
+    use tl_ui_base::demand::power_saving;
+    use tl_ui_base::settings_global::TlSettings;
     use tl_ui_settings::settings::{Settings, UiState};
 
     use super::*;

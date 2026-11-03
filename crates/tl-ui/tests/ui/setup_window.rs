@@ -12,18 +12,18 @@ use tl_model::command::{
     Command, RaplStatus, SetupPhase, SetupRun, SetupState, SetupStatus, SetupStep,
 };
 use tl_model::health::SourceId;
-use tl_ui::actions::OpenAdditionalSetup;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::badge::TlBadgeKind;
-use tl_ui::components::dialog::{DialogButton, TlDialogView};
-use tl_ui::components::toast::ToastQueue;
-use tl_ui::components::window_frame::TlSecondaryWindow;
-use tl_ui::i18n::tr;
-use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::setup::{
     CardView, SETUP_SCRIPT, ScriptWindow, SetupRow, SetupWindow, confirm_words, open_script_window,
     row_status,
 };
+use tl_ui_base::i18n::tr;
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_kit::actions::OpenAdditionalSetup;
+use tl_ui_kit::components::badge::TlBadgeKind;
+use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+use tl_ui_kit::components::toast::ToastQueue;
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
 use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 

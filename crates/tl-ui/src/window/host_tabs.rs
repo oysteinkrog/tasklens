@@ -18,14 +18,14 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 
-use crate::actions::{DisconnectHost, EditHost, ReconnectHost, RemoveHost, SelectHost};
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::hosts_api::HostLinkStatus;
-use crate::i18n::{tr, tr_args};
-use crate::selector::TlSelector;
-use crate::text::style::numeric_style;
-use crate::theme::{current, metrics};
+use tl_ui_base::hosts_api::HostLinkStatus;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::numeric_style;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::actions::{DisconnectHost, EditHost, ReconnectHost, RemoveHost, SelectHost};
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 /// Tab height, × ui_scale.
 const TAB_H: f32 = 24.0;

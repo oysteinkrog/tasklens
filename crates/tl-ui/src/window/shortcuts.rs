@@ -30,19 +30,19 @@ use std::rc::Rc;
 
 use smallvec::SmallVec;
 
-use super::registry::{GlobalRegistry, WindowKey};
-use crate::actions::OpenShortcuts;
-use crate::app_env::AppEnv;
-use crate::components::icons::TlIcon;
-use crate::components::input::{TlInputSize, TlTextInput};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::components::window_frame::{
+use tl_ui_base::app_env::AppEnv;
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::actions::OpenShortcuts;
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::input::{TlInputSize, TlTextInput};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_kit::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::text::style::{t_base, t_sm};
-use crate::theme::{current, metrics};
 
 /// Window size and minimum size, × ui_scale.
 const SIZE: (f32, f32) = (560., 640.);

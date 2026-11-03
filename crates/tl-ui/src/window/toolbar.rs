@@ -14,10 +14,10 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 
-pub use crate::components::toolbar_button::{toolbar_icon, toolbar_toggle};
-use crate::selector::TlSelector;
-pub use crate::shell::{ToolbarContent, ToolbarModel};
-use crate::theme::metrics;
+use tl_ui_base::selector::TlSelector;
+pub use tl_ui_base::shell::{ToolbarContent, ToolbarModel};
+use tl_ui_base::theme::metrics;
+pub use tl_ui_kit::components::toolbar_button::{toolbar_icon, toolbar_toggle};
 
 /// Toolbar button side, × ui_scale.
 pub const TOOLBAR_BUTTON: f32 = 24.0;

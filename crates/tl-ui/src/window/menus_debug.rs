@@ -14,14 +14,14 @@ use gpui_kit::{Action, App, Entity, FocusHandle, Global, SharedString, Window, g
 use serde::Deserialize;
 
 use super::menus_view::active_table;
-use crate::actions::{OpenCollectorHealth, ToggleSetting};
-use crate::components::menu::{TlMenu, TlMenuPopup};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::tr;
-use crate::pages::minigraph::actions::AddRandomMinigraphs;
-use crate::settings_global::{SettingKey, TlSettings};
-use crate::table::actions::EnableAllColumns;
-use crate::table::columns::TableId;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::{SettingKey, TlSettings};
+use tl_ui_kit::actions::{OpenCollectorHealth, ToggleSetting};
+use tl_ui_kit::components::menu::{TlMenu, TlMenuPopup};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_perf_core::minigraph::actions::AddRandomMinigraphs;
+use tl_ui_table::table::actions::EnableAllColumns;
+use tl_ui_table::table::columns::TableId;
 
 gpui_kit::actions!(
     tasklens,
@@ -54,7 +54,7 @@ impl Global for ContinuousRendering {}
 
 /// Whether the debug flag is set.
 pub fn debug_enabled(cx: &App) -> bool {
-    cx.try_global::<crate::app_env::AppEnv>()
+    cx.try_global::<tl_ui_base::app_env::AppEnv>()
         .is_some_and(|e| e.debug)
 }
 

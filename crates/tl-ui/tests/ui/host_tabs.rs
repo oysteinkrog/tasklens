@@ -18,22 +18,22 @@ use tl_model::ids::NodeId;
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
 use tl_model::table::{ProcessTableView, TableRow};
 use tl_model::validity::Validity;
-use tl_ui::action_tracker::{ToastTexts, reconnecting_refusal};
-use tl_ui::actions::{CancelWindowPick, StartWindowPick};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::window_frame::TlSecondaryWindow;
-use tl_ui::demand::DEMAND_COALESCE;
-use tl_ui::host::HostContext;
-use tl_ui::hosts_api::{HostLinkStatus, HostsApi};
-use tl_ui::hub::LinkChanged;
-use tl_ui::pages::processes::ProcessesPage;
-use tl_ui::pages::processes::delegate::ProcRowId;
-use tl_ui::pages::services::ServicesPage;
-use tl_ui::table::tree_table::TreeTableDelegate as _;
 use tl_ui::window::main::{MainWindow, main_window_title, main_window_view, open_main_window};
-use tl_ui::window::registry::{GlobalRegistry, WindowKey};
-use tl_ui::windows::props::{PropsWindow, open_process_properties};
+use tl_ui_base::action_tracker::{ToastTexts, reconnecting_refusal};
+use tl_ui_base::demand::DEMAND_COALESCE;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hosts_api::{HostLinkStatus, HostsApi};
+use tl_ui_base::hub::LinkChanged;
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_kit::actions::{CancelWindowPick, StartWindowPick};
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+use tl_ui_procs::pages::processes::ProcessesPage;
+use tl_ui_procs::pages::processes::delegate::ProcRowId;
+use tl_ui_procs::windows::props::{PropsWindow, open_process_properties};
 use tl_ui_settings::settings::{HostEntry, Settings, StartTab, UiState};
+use tl_ui_sys::pages::services::ServicesPage;
+use tl_ui_table::table::tree_table::TreeTableDelegate as _;
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{key, record, toasts};
@@ -115,7 +115,7 @@ fn boot(cx: &mut TestAppContext, names: &[&'static str]) -> Rig {
     };
     cx.update(|cx| {
         TasklensUi::init(cx, client, init);
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         cx.set_reduce_motion(true);
     });
     cx.run_until_parked();
@@ -445,7 +445,7 @@ fn host_tabs_same_process_key_on_two_hosts_opens_two_windows(cx: &mut TestAppCon
         assert_eq!(local_key, WindowKey::Properties(key(pid)));
         assert_ne!(local_key, home_key);
         assert_eq!(
-            registry.count(tl_ui::window::registry::CapClass::ProcessProps),
+            registry.count(tl_ui_base::registry::CapClass::ProcessProps),
             2
         );
         (
@@ -580,7 +580,7 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     let home = rig.vcx.read_entity(&rig.main, |m, _| m.host().clone());
     let local = rig.vcx.update(|_, cx| HostContext::local(cx));
     let office = rig.vcx.update(|_, cx| {
-        tl_ui::host::HostRegistry::tabs(cx)
+        tl_ui_base::host::HostRegistry::tabs(cx)
             .into_iter()
             .find(|t| &*t.name == "office")
             .expect("office")

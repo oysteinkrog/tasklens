@@ -1,5 +1,5 @@
 //! Debug selectors (tasklens-6swdr.11, ADR-019). Every tl-ui debug selector goes through
-//! `tl_ui::selector::TlSelector`, so a test can count how many painted elements share one.
+//! `tl_ui_base::selector::TlSelector`, so a test can count how many painted elements share one.
 //! GPUI keeps one `debug_bounds` entry per selector, so a second element with the same selector
 //! hides the first from every test that looks it up. The page sweeps here check the Processes
 //! tab and each Performance resource page; the Overview sweep is
@@ -21,14 +21,14 @@ use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
 use tl_model::table::{ProcessTableView, TableRow};
 use tl_model::validity::Validity;
 use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
-use tl_ui::components::kv_grid;
-use tl_ui::demand::{DemandAggregator, GlobalDemand};
-use tl_ui::hub::{GlobalHub, SnapshotHub};
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::{DeviceKey, PerformancePage};
-use tl_ui::selector::TlSelector as _;
-use tl_ui::settings_global::TlSettings;
 use tl_ui::window::main::{self as shell, MainWindow, main_window_view, open_main_window};
+use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
+use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+use tl_ui_base::i18n::init_strings;
+use tl_ui_base::selector::TlSelector as _;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_kit::components::kv_grid;
+use tl_ui_perf::performance::{DeviceKey, PerformancePage};
 use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -82,7 +82,7 @@ fn every_selector_goes_through_the_helper() {
     calls.retain(|c| !c.starts_with(&helper));
     assert!(
         calls.is_empty(),
-        "call `tl_selector` (tl_ui::selector) instead of `debug_selector`: {calls:#?}"
+        "call `tl_selector` (tl_ui_base::selector) instead of `debug_selector`: {calls:#?}"
     );
 }
 
@@ -215,16 +215,16 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         kv_grid::init(cx);
-        tl_ui::table::actions::bind_keys_table(cx);
+        tl_ui_table::table::actions::bind_keys_table(cx);
         cx.set_global(EngineGlobal(Arc::clone(&client)));
         cx.set_global(BootSettings {
             settings,
@@ -234,14 +234,14 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
         });
         TlSettings::init(cx);
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-        tl_ui::action_tracker::install(Arc::clone(&client), Some(hub.clone()), cx);
+        tl_ui_base::action_tracker::install(Arc::clone(&client), Some(hub.clone()), cx);
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
         cx.set_global(GlobalHub(hub));
         cx.set_global(GlobalDemand(demand));
-        tl_ui::components::toast::init(cx);
-        tl_ui::actions::bind_keys_global(cx);
-        tl_ui::components::menu::bind_keys(cx);
-        tl_ui::pages::performance::actions::bind_keys_performance(cx);
+        tl_ui_kit::components::toast::init(cx);
+        tl_ui_kit::actions::bind_keys_global(cx);
+        tl_ui_kit::components::menu::bind_keys(cx);
+        tl_ui_perf::performance::actions::bind_keys_performance(cx);
         cx.set_global(StartOptions::default());
         tl_ui::window::menubar::init(cx);
         shell::init(cx);
@@ -258,7 +258,7 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
 
 fn select_tab(r: &mut Rig, tab: Tab) {
     r.vcx
-        .dispatch_action(tl_ui::actions::SelectTab(tab as usize));
+        .dispatch_action(tl_ui_kit::actions::SelectTab(tab as usize));
     draw(r.vcx);
 }
 

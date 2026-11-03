@@ -18,12 +18,12 @@ use gpui_kit::{App, AppContext as _, AsyncApp, Entity, FocusHandle, Global, Wind
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, LaunchSpec, LaunchWhat};
 
-use crate::action_tracker::ToastTexts;
-use crate::actions::{OpenHandleSearch, OpenRunDialog, Quit};
-use crate::components::menu::{TlMenu, TlMenuPopup};
-use crate::components::toast::ToastQueue;
-use crate::host::HostContext;
-use crate::i18n::tr;
+use tl_ui_base::action_tracker::ToastTexts;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_kit::actions::{OpenHandleSearch, OpenRunDialog, Quit};
+use tl_ui_kit::components::menu::{TlMenu, TlMenuPopup};
+use tl_ui_kit::components::toast::ToastQueue;
 
 gpui_kit::actions!(
     tasklens,

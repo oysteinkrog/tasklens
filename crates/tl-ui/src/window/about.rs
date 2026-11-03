@@ -28,19 +28,19 @@ use tl_model::actions::{ActionId, ActionKind, ActionRequest};
 use tl_model::validity::Validity;
 use tracing::warn;
 
-use super::registry::{GlobalRegistry, WindowKey};
-use crate::action_tracker::ToastTexts;
-use crate::app_env::{AppEnv, BuildInfo};
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::icons::AppIcon;
-use crate::components::link::TlLink;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr, tr_args};
-use crate::settings_global::TlSettings;
-use crate::text::style::{numeric_style, t_sm, t_xl};
-use crate::theme::{current, metrics};
+use tl_ui_base::action_tracker::ToastTexts;
+use tl_ui_base::app_env::{AppEnv, BuildInfo};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::{numeric_style, t_sm, t_xl};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
+use tl_ui_kit::components::icons::AppIcon;
+use tl_ui_kit::components::link::TlLink;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 
 gpui_kit::actions!(
     tasklens,

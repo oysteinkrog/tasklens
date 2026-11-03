@@ -38,32 +38,32 @@ use tl_model::snapshot::{DiskDetails, SmartAttr, SmartData, SmartKind, Snapshot}
 use tl_model::units::{short_age, uptime};
 use tl_model::validity::Validity;
 
-use crate::action_tracker::host_send_allowed;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::kv_grid::{
+use crate::window::main::push_main_toast;
+use tl_ui_base::action_tracker::host_send_allowed;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{label_style, t_base, t_sm};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::kv_grid::{
     KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, ValueTone,
 };
-use crate::components::menu::TlMenu;
-use crate::components::toast::ToastKind;
-use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args};
-use crate::pages::performance::DeviceKey;
-use crate::pages::performance::actions::{PerfShowSmart, PerfSmartReadSmartctl, PerfSmartRefresh};
-use crate::registry::{GlobalRegistry, WindowKey};
-use crate::selector::TlSelector;
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::toast::ToastKind;
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+use tl_ui_perf::performance::DeviceKey;
+use tl_ui_perf::performance::actions::{PerfShowSmart, PerfSmartReadSmartctl, PerfSmartRefresh};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
 };
-use crate::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
     TreeTableDelegate,
 };
-use crate::text::style::{label_style, t_base, t_sm};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
-use crate::window::main::push_main_toast;
 
 /// Default and minimum window size, × ui_scale.
 pub const SIZE: (f32, f32) = (760., 520.);

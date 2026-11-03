@@ -21,13 +21,15 @@ use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::chart::view::ChartView;
-use tl_ui::chart::{ChartLabels, ChartSeries, ChartSpec, ChartState, ValueAlign, ValueFormat};
-use tl_ui::components::window_frame::TlSecondaryWindow;
-use tl_ui::host::HostContext;
-use tl_ui::hub::{HostClock, SnapshotHub};
 use tl_ui::window::collector_health::{CollectorHealthWindow, open_collector_health};
-use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{HostClock, SnapshotHub};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_chart::chart::view::ChartView;
+use tl_ui_chart::chart::{
+    ChartLabels, ChartSeries, ChartSpec, ChartState, ValueAlign, ValueFormat,
+};
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
 use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -188,13 +190,13 @@ fn draw_remote_chart(
 ) -> (TimeNs, (TimeNs, ChartState, Option<Validity>, usize)) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
     });
     let host_now = clock.local_now_ns().saturating_add_signed(host_minus_pc);
     let engine = FakeEngine::new();

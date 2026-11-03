@@ -13,12 +13,12 @@ use tl_model::remote_proto::HostSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::time::BootId;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::host::HostContext;
-use tl_ui::host_settings::{self, HOST_KEYS};
-use tl_ui::pages::performance::overview::timeline::click_mode;
-use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
 use tl_ui::window::menus_settings;
 use tl_ui::window::settings::{PageBuilder, PageId, all_pages};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::host_settings::{self, HOST_KEYS};
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_perf::performance::overview::timeline::click_mode;
 use tl_ui_settings::settings::{Settings, TimelineClick, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 

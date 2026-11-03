@@ -20,25 +20,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, SetupPhase, SetupStep, Tab};
 use tl_model::remote_proto::HostSettingsValues;
 use tl_model::table::TableMode;
-use tl_ui::actions::{
-    MenuId, OpenAdditionalSetup, OpenCollectorHealth, OpenHandleSearch, OpenRunDialog,
-    OpenSettings, OpenShortcuts, Quit, SetViewMode, ShowSystemInformation, bind_keys_global,
-    register_global_handlers,
-};
 use tl_ui::app::{AppEnv, BootSettings, EngineGlobal};
-use tl_ui::components::dialog::{DialogButton, TlDialogView};
-use tl_ui::components::slider::TlSliderEvent;
-use tl_ui::components::toast::ToastQueue;
-use tl_ui::components::window_frame::TlSecondaryWindow;
-use tl_ui::host::HostContext;
-use tl_ui::settings_global::TlSettings;
-use tl_ui::table::actions::{
-    CollapseAll, EnableAllColumns, OpenColumnPicker, ResetColumns, ResizeColumnsToFit,
-    TABLE_CONTEXT, bind_keys_table,
-};
-use tl_ui::table::columns::TableId;
-use tl_ui::theme::current;
-use tl_ui::theme::user_store::{PersistTheme, ThemePersist};
 use tl_ui::window::about::OpenAbout;
 use tl_ui::window::confirm::ResetSettings;
 use tl_ui::window::main::ShellState;
@@ -47,9 +29,27 @@ use tl_ui::window::menus_file::SystemMonitor;
 use tl_ui::window::menus_view::{CopyTheme, DeleteTheme, ImportTheme};
 use tl_ui::window::titlebar::{TitleBarProbe, TitleBarView};
 use tl_ui::window::{menus_debug, menus_file, menus_help, menus_settings, menus_view};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::current;
+use tl_ui_base::theme::user_store::{PersistTheme, ThemePersist};
+use tl_ui_kit::actions::{
+    MenuId, OpenAdditionalSetup, OpenCollectorHealth, OpenHandleSearch, OpenRunDialog,
+    OpenSettings, OpenShortcuts, Quit, SetViewMode, ShowSystemInformation, bind_keys_global,
+    register_global_handlers,
+};
+use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+use tl_ui_kit::components::slider::TlSliderEvent;
+use tl_ui_kit::components::toast::ToastQueue;
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
 use tl_ui_settings::settings::{
     AppearanceSettings, ColumnResize, NetworkUnit, Settings, StartTab, ThemeSettings, UiState,
 };
+use tl_ui_table::table::actions::{
+    CollapseAll, EnableAllColumns, OpenColumnPicker, ResetColumns, ResizeColumnsToFit,
+    TABLE_CONTEXT, bind_keys_table,
+};
+use tl_ui_table::table::columns::TableId;
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{passwordless, publish_polkit};
@@ -70,7 +70,7 @@ struct Host {
 
 impl Render for Host {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let context_menu = tl_ui::components::menu::context_menu_layer(window, cx);
+        let context_menu = tl_ui_kit::components::menu::context_menu_layer(window, cx);
         div()
             .key_context("Global")
             .flex()
@@ -142,9 +142,9 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
     cx.update(|cx| {
         gpui_kit::init(cx);
         if toasts {
-            tl_ui::components::toast::init(cx);
+            tl_ui_kit::components::toast::init(cx);
         }
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
@@ -153,7 +153,7 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
         cx.set_global(ThemePersist(Box::new(move |request| {
             theme_persist_sink.borrow_mut().push(request);
         })));
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         cx.set_global(TitleBarProbe {
             client: Some(true),
             ..TitleBarProbe::default()
@@ -187,8 +187,8 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
         menus_view::init(cx);
         register_global_handlers(cx);
         // The Settings menu reads the host settings from the hub (tasklens-q4x76.23).
-        let hub = cx.new(|cx| tl_ui::hub::SnapshotHub::new(Arc::clone(&client), cx));
-        cx.set_global(tl_ui::hub::GlobalHub(hub));
+        let hub = cx.new(|cx| tl_ui_base::hub::SnapshotHub::new(Arc::clone(&client), cx));
+        cx.set_global(tl_ui_base::hub::GlobalHub(hub));
         cx.set_global(EngineGlobal(client));
         cx.on_action(move |_: &ResetSettings, _| reset_count.set(reset_count.get() + 1));
         cx.set_reduce_motion(true);
@@ -702,11 +702,11 @@ fn columns_disabled_on_performance(cx: &mut TestAppContext) {
     let row = entries(r.cx)[0].bounds();
     r.cx.simulate_mouse_move(row.center(), None, Modifiers::none());
     r.cx.executor()
-        .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
+        .advance_clock(tl_ui_kit::components::tooltip::DELAY_CONTROL * 2);
     draw(r.cx);
     assert!(r.cx.debug_bounds("TlTooltip").is_some(), "tooltip shown");
     let reason =
-        r.cx.update(|_, cx| tl_ui::i18n::tr(cx, "shell-menu-view-no-table"));
+        r.cx.update(|_, cx| tl_ui_base::i18n::tr(cx, "shell-menu-view-no-table"));
     assert_eq!(reason.as_ref(), "This tab has no table");
 }
 
@@ -836,11 +836,11 @@ fn process_view_history_disables_modes(cx: &mut TestAppContext) {
         .bounds();
     r.cx.simulate_mouse_move(tree.center(), None, Modifiers::none());
     r.cx.executor()
-        .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
+        .advance_clock(tl_ui_kit::components::tooltip::DELAY_CONTROL * 2);
     draw(r.cx);
     assert!(r.cx.debug_bounds("TlTooltip").is_some(), "tooltip shown");
     let reason =
-        r.cx.update(|_, cx| tl_ui::i18n::tr(cx, "shell-menu-pv-history-flat"));
+        r.cx.update(|_, cx| tl_ui_base::i18n::tr(cx, "shell-menu-pv-history-flat"));
     assert_eq!(reason.as_ref(), "History shows a flat list");
     assert!(r.modes.borrow().is_empty());
 }
@@ -1127,7 +1127,7 @@ fn settings_menu_tab_switch_slider(cx: &mut TestAppContext) {
     let state = slider_states(r.cx)[4].clone();
     let before = r.persists.get();
     // A drag moves the slider, then the slider emits.
-    r.cx.update(|_, cx| tl_ui::components::slider::set_from_elsewhere(&state, 300., cx));
+    r.cx.update(|_, cx| tl_ui_kit::components::slider::set_from_elsewhere(&state, 300., cx));
     emit(r.cx, &state, TlSliderEvent::Preview(300.));
     assert_eq!(
         settings(r.cx).motion.tab_switch_ms,
@@ -1217,9 +1217,9 @@ fn settings_menu_all_settings_dispatch(cx: &mut TestAppContext) {
 fn set_kwin(r: &mut Rig<'_>, validity: tl_model::validity::Validity) {
     let client: Arc<dyn EngineClient> = r.engine.clone();
     r.cx.update(|_, cx| {
-        if !cx.has_global::<tl_ui::hub::GlobalHub>() {
-            let hub = cx.new(|cx| tl_ui::hub::SnapshotHub::new(client, cx));
-            cx.set_global(tl_ui::hub::GlobalHub(hub));
+        if !cx.has_global::<tl_ui_base::hub::GlobalHub>() {
+            let hub = cx.new(|cx| tl_ui_base::hub::SnapshotHub::new(client, cx));
+            cx.set_global(tl_ui_base::hub::GlobalHub(hub));
         }
     });
     r.engine.publish_with(|s| {
@@ -1234,8 +1234,8 @@ fn set_on_top(cx: &mut VisualTestContext, on: bool) {
     cx.update(|_, cx| {
         TlSettings::set(
             cx,
-            tl_ui::settings_global::SettingKey::WindowAlwaysOnTop,
-            tl_ui::settings_global::SettingValue::Bool(on),
+            tl_ui_base::settings_global::SettingKey::WindowAlwaysOnTop,
+            tl_ui_base::settings_global::SettingValue::Bool(on),
         )
     });
 }
@@ -1248,7 +1248,7 @@ fn window_menu_always_on_top_dispatch(cx: &mut TestAppContext) {
     let sink = toggles.clone();
     r.cx.update(|_, cx| {
         cx.on_action(
-            move |a: &tl_ui::components::window_frame::ToggleAlwaysOnTop, _| {
+            move |a: &tl_ui_kit::components::window_frame::ToggleAlwaysOnTop, _| {
                 sink.borrow_mut().push(a.clone())
             },
         );
@@ -1272,7 +1272,7 @@ fn window_menu_always_on_top_dispatch(cx: &mut TestAppContext) {
     keys(r.cx, "enter");
     let got = toggles.borrow().clone();
     assert_eq!(got.len(), 1, "{got:?}");
-    assert_eq!(got[0].window, tl_ui::window::registry::WindowKey::Main);
+    assert_eq!(got[0].window, tl_ui_base::registry::WindowKey::Main);
 }
 
 #[gpui_kit::test]
@@ -1295,11 +1295,11 @@ fn window_menu_disabled_without_keep_above(cx: &mut TestAppContext) {
     );
     r.cx.simulate_mouse_move(item.bounds().center(), None, Modifiers::none());
     r.cx.executor()
-        .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
+        .advance_clock(tl_ui_kit::components::tooltip::DELAY_CONTROL * 2);
     draw(r.cx);
     assert!(r.cx.debug_bounds("TlTooltip").is_some(), "tooltip shown");
     let reason =
-        r.cx.update(|_, cx| tl_ui::i18n::tr(cx, "fnd-pin-unsupported"));
+        r.cx.update(|_, cx| tl_ui_base::i18n::tr(cx, "fnd-pin-unsupported"));
     assert_eq!(reason.as_ref(), "Not supported by this desktop");
 }
 
@@ -1525,9 +1525,9 @@ fn set_gpus(r: &mut Rig<'_>, gpus: usize) {
     use tl_model::ids::DeviceIdx;
     let client: Arc<dyn EngineClient> = r.engine.clone();
     r.cx.update(|_, cx| {
-        if !cx.has_global::<tl_ui::hub::GlobalHub>() {
-            let hub = cx.new(|cx| tl_ui::hub::SnapshotHub::new(client, cx));
-            cx.set_global(tl_ui::hub::GlobalHub(hub));
+        if !cx.has_global::<tl_ui_base::hub::GlobalHub>() {
+            let hub = cx.new(|cx| tl_ui_base::hub::SnapshotHub::new(client, cx));
+            cx.set_global(tl_ui_base::hub::GlobalHub(hub));
         }
     });
     let entries: Vec<DeviceEntry> = (0..gpus)
@@ -1562,7 +1562,7 @@ fn open_graphs(cx: &mut VisualTestContext) {
 }
 
 /// The built entries of the open View > Graphs submenu.
-fn graphs_entries(cx: &mut VisualTestContext) -> Vec<tl_ui::components::menu::MenuEntryInfo> {
+fn graphs_entries(cx: &mut VisualTestContext) -> Vec<tl_ui_kit::components::menu::MenuEntryInfo> {
     let bar = bar(cx);
     cx.update(|window, cx| {
         let popup = bar.read(cx).popup().expect("menu open").clone();
@@ -1605,7 +1605,7 @@ fn graphs_menu_p1_items(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn graphs_checks_follow_keys(cx: &mut TestAppContext) {
-    use tl_ui::components::menu::MenuEntryKind;
+    use tl_ui_kit::components::menu::MenuEntryKind;
     let mut r = rig(cx);
     set_gpus(&mut r, 1);
     let defaults = [true, true, true, true, true, true, false];
@@ -1643,7 +1643,7 @@ fn graphs_checks_follow_keys(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn gpu_items_disabled_without_gpu(cx: &mut TestAppContext) {
-    use tl_ui::components::menu::MenuEntryKind;
+    use tl_ui_kit::components::menu::MenuEntryKind;
     let mut r = rig(cx);
     set_gpus(&mut r, 0);
     assert!(
@@ -1684,7 +1684,7 @@ fn gpu_items_disabled_without_gpu(cx: &mut TestAppContext) {
         .bounds();
     r.cx.simulate_mouse_move(row.center(), None, Modifiers::none());
     r.cx.executor()
-        .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
+        .advance_clock(tl_ui_kit::components::tooltip::DELAY_CONTROL * 2);
     draw(r.cx);
     assert!(r.cx.debug_bounds("TlTooltip").is_some(), "tooltip shown");
 
@@ -1709,7 +1709,7 @@ fn reset_minigraph_dispatch(cx: &mut TestAppContext) {
     let count = resets.clone();
     r.cx.update(|_, cx| {
         cx.on_action(
-            move |_: &tl_ui::pages::minigraph::actions::ResetMinigraphLayout, _| {
+            move |_: &tl_ui_perf_core::minigraph::actions::ResetMinigraphLayout, _| {
                 count.set(count.get() + 1)
             },
         );
@@ -1775,7 +1775,10 @@ fn start_minimized_disabled(cx: &mut TestAppContext) {
     };
     assert_eq!(
         built,
-        Some((tl_ui::components::menu::MenuEntryKind::Disabled, px(16.))),
+        Some((
+            tl_ui_kit::components::menu::MenuEntryKind::Disabled,
+            px(16.)
+        )),
         "disabled and indented by 16 at 100%"
     );
     assert_ne!(row.selected(), Some(true));
@@ -1869,7 +1872,7 @@ fn tall_window(cx: &mut VisualTestContext) {
 fn settings_entry(
     cx: &mut VisualTestContext,
     label: &str,
-) -> (tl_ui::components::menu::MenuEntryKind, Option<String>) {
+) -> (tl_ui_kit::components::menu::MenuEntryKind, Option<String>) {
     let bar = bar(cx);
     cx.update(|window, cx| {
         let popup = bar.read(cx).popup().expect("menu open").clone();
@@ -1885,7 +1888,7 @@ fn settings_entry(
 
 #[gpui_kit::test]
 fn save_history_disabled_without_recording(cx: &mut TestAppContext) {
-    use tl_ui::components::menu::MenuEntryKind;
+    use tl_ui_kit::components::menu::MenuEntryKind;
     let r = rig(cx);
     assert!(!host(&r).history.enabled);
     keys(r.cx, "alt-s");
@@ -2047,7 +2050,7 @@ const P2_THEMES: [&str; 12] = [
 /// land; then this is all twelve.
 fn builtin_names(cx: &mut VisualTestContext) -> Vec<String> {
     let present: Vec<String> = cx.update(|_, cx| {
-        cx.global::<tl_ui::theme::ThemeStore>()
+        cx.global::<tl_ui_base::theme::ThemeStore>()
             .builtin
             .iter()
             .map(|d| d.name.to_string())
@@ -2067,7 +2070,7 @@ fn open_theme(cx: &mut VisualTestContext) {
 }
 
 /// The built entries of the open View > Theme submenu.
-fn theme_entries(cx: &mut VisualTestContext) -> Vec<tl_ui::components::menu::MenuEntryInfo> {
+fn theme_entries(cx: &mut VisualTestContext) -> Vec<tl_ui_kit::components::menu::MenuEntryInfo> {
     let bar = bar(cx);
     cx.update(|window, cx| {
         let popup = bar.read(cx).popup().expect("menu open").clone();
@@ -2083,7 +2086,7 @@ fn theme(cx: &mut VisualTestContext) -> ThemeSettings {
 }
 
 fn active_theme(cx: &mut VisualTestContext) -> String {
-    cx.update(|_, cx| tl_ui::theme::current(cx).name.to_string())
+    cx.update(|_, cx| tl_ui_base::theme::current(cx).name.to_string())
 }
 
 fn add_custom_theme(cx: &mut VisualTestContext, name: &str, base: &str) {
@@ -2091,20 +2094,22 @@ fn add_custom_theme(cx: &mut VisualTestContext, name: &str, base: &str) {
     let base = base.to_owned();
     cx.update(move |_, cx| {
         let mut def = cx
-            .global::<tl_ui::theme::ThemeStore>()
+            .global::<tl_ui_base::theme::ThemeStore>()
             .builtin
             .iter()
             .find(|d| d.name.as_ref() == base)
             .expect("base theme")
             .clone();
         def.name = name.clone().into();
-        cx.global_mut::<tl_ui::theme::ThemeStore>().user.push(def);
+        cx.global_mut::<tl_ui_base::theme::ThemeStore>()
+            .user
+            .push(def);
     });
 }
 
 fn user_theme_names(cx: &mut VisualTestContext) -> Vec<String> {
     cx.update(|_, cx| {
-        cx.global::<tl_ui::theme::ThemeStore>()
+        cx.global::<tl_ui_base::theme::ThemeStore>()
             .user
             .iter()
             .map(|d| d.name.to_string())
@@ -2137,7 +2142,7 @@ fn set_follow(cx: &mut VisualTestContext, on: bool) {
 }
 
 fn activate(cx: &mut VisualTestContext, name: &str) {
-    cx.dispatch_action(tl_ui::theme::ActivateTheme {
+    cx.dispatch_action(tl_ui_base::theme::ActivateTheme {
         name: name.to_owned().into(),
     });
     draw(cx);
@@ -2166,11 +2171,11 @@ fn theme_rows_painted(cx: &mut TestAppContext) {
     keys(r.cx, "escape escape");
     // That theme's own colours, as built when it is active.
     r.cx.update(|_, cx| {
-        tl_ui::theme::store::activate(other, tl_ui::theme::ActivateSource::User, cx)
+        tl_ui_base::theme::store::activate(other, tl_ui_base::theme::ActivateSource::User, cx)
             .expect("theme exists");
     });
     let (menu_bg, text) = r.cx.update(|_, cx| {
-        let t = tl_ui::theme::current(cx);
+        let t = tl_ui_base::theme::current(cx);
         (t.menu_bg, t.text_primary)
     });
     assert_eq!(painted, (menu_bg, text));
@@ -2259,9 +2264,9 @@ fn import_clipboard(r: &mut Rig<'_>, text: String) {
     draw(r.cx);
 }
 
-fn builtin_def(cx: &mut VisualTestContext, name: &str) -> tl_ui::theme::ThemeDef {
+fn builtin_def(cx: &mut VisualTestContext, name: &str) -> tl_ui_base::theme::ThemeDef {
     cx.update(|_, cx| {
-        cx.global::<tl_ui::theme::ThemeStore>()
+        cx.global::<tl_ui_base::theme::ThemeStore>()
             .builtin
             .iter()
             .find(|d| d.name.as_ref() == name)
@@ -2270,8 +2275,8 @@ fn builtin_def(cx: &mut VisualTestContext, name: &str) -> tl_ui::theme::ThemeDef
     })
 }
 
-fn user_defs(cx: &mut VisualTestContext) -> Vec<tl_ui::theme::ThemeDef> {
-    cx.update(|_, cx| cx.global::<tl_ui::theme::ThemeStore>().user.clone())
+fn user_defs(cx: &mut VisualTestContext) -> Vec<tl_ui_base::theme::ThemeDef> {
+    cx.update(|_, cx| cx.global::<tl_ui_base::theme::ThemeStore>().user.clone())
 }
 
 #[gpui_kit::test]
@@ -2306,7 +2311,7 @@ fn import_tl1_roundtrip(cx: &mut TestAppContext) {
     let mut r = rig_with_toasts(cx);
     add_custom_theme(r.cx, "Mine", "Default Dark");
     let def = user_defs(r.cx).remove(0);
-    import_clipboard(&mut r, tl_ui::theme::share_code::encode_tl1(&def));
+    import_clipboard(&mut r, tl_ui_base::theme::share_code::encode_tl1(&def));
     assert_eq!(user_theme_names(r.cx), ["Mine", "Mine 2"]);
     let defs = user_defs(r.cx);
     assert_eq!(defs[1].slots, defs[0].slots);
@@ -2326,7 +2331,7 @@ fn import_raw_json_multiple(cx: &mut TestAppContext) {
     b.name = "B".into();
     import_clipboard(
         &mut r,
-        tl_ui::theme::user_store::serialize_user_themes(&[a, b]),
+        tl_ui_base::theme::user_store::serialize_user_themes(&[a, b]),
     );
     assert_eq!(user_theme_names(r.cx), ["A", "B"]);
     assert_eq!(active_theme(r.cx), "A");
@@ -2343,7 +2348,7 @@ fn import_missing_slot_fill(cx: &mut TestAppContext) {
     let dark = builtin_def(r.cx, "Default Dark");
     let defs = user_defs(r.cx);
     assert_eq!(defs[0].name.as_ref(), "Half");
-    let i = tl_ui::theme::ThemeSlot::Titlebar as usize;
+    let i = tl_ui_base::theme::ThemeSlot::Titlebar as usize;
     assert_eq!(defs[0].slots[i], dark.slots[i]);
 }
 
@@ -2399,7 +2404,7 @@ fn delete_active_falls_back_to_preferred(cx: &mut TestAppContext) {
 
     let (names, active, settings) = cx.update(|cx| {
         let names = cx
-            .global::<tl_ui::theme::ThemeStore>()
+            .global::<tl_ui_base::theme::ThemeStore>()
             .user
             .iter()
             .map(|d| d.name.to_string())
@@ -2478,7 +2483,7 @@ fn delete_confirm_focuses_cancel(cx: &mut TestAppContext) {
     drop(dialog);
     assert_eq!(
         cx.update(|cx| {
-            cx.global::<tl_ui::theme::ThemeStore>()
+            cx.global::<tl_ui_base::theme::ThemeStore>()
                 .user
                 .iter()
                 .map(|d| d.name.to_string())
@@ -2524,13 +2529,13 @@ fn theme_custom_suffix(cx: &mut TestAppContext) {
     let shadow = name.clone();
     r.cx.update(move |_, cx| {
         let def = cx
-            .global::<tl_ui::theme::ThemeStore>()
+            .global::<tl_ui_base::theme::ThemeStore>()
             .builtin
             .iter()
             .find(|d| *d.name == *shadow)
             .expect("built-in")
             .clone();
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
@@ -2555,7 +2560,7 @@ fn theme_custom_suffix(cx: &mut TestAppContext) {
 fn activate_refused_while_editing(cx: &mut TestAppContext) {
     let mut r = rig_with_toasts(cx);
     r.cx.update(|_, cx| {
-        let store = cx.global_mut::<tl_ui::theme::ThemeStore>();
+        let store = cx.global_mut::<tl_ui_base::theme::ThemeStore>();
         store.preview = Some(store.active.clone());
     });
     activate(r.cx, "Default Light");
@@ -2577,7 +2582,10 @@ fn activate_refused_while_editing(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn sync_on_applies_at_once(cx: &mut TestAppContext) {
     let r = rig(cx);
-    r.cx.update(|_, cx| cx.global_mut::<tl_ui::theme::ThemeStore>().system_scheme = 2);
+    r.cx.update(|_, cx| {
+        cx.global_mut::<tl_ui_base::theme::ThemeStore>()
+            .system_scheme = 2
+    });
     assert!(!theme(r.cx).follow_system);
     open_theme(r.cx);
     click_label(r.cx, "Sync theme with system");
@@ -2618,9 +2626,9 @@ fn preferred_theme_radios(cx: &mut TestAppContext) {
 
 // Graph Color submenu (E21-032).
 
-use tl_ui::pages::minigraph::GraphColor;
-use tl_ui::pages::minigraph::actions::MinigraphSetColor;
-use tl_ui::pages::minigraph::sources::MinigraphId;
+use tl_ui_perf_core::minigraph::GraphColor;
+use tl_ui_perf_core::minigraph::actions::MinigraphSetColor;
+use tl_ui_perf_core::minigraph::sources::MinigraphId;
 
 fn set_color(color: GraphColor) -> Box<dyn gpui_kit::Action> {
     Box::new(MinigraphSetColor {
@@ -2634,14 +2642,14 @@ fn set_color(color: GraphColor) -> Box<dyn gpui_kit::Action> {
 fn open_graph_colors(
     r: &mut Rig<'_>,
     current: GraphColor,
-) -> Vec<tl_ui::components::menu::MenuEntryInfo> {
+) -> Vec<tl_ui_kit::components::menu::MenuEntryInfo> {
     let table = r.table.clone();
     let popup = r.cx.update(|window, cx| {
         let popup =
-            tl_ui::components::menu::TlMenu::build(window, cx, table, move |menu, _, cx| {
+            tl_ui_kit::components::menu::TlMenu::build(window, cx, table, move |menu, _, cx| {
                 menubar::graph_color_menu(menu, current, set_color, cx)
             });
-        tl_ui::components::menu::open_context_menu_at(
+        tl_ui_kit::components::menu::open_context_menu_at(
             gpui_kit::point(px(100.), px(40.)),
             window,
             cx,
@@ -2705,7 +2713,7 @@ fn graph_color_menu_rows(cx: &mut TestAppContext) {
 fn graph_color_accent_swatch(cx: &mut TestAppContext) {
     let mut r = rig(cx);
     let rows = open_graph_colors(&mut r, GraphColor::Accent);
-    let accent = r.cx.update(|_, cx| tl_ui::theme::current(cx).accent);
+    let accent = r.cx.update(|_, cx| tl_ui_base::theme::current(cx).accent);
     let default_dark: gpui_kit::Hsla = gpui_kit::rgb(0x0277A6).into();
     assert_eq!(accent, default_dark, "Default Dark is active");
     assert_eq!(rows[0].swatch, Some(default_dark));
@@ -2799,7 +2807,7 @@ fn gpu_highlighted(cx: &mut VisualTestContext) -> Vec<String> {
 /// The built Rendering GPU rows as (label, kind, marked).
 fn gpu_rows(
     cx: &mut VisualTestContext,
-) -> Vec<(String, tl_ui::components::menu::MenuEntryKind, bool)> {
+) -> Vec<(String, tl_ui_kit::components::menu::MenuEntryKind, bool)> {
     let bar = bar(cx);
     cx.update(|window, cx| {
         let popup = bar.read(cx).popup().expect("menu open").clone();
@@ -2823,7 +2831,7 @@ fn gpu_rows(
 
 #[gpui_kit::test]
 fn rendering_gpu_detecting_then_rebuild(cx: &mut TestAppContext) {
-    use tl_ui::components::menu::MenuEntryKind;
+    use tl_ui_kit::components::menu::MenuEntryKind;
     let r = rig(cx);
     let sender = fake_probe(r.cx, None);
     open_rendering_gpu(r.cx);
@@ -3096,8 +3104,8 @@ fn passwordless_off_no_confirm(cx: &mut TestAppContext) {
     r.cx.update(|_, cx| {
         TlSettings::set(
             cx,
-            tl_ui::settings_global::SettingKey::PrivilegePasswordless,
-            tl_ui::settings_global::SettingValue::Bool(true),
+            tl_ui_base::settings_global::SettingKey::PrivilegePasswordless,
+            tl_ui_base::settings_global::SettingValue::Bool(true),
         )
     });
     let windows = window_count(r.cx);
@@ -3216,11 +3224,11 @@ fn enable_all_columns_disabled_on_performance(cx: &mut TestAppContext) {
     let row = drawn[2].bounds();
     r.cx.simulate_mouse_move(row.center(), None, Modifiers::none());
     r.cx.executor()
-        .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
+        .advance_clock(tl_ui_kit::components::tooltip::DELAY_CONTROL * 2);
     draw(r.cx);
     assert!(r.cx.debug_bounds("TlTooltip").is_some(), "tooltip shown");
     let reason =
-        r.cx.update(|_, cx| tl_ui::i18n::tr(cx, "shell-menu-view-no-table"));
+        r.cx.update(|_, cx| tl_ui_base::i18n::tr(cx, "shell-menu-view-no-table"));
     assert_eq!(reason.as_ref(), "This tab has no table");
 }
 
@@ -3336,7 +3344,7 @@ fn help_additional_setup_position_and_dispatch(cx: &mut TestAppContext) {
 // View > Window: Performance mini window and View > Graphs: keep detached (E21-034).
 
 /// The built entries of the open View > Window submenu (root index 2).
-fn window_entries(cx: &mut VisualTestContext) -> Vec<tl_ui::components::menu::MenuEntryInfo> {
+fn window_entries(cx: &mut VisualTestContext) -> Vec<tl_ui_kit::components::menu::MenuEntryInfo> {
     let bar = bar(cx);
     cx.update(|window, cx| {
         let popup = bar.read(cx).popup().expect("menu open").clone();
@@ -3357,7 +3365,7 @@ impl Render for MiniStub {
 
 #[gpui_kit::test]
 fn mini_window_item_check_follows_registry(cx: &mut TestAppContext) {
-    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_base::registry::{GlobalRegistry, WindowKey};
     let mut r = rig(cx);
     set_kwin(&mut r, tl_model::validity::Validity::Valid);
     assert!(
@@ -3410,7 +3418,7 @@ fn mini_window_item_dispatch(cx: &mut TestAppContext) {
     let count = Rc::new(Cell::new(0));
     let seen = Rc::clone(&count);
     r.cx.update(|_, cx| {
-        cx.on_action(move |_: &tl_ui::actions::ToggleMiniWindow, _| seen.set(seen.get() + 1));
+        cx.on_action(move |_: &tl_ui_kit::actions::ToggleMiniWindow, _| seen.set(seen.get() + 1));
     });
     keys(r.cx, "alt-v down down right down enter");
     assert_eq!(count.get(), 1);
@@ -3473,7 +3481,7 @@ fn set_up_launchers(r: &mut Rig<'_>, monitor: Option<&'static str>) {
         menus_file::init(cx);
         menus_help::init(cx);
         let hub = HostContext::local(cx).hub().cloned();
-        tl_ui::action_tracker::install(engine, hub, cx);
+        tl_ui_base::action_tracker::install(engine, hub, cx);
     });
 }
 

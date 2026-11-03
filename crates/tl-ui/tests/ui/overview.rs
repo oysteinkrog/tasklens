@@ -24,36 +24,36 @@ mod wired {
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, SeriesSet};
     use tl_model::time::now_boot_ns;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
-    use tl_ui::chart::labels::LabelKind;
-    use tl_ui::components::kv_grid;
-    use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
-    use tl_ui::demand::{DemandAggregator, GlobalDemand};
-    use tl_ui::hub::{GlobalHub, SnapshotHub};
-    use tl_ui::i18n::init_strings;
-    use tl_ui::pages::performance::actions::PerfOverviewEditLayout;
-    use tl_ui::pages::performance::overview::cpu_box::CPU_BOX_ID;
-    use tl_ui::pages::performance::overview::disk_box::{DISK_BOX_ID, DISK_ROW_ID_PREFIX};
-    use tl_ui::pages::performance::overview::edit::title_handle_id;
-    use tl_ui::pages::performance::overview::gpu_box::GPU_BOX_ID;
-    use tl_ui::pages::performance::overview::mem_box::MEM_BOX_ID;
-    use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
-    use tl_ui::pages::performance::overview::parts::{
-        body_id, box_accent, title_name_id, title_row_id,
-    };
-    use tl_ui::pages::performance::overview::procs_box::{
-        PROC_ROW_ID_PREFIX, PROCS_BOX_ID, ProcsBox,
-    };
-    use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
-    use tl_ui::pages::performance::page::DevicePage as _;
-    use tl_ui::pages::performance::{
-        DeviceKey, DeviceKind, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID,
-    };
-    use tl_ui::settings_global::TlSettings;
-    use tl_ui::theme::current;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
     };
     use tl_ui::window::titlebar::TitleBarProbe;
+    use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+    use tl_ui_base::i18n::init_strings;
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_base::theme::current;
+    use tl_ui_chart::chart::labels::LabelKind;
+    use tl_ui_kit::components::kv_grid;
+    use tl_ui_kit::components::menu::{MenuEntryKind, open_context_menu};
+    use tl_ui_perf::performance::actions::PerfOverviewEditLayout;
+    use tl_ui_perf::performance::overview::cpu_box::CPU_BOX_ID;
+    use tl_ui_perf::performance::overview::disk_box::{DISK_BOX_ID, DISK_ROW_ID_PREFIX};
+    use tl_ui_perf::performance::overview::edit::title_handle_id;
+    use tl_ui_perf::performance::overview::gpu_box::GPU_BOX_ID;
+    use tl_ui_perf::performance::overview::mem_box::MEM_BOX_ID;
+    use tl_ui_perf::performance::overview::net_box::NET_BOX_ID;
+    use tl_ui_perf::performance::overview::parts::{
+        body_id, box_accent, title_name_id, title_row_id,
+    };
+    use tl_ui_perf::performance::overview::procs_box::{
+        PROC_ROW_ID_PREFIX, PROCS_BOX_ID, ProcsBox,
+    };
+    use tl_ui_perf::performance::overview::{OVERVIEW_KEY, OverviewPage};
+    use tl_ui_perf::performance::page::DevicePage as _;
+    use tl_ui_perf::performance::{
+        DeviceKey, DeviceKind, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID,
+    };
     use tl_ui_settings::settings::{
         AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
     };
@@ -191,13 +191,13 @@ mod wired {
                 active: theme_name.to_owned(),
                 ..ThemeSettings::default()
             };
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &theme_settings,
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
             init_strings(cx, "en-US");
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
@@ -219,9 +219,9 @@ mod wired {
             let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
             cx.set_global(GlobalHub(hub));
             cx.set_global(GlobalDemand(demand.clone()));
-            tl_ui::components::toast::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
-            tl_ui::pages::performance::actions::bind_keys_performance(cx);
+            tl_ui_kit::components::toast::init(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
+            tl_ui_perf::performance::actions::bind_keys_performance(cx);
             cx.set_global(StartOptions::default());
             set_test_page(cx, Tab::Processes, |_, cx: &mut Context<MainWindow>| {
                 let page = cx.new(|cx| FakeProcesses {
@@ -245,7 +245,7 @@ mod wired {
         vcx.update(|window, _| window.activate_window());
         draw(vcx);
         let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
-        vcx.dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
+        vcx.dispatch_action(tl_ui_kit::actions::SelectTab(Tab::Performance as usize));
         draw(vcx);
         let page = vcx
             .read_entity(&main, |m, _| {
@@ -418,12 +418,12 @@ mod wired {
         select(&mut r, OVERVIEW_KEY);
         assert!(has_overview_part(&merged(&mut r)));
         r.vcx
-            .dispatch_action(tl_ui::actions::SelectTab(Tab::Processes as usize));
+            .dispatch_action(tl_ui_kit::actions::SelectTab(Tab::Processes as usize));
         draw(r.vcx);
         let away = merged(&mut r);
         assert!(!away.disks && !away.cpu_fast, "{away:?}");
         r.vcx
-            .dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
+            .dispatch_action(tl_ui_kit::actions::SelectTab(Tab::Performance as usize));
         draw(r.vcx);
         assert!(has_overview_part(&merged(&mut r)));
     }
@@ -508,7 +508,8 @@ mod wired {
         use tl_model::snapshot::RaplState;
         let mut r = open(cx);
         select(&mut r, OVERVIEW_KEY);
-        r.vcx.update(|_, cx| tl_ui::components::menu::bind_keys(cx));
+        r.vcx
+            .update(|_, cx| tl_ui_kit::components::menu::bind_keys(cx));
         let title = r
             .vcx
             .debug_bounds(Box::leak(title_row_id(CPU_BOX_ID).into_boxed_str()))
@@ -586,7 +587,8 @@ mod wired {
     fn overview_box_menu_switches_mode_and_saves(cx: &mut TestAppContext) {
         let mut r = open(cx);
         select(&mut r, OVERVIEW_KEY);
-        r.vcx.update(|_, cx| tl_ui::components::menu::bind_keys(cx));
+        r.vcx
+            .update(|_, cx| tl_ui_kit::components::menu::bind_keys(cx));
         let page = overview(&mut r).expect("an OverviewPage");
         let saved = |r: &mut Rig| {
             r.vcx
@@ -596,7 +598,7 @@ mod wired {
             r.vcx.update(|_, cx| {
                 page.read(cx)
                     .layout()
-                    .split(tl_ui::pages::performance::overview::layout::BoxKind::Cpu)
+                    .split(tl_ui_perf::performance::overview::layout::BoxKind::Cpu)
             })
         };
         let title = r
@@ -689,7 +691,7 @@ mod wired {
         let handle = r
             .vcx
             .debug_bounds(Box::leak(
-                title_handle_id(tl_ui::pages::performance::overview::layout::BoxKind::Cpu)
+                title_handle_id(tl_ui_perf::performance::overview::layout::BoxKind::Cpu)
                     .into_boxed_str(),
             ))
             .expect("the CPU title handle");
@@ -727,9 +729,9 @@ mod wired {
     #[gpui_kit::test]
     fn overview_widget_edit_page_takes_only_scroll(cx: &mut TestAppContext) {
         use gpui_kit::{ScrollDelta, ScrollWheelEvent, TouchPhase, point};
-        use tl_ui::pages::performance::actions::PerfWidgetEditStart;
-        use tl_ui::pages::performance::overview::box_menu::widget_edit_cover_id;
-        use tl_ui::pages::performance::overview::layout::BoxKind;
+        use tl_ui_perf::performance::actions::PerfWidgetEditStart;
+        use tl_ui_perf::performance::overview::box_menu::widget_edit_cover_id;
+        use tl_ui_perf::performance::overview::layout::BoxKind;
 
         // Every card on, so the Overview shows the GPU box.
         let mut r = open_with(cx, true);
@@ -865,7 +867,8 @@ mod wired {
         // Copy puts every box on the clipboard (copy_all), not the title alone.
         let mut all = String::new();
         r.vcx.update(|_, cx| page.read(cx).copy_all(&mut all, cx));
-        r.vcx.update(|_, cx| tl_ui::components::menu::bind_keys(cx));
+        r.vcx
+            .update(|_, cx| tl_ui_kit::components::menu::bind_keys(cx));
         r.vcx.simulate_keystrokes("down enter");
         r.vcx.run_until_parked();
         let copied = r.vcx.read_from_clipboard().and_then(|c| c.text());
@@ -934,7 +937,7 @@ mod wired {
     fn processes_page_remains_cached(cx: &mut TestAppContext) {
         let r = open(cx);
         r.vcx
-            .dispatch_action(tl_ui::actions::SelectTab(Tab::Processes as usize));
+            .dispatch_action(tl_ui_kit::actions::SelectTab(Tab::Processes as usize));
         draw(r.vcx);
         let main = r.main.clone();
         let page = r
@@ -1283,7 +1286,7 @@ mod wired {
         });
         assert_eq!(tab, Tab::Processes);
         r.vcx
-            .dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
+            .dispatch_action(tl_ui_kit::actions::SelectTab(Tab::Performance as usize));
         draw(r.vcx);
 
         // Copy carries the rows.

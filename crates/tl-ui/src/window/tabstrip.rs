@@ -42,16 +42,16 @@ use tl_model::command::Tab;
 use gpui_kit::component::Icon;
 
 use super::filter::FilterBox;
-use crate::actions::{SelectTab, ToggleHistoryMode};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::i18n::{Strings, tr};
 use crate::pages::information::actions::CopyInformationAll;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::theme::{UiMetrics, current, metrics};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::{UiMetrics, current, metrics};
+use tl_ui_kit::actions::{SelectTab, ToggleHistoryMode};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 /// Strip height, × ui_scale. Includes the 2 px accent line.
 pub const TAB_STRIP_H: f32 = 30.0;

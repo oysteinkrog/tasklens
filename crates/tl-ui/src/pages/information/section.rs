@@ -33,19 +33,19 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, DeviceCommand};
 
 use super::actions::{CopyInformationSection, FetchInformationPublicIp};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::kv_grid::{
+use crate::window::public_ip::request_public_ip_fetch;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::t_md;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::kv_grid::{
     KvLayout, KvWords, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, shown_text_in,
     value_copy_form,
 };
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr, tr_args, tr_en};
-use crate::selector::TlSelector;
-use crate::text::style::t_md;
-use crate::theme::{current, metrics};
-use crate::window::public_ip::request_public_ip_fetch;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
 
 /// Width of the accent bar at the band's left edge, × ui_scale.
 const BAR_WIDTH: f32 = 3.;

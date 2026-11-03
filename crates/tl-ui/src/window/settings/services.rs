@@ -5,9 +5,9 @@
 use gpui_kit::{App, SharedString};
 
 use super::{PageBuilder, PageId};
-use crate::host::HostContext;
-use crate::i18n::tr;
-use crate::settings_global::SettingKey;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::SettingKey;
 
 /// The unit type checkboxes: label key and stored value. Column 1 holds the first five.
 const UNIT_TYPES: [(&str, &str); 10] = [

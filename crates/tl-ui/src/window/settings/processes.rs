@@ -13,12 +13,12 @@ use gpui_kit::{App, SharedString};
 use tl_ui_settings::settings::{HISTORY_RETENTION_MENU_H, PROCESS_INTERVAL_MENU_MS};
 
 use super::{PageBuilder, PageId};
-use crate::components::banner::TlBannerKind;
-use crate::host::HostContext;
-use crate::host_settings;
-use crate::i18n::tr;
-use crate::settings_global::{SettingKey, SettingValue};
 use crate::window::menus_settings::{HISTORY_STORAGE_KEYS, REFRESH_KEYS};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::host_settings;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::{SettingKey, SettingValue};
+use tl_ui_kit::components::banner::TlBannerKind;
 
 pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(host, PageId::Processes);

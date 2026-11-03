@@ -19,19 +19,20 @@ use tl_model::client::EngineClient;
 use tl_model::command::AppRequest;
 use tracing::{debug, error, info, warn};
 
-use crate::components::icons::TlAssets;
-use crate::components::{kv_grid, toast};
-use crate::demand::{DemandAggregator, GlobalDemand};
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
-use crate::theme::user_store::ThemePersist;
-use crate::{actions, i18n, settings_global, text, theme};
+use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
+use tl_ui_base::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
+use tl_ui_base::theme::user_store::ThemePersist;
+use tl_ui_base::{i18n, settings_global, text, theme};
+use tl_ui_kit::actions;
+use tl_ui_kit::components::icons::TlAssets;
+use tl_ui_kit::components::{kv_grid, toast};
 
-pub use crate::app_env::{
+pub use tl_ui_base::app_env::{
     AdapterInfo, AppEnv, AppRequestHandler, BootSettings, BuildInfo, CrashReport, EngineGlobal,
     GlobalShortcutApi, ImportSummary, ImportedSettings, PersistFn, RunHistoryEntry,
     RunHistoryStore, StartOptions, ToastKindTag, UiInit,
 };
-pub use crate::theme::user_store::PersistTheme;
+pub use tl_ui_base::theme::user_store::PersistTheme;
 
 /// Applies `SetLowMemoryEnabled` itself, so the handler E20 installs never has to. Every other
 /// request goes to the `AppRequestHandler` Global.
@@ -116,7 +117,7 @@ impl TasklensUi {
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
         cx.set_global(GlobalHub(hub.clone()));
         cx.set_global(GlobalDemand(demand));
-        crate::registry::GlobalRegistry::init(cx);
+        tl_ui_base::registry::GlobalRegistry::init(cx);
 
         // 8. Boot settings and the tl-app environment.
         cx.set_global(BootSettings {
@@ -158,15 +159,15 @@ impl TasklensUi {
 
         // bind_keys_*
         actions::bind_keys_global(cx);
-        crate::table::actions::bind_keys_table(cx);
-        crate::pages::performance::actions::bind_keys_performance(cx);
-        crate::windows::actions::bind_keys_process_windows(cx);
+        tl_ui_table::table::actions::bind_keys_table(cx);
+        tl_ui_perf::performance::actions::bind_keys_performance(cx);
+        tl_ui_procs::windows::actions::bind_keys_process_windows(cx);
         crate::pages::information::actions::bind_keys_information(cx);
-        crate::pages::startup::actions::bind_keys_startup(cx);
-        crate::pages::connections::actions::bind_keys_connections(cx);
-        crate::pages::services::actions::bind_keys_services(cx);
-        crate::pages::processes::bind_keys_processes(cx);
-        crate::pages::processes::history::actions::bind_keys_history(cx);
+        tl_ui_sys::pages::startup::actions::bind_keys_startup(cx);
+        tl_ui_sys::pages::connections::actions::bind_keys_connections(cx);
+        tl_ui_sys::pages::services::actions::bind_keys_services(cx);
+        tl_ui_procs::pages::processes::bind_keys_processes(cx);
+        tl_ui_procs::pages::processes::history::actions::bind_keys_history(cx);
         actions::register_global_handlers(cx);
         crate::window::menubar::init(cx);
         crate::window::menus_view::init(cx);
@@ -177,23 +178,23 @@ impl TasklensUi {
         toast::init(cx);
 
         // ActionTracker
-        crate::action_tracker::install(hub.read(cx).client().clone(), Some(hub.clone()), cx);
-        crate::request_ends::install(hub.read(cx).client().clone(), cx);
-        crate::helper_flow::install(cx);
+        tl_ui_base::action_tracker::install(hub.read(cx).client().clone(), Some(hub.clone()), cx);
+        tl_ui_base::request_ends::install(hub.read(cx).client().clone(), cx);
+        tl_ui_kit::helper_flow::install(cx);
 
         // open hooks
         crate::window::main::init(cx);
         crate::window::share_theme::init(cx);
         crate::window::theme_editor::init(cx);
         crate::window::collector_health::init(cx);
-        crate::engine_link::install(cx);
+        tl_ui_base::engine_link::install(cx);
         crate::window::setup::init(cx);
         crate::window::shortcuts::init(cx);
         crate::window::about::init(cx);
         crate::windows::run::init(cx);
         crate::windows::smart::init(cx);
-        crate::windows::handle_search::init(cx);
-        crate::windows::mini::init(cx);
+        tl_ui_procs::windows::handle_search::init(cx);
+        tl_ui_perf::mini::init(cx);
         crate::window::confirm::init(cx);
         crate::window::settings::init(cx);
         #[cfg(feature = "bench")]
@@ -206,7 +207,7 @@ impl TasklensUi {
 #[cfg(feature = "bench")]
 fn install_gallery_hook(cx: &mut App) {
     cx.default_global::<OpenHooks>().gallery = Some(Box::new(|cx| {
-        let handle = crate::components::gallery::open_gallery(cx);
+        let handle = tl_ui_kit::components::gallery::open_gallery(cx);
         handle
             .update(cx, |_, window, _| {
                 window.set_window_title("tasklens Gallery")
@@ -387,7 +388,7 @@ fn start(cx: &mut App, launch: UiLaunch, exit: Rc<Cell<Option<UiExit>>>) {
     } else {
         TasklensUi::init(cx, client, init);
         if let Some(end) = tray {
-            crate::tray_bridge::install(cx, end);
+            tl_ui_perf_core::tray_bridge::install(cx, end);
         }
     }
     open_first(cx, open);

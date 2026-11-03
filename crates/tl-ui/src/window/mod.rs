@@ -23,5 +23,3 @@ pub mod tabstrip;
 pub mod theme_editor;
 pub mod titlebar;
 pub mod toolbar;
-
-pub use crate::registry;

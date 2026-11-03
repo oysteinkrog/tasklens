@@ -21,14 +21,14 @@ use tl_model::health::HelperState;
 use tl_model::ids::ProcessKey;
 use tl_model::table::{Manager, UnitRef};
 use tl_model::time::BootId;
-use tl_ui::action_tracker::{
+use tl_ui_base::action_tracker::{
     ActionTracker, ActionTrackerEvent, PushedToast, RetryActionAsAdmin, ShowActionDetails,
     SummaryTexts, ToastTexts,
 };
-use tl_ui::components::dialog::TlDialogView;
-use tl_ui::components::toast::{self, ToastKey, ToastKind, ToastQueue};
-use tl_ui::components::window_frame::TlSecondaryWindow;
-use tl_ui::hub::{GlobalHub, SnapshotHub};
+use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+use tl_ui_kit::components::dialog::TlDialogView;
+use tl_ui_kit::components::toast::{self, ToastKey, ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
 use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -126,13 +126,13 @@ fn init(cx: &mut TestAppContext) {
         gpui_kit::init(cx);
         toast::init(cx);
         cx.set_reduce_motion(true);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
     });
 }
 
@@ -823,11 +823,11 @@ mod with_shell {
     use gpui_kit::{EventEmitter, FocusHandle, InteractiveElement as _};
     use tl_model::command::Tab;
     use tl_ui::app::BootSettings;
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageSlot, ShellPage, open_main_window, set_test_page,
     };
     use tl_ui::window::status::StatusChanged;
+    use tl_ui_base::settings_global::TlSettings;
     use tl_ui_settings::settings::{Settings, UiState};
 
     use super::*;
@@ -868,7 +868,7 @@ mod with_shell {
                 startup_toasts: Vec::new(),
             });
             TlSettings::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
             set_test_page(cx, Tab::Processes, fake);
             set_test_page(cx, Tab::Services, fake);
             shell::init(cx);
@@ -927,7 +927,7 @@ mod with_shell {
 
 mod desktop_on_host {
     use super::*;
-    use tl_ui::host::HostContext;
+    use tl_ui_base::host::HostContext;
 
     fn open_uri() -> ActionRequest {
         request(ActionKind::OpenUri("file:///a".into()), [])
@@ -1238,7 +1238,7 @@ mod remote_root {
         let got: Rc<RefCell<Vec<ActionId>>> = Rc::default();
         let sink = got.clone();
         let (queue, tracker) = (r.queue.downgrade(), r.tracker.clone());
-        let on_sent: tl_ui::action_tracker::OnSentId =
+        let on_sent: tl_ui_base::action_tracker::OnSentId =
             Rc::new(move |id, _| sink.borrow_mut().push(id));
         let now = r.vcx.update(|_, cx| {
             tracker.update(cx, |t, cx| {

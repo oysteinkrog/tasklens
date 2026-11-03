@@ -23,28 +23,30 @@ use tl_model::system::{
     FanControlMode, MemoryTotals, Metric, SensorKind, SensorReading, ZramTotals,
 };
 use tl_model::validity::Validity;
-use tl_ui::action_tracker::{ActionTracker, GlobalActionTracker};
 use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::components::kv_grid;
-use tl_ui::demand::DemandAggregator;
-use tl_ui::host::HostContext;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::actions::PerfSetGraphRange;
-use tl_ui::pages::performance::aggregate::{
+use tl_ui_base::action_tracker::{ActionTracker, GlobalActionTracker};
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::metrics;
+use tl_ui_kit::components::kv_grid;
+use tl_ui_perf::performance::actions::PerfSetGraphRange;
+use tl_ui_perf::performance::aggregate::{
     AggregateDiskPage, AggregateGpuPage, ROW_ADAPTERS, ROW_DISKS, ROW_TYPE as AGG_ROW_TYPE,
 };
-use tl_ui::pages::performance::cpu::{
+use tl_ui_perf::performance::cpu::{
     CpuPage, PageSettingsView as CpuPageSettingsView, overlaid_spec, stacked_spec,
 };
-use tl_ui::pages::performance::disk::{
+use tl_ui_perf::performance::disk::{
     DiskPage, ROW_ACTIVE, ROW_CAPACITY, ROW_READ, ROW_RESPONSE, ROW_WRITE,
 };
-use tl_ui::pages::performance::gpu::{
+use tl_ui_perf::performance::gpu::{
     GpuPage, ROW_DECODE, ROW_DEDICATED, ROW_ENCODE, ROW_RESERVED, ROW_SHARED, ROW_TEMP_SOURCE,
     ROW_TEMPERATURE, ROW_UTILIZATION,
 };
-use tl_ui::pages::performance::memory::{
+use tl_ui_perf::performance::memory::{
     CompressedBlock, CompressedInputs, MemoryPage, ROW_AVAILABLE, ROW_CACHED, ROW_COMMITTED,
     ROW_COMPRESSED, ROW_FORM_FACTOR, ROW_HUGE_PAGES, ROW_IN_USE, ROW_RESERVED as MEM_ROW_RESERVED,
     ROW_SAVINGS, ROW_SLAB_RECLAIMABLE, ROW_SLAB_UNRECLAIMABLE, ROW_SLOTS, ROW_SPEED,
@@ -53,16 +55,14 @@ use tl_ui::pages::performance::memory::{
     ROW_ZSWAP_ENABLED, ROW_ZSWAP_POOL, SWAP_TABLE_ID, SwapColumn, ZRAM_GRID_ID, ZSWAP_GRID_ID,
     update_compressed_block, update_memory_details_modules,
 };
-use tl_ui::pages::performance::net::{
+use tl_ui_perf::performance::net::{
     NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
 };
-use tl_ui::pages::performance::page::{DevicePage, PlaceholderPage, build_page};
-use tl_ui::pages::performance::sensors::{BatteryPage, FanPage, local_midnights};
-use tl_ui::pages::performance::{
+use tl_ui_perf::performance::page::{DevicePage, PlaceholderPage, build_page};
+use tl_ui_perf::performance::sensors::{BatteryPage, FanPage, local_midnights};
+use tl_ui_perf::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformancePage, PerformanceSettingsView, sidebar_order,
 };
-use tl_ui::settings_global::TlSettings;
-use tl_ui::theme::metrics;
 use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -150,7 +150,7 @@ fn draw(cx: &mut VisualTestContext) {
 fn hidden_overview() -> Settings {
     let mut s = Settings::default();
     s.performance.device_overrides.insert(
-        tl_ui::pages::performance::overview::OVERVIEW_KEY.to_owned(),
+        tl_ui_perf::performance::overview::OVERVIEW_KEY.to_owned(),
         tl_ui_settings::settings::DeviceVisibility::Hide,
     );
     s
@@ -167,13 +167,13 @@ fn install(cx: &mut TestAppContext) -> Arc<FakeEngine> {
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         kv_grid::init(cx);
         cx.set_global(EngineGlobal(client));
@@ -297,7 +297,7 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
             assert!(secondary.read(cx).spec.hover, "CPU secondary takes hover");
         }
         // The overlaid and stacked all-cores modes build their charts from these specs.
-        let theme = tl_ui::theme::current(cx).clone();
+        let theme = tl_ui_base::theme::current(cx).clone();
         let view = CpuPageSettingsView {
             range_ns: 60_000_000_000,
             smooth: false,
@@ -419,8 +419,8 @@ mod shared_range {
     use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint};
     use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
     use tl_model::time::now_boot_ns;
-    use tl_ui::pages::performance::overview::range::{PAGE_SWITCH, trigger_id};
-    use tl_ui::pages::performance::page::{LIVE_ONLY_ID, RANGE_ID};
+    use tl_ui_perf::performance::overview::range::{PAGE_SWITCH, trigger_id};
+    use tl_ui_perf::performance::page::{LIVE_ONLY_ID, RANGE_ID};
     use tl_ui_settings::settings::OverviewRange;
 
     use super::*;
@@ -450,7 +450,7 @@ mod shared_range {
         let fan = page::<FanPage>(r, FAN);
         let bat = page::<BatteryPage>(r, MOUSE);
         r.vcx.update(|_, cx| {
-            let ns = |c: &Entity<tl_ui::chart::ChartView>| c.read(cx).spec.range_ns / S;
+            let ns = |c: &Entity<tl_ui_chart::chart::ChartView>| c.read(cx).spec.range_ns / S;
             [
                 ns(cpu.read(cx).overall()),
                 ns(memory.read(cx).physical()),
@@ -1169,7 +1169,7 @@ mod battery_history {
 
 const GIB: u64 = 1 << 30;
 
-fn value_of(model: &tl_ui::pages::performance::details::KeyValueModel, label: &str) -> String {
+fn value_of(model: &tl_ui_perf::performance::details::KeyValueModel, label: &str) -> String {
     model
         .rows
         .iter()
@@ -1557,7 +1557,7 @@ fn swap_table_caps_at_8_rows(cx: &mut TestAppContext) {
                 let d = t.delegate_mut();
                 (
                     d.scrolls(),
-                    tl_ui::table::tree_table::TreeTableDelegate::row_count(d),
+                    tl_ui_table::table::tree_table::TreeTableDelegate::row_count(d),
                 )
             })
         })
@@ -1581,8 +1581,8 @@ mod disk_p2 {
     use super::*;
     use tl_model::snapshot::DiskDetails;
     use tl_model::system::{DiskTotals, Metric};
-    use tl_ui::pages::performance::details::KeyValueModel;
-    use tl_ui::pages::performance::disk::{
+    use tl_ui_perf::performance::details::KeyValueModel;
+    use tl_ui_perf::performance::disk::{
         DISK_DETAIL_ROWS, DiskDetailInputs, disk_details_model, update_disk_details_p1,
         update_disk_details_p2,
     };
@@ -1806,9 +1806,9 @@ mod disk_buttons {
 
     use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point};
     use tl_model::snapshot::{DiskDetails, SmartKind};
-    use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
-    use tl_ui::pages::performance::PAGE_PANEL_ID;
-    use tl_ui::pages::performance::actions::PerfShowSmart;
+    use tl_ui_kit::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
+    use tl_ui_perf::performance::PAGE_PANEL_ID;
+    use tl_ui_perf::performance::actions::PerfShowSmart;
 
     const SDA: &str = "disk:sda";
 
@@ -1988,11 +1988,11 @@ mod disk_in_use {
     use tl_model::snapshot::{Blocker, DiskDetails, EjectState};
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;
-    use tl_ui::components::dialog::{DialogButton, TlDialogView};
-    use tl_ui::components::toast::ToastKind;
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::pages::performance::actions::PerfEject;
-    use tl_ui::windows::disk_in_use::{
+    use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui_kit::components::toast::ToastKind;
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_perf::performance::actions::PerfEject;
+    use tl_ui_procs::windows::disk_in_use::{
         DiskInUseWindow, EjectToasts, RETRY_DELAY, find_disk_in_use,
     };
 
@@ -2078,7 +2078,7 @@ mod disk_in_use {
     /// the app does, so the window's own toast stack takes the action toasts. The Disk page asks
     /// the shell for the eject, so the shell services are installed (without a main window).
     fn setup(cx: &mut TestAppContext) -> Rig<'_> {
-        cx.update(tl_ui::components::toast::init);
+        cx.update(tl_ui_kit::components::toast::init);
         cx.update(tl_ui::window::main::install_shell_api);
         cx.update(|cx| cx.set_global(EjectToasts::default()));
         let mut r = open_with(cx, true);
@@ -2304,7 +2304,7 @@ mod disk_in_use {
         r.vcx.run_until_parked();
         redraw(&mut vcx);
         let toasts: Vec<String> = vcx.update(|window, cx| {
-            tl_ui::components::toast::ToastQueue::of_window(window, cx)
+            tl_ui_kit::components::toast::ToastQueue::of_window(window, cx)
                 .map(|q| {
                     let texts = q.read(cx).visible_texts();
                     texts.iter().map(ToString::to_string).collect()
@@ -2480,11 +2480,11 @@ mod net_p2 {
     use super::*;
     use tl_model::snapshot::{NetDetails, WifiInfo};
     use tl_model::system::{LinkState, Metric, NetTotals};
-    use tl_ui::pages::performance::details::KeyValueModel;
-    use tl_ui::pages::performance::net::{
+    use tl_ui_base::theme::current;
+    use tl_ui_perf::performance::details::KeyValueModel;
+    use tl_ui_perf::performance::net::{
         NetP2Inputs, net_details_model, signal_bar_colors, update_net_details_p2,
     };
-    use tl_ui::theme::current;
 
     fn text(s: &str) -> InvField<Arc<str>> {
         InvField {
@@ -2881,7 +2881,7 @@ fn inventory(modules: Vec<MemoryModule>, slots: InvField<u32>) -> InventorySnaps
 
 #[test]
 fn memory_module_rows() {
-    let mut model = tl_ui::pages::performance::memory::memory_details_model();
+    let mut model = tl_ui_perf::performance::memory::memory_details_model();
     let inv = inventory(vec![dimm(inv_ok(3200)), dimm(inv_ok(3200))], inv_ok(4));
     // 32 GiB minus 716.80 MiB.
     let mem_total = 32 * GIB - 751_619_277;
@@ -2906,13 +2906,13 @@ fn memory_module_rows() {
 
 #[test]
 fn memory_module_rows_not_reported() {
-    let mut model = tl_ui::pages::performance::memory::memory_details_model();
+    let mut model = tl_ui_perf::performance::memory::memory_details_model();
     let inv = inventory(Vec::new(), InvField::default());
     update_memory_details_modules(&mut model, &inv, 32 * GIB);
     for label in [ROW_SPEED, ROW_SLOTS, ROW_FORM_FACTOR, ROW_TYPE] {
         assert_eq!(value_of(&model, label), "Not reported", "{label}");
     }
-    let hidden = |m: &tl_ui::pages::performance::details::KeyValueModel| {
+    let hidden = |m: &tl_ui_perf::performance::details::KeyValueModel| {
         m.rows
             .iter()
             .find(|r| r.label == MEM_ROW_RESERVED)
@@ -2922,7 +2922,7 @@ fn memory_module_rows_not_reported() {
     assert!(hidden(&model));
 
     // A missing configured speed reads Not reported even when the rated speed is set.
-    let mut model = tl_ui::pages::performance::memory::memory_details_model();
+    let mut model = tl_ui_perf::performance::memory::memory_details_model();
     let unsupported = InvField {
         value: 0,
         validity: Validity::Unsupported,
@@ -2942,7 +2942,7 @@ fn memory_page_demands_inventory(cx: &mut TestAppContext) {
 
 // ---- "Memory modules" block (E25-015) ----
 
-use tl_ui::pages::performance::memory::{
+use tl_ui_perf::performance::memory::{
     ModulesBlock, ROW_MOD_CAPACITY, ROW_MOD_CONFIGURED, ROW_MOD_DETAILS, ROW_MOD_FORM_FACTOR,
     ROW_MOD_MANUFACTURER, ROW_MOD_PART, ROW_MOD_RANK, ROW_MOD_SLOT, ROW_MOD_SPEED, ROW_MOD_TYPE,
     ROW_MOD_VOLTAGE, update_modules_block,
@@ -3072,7 +3072,7 @@ fn module_configured_speed_only_when_differs() {
     let grid = &block.modules[0].1;
     assert_eq!(value_of(grid, ROW_MOD_SPEED), "3200 MT/s");
     assert_eq!(value_of(grid, ROW_MOD_CONFIGURED), "2933 MT/s");
-    let hidden = |g: &tl_ui::pages::performance::details::KeyValueModel| {
+    let hidden = |g: &tl_ui_perf::performance::details::KeyValueModel| {
         g.rows
             .iter()
             .find(|r| r.label == ROW_MOD_CONFIGURED)
@@ -3159,11 +3159,11 @@ mod net_settings {
         ActionError, ActionEvent, ActionKind, ActionRequest, ActionState, LaunchSpec, LaunchWhat,
     };
     use tl_model::command::Command;
-    use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
-    use tl_ui::components::toast::{self, ToastQueue};
-    use tl_ui::pages::performance::PAGE_PANEL_ID;
-    use tl_ui::pages::performance::actions::PerfOpenNetworkSettings;
-    use tl_ui::pages::performance::net::{
+    use tl_ui_kit::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
+    use tl_ui_kit::components::toast::{self, ToastQueue};
+    use tl_ui_perf::performance::PAGE_PANEL_ID;
+    use tl_ui_perf::performance::actions::PerfOpenNetworkSettings;
+    use tl_ui_perf::performance::net::{
         NetSettingsDesktop, SETTINGS_LINK_ID, SettingsDesktop, settings_desktop,
     };
 
@@ -3843,8 +3843,8 @@ fn copy_text_fan_and_battery(cx: &mut TestAppContext) {
 
 mod copy_toast {
     use super::*;
-    use tl_ui::components::toast::ToastQueue;
-    use tl_ui::pages::performance::actions::PerfCopyDeviceInfo;
+    use tl_ui_kit::components::toast::ToastQueue;
+    use tl_ui_perf::performance::actions::PerfCopyDeviceInfo;
 
     /// Ctrl+C on a page copies its text and pushes the toast once.
     #[gpui_kit::test]
@@ -3885,11 +3885,13 @@ mod fan_menu {
 
     use gpui_kit::base::Root;
     use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point};
-    use tl_ui::components::dialog::TlDialogView;
-    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenuPopup, open_context_menu};
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::pages::performance::PAGE_PANEL_ID;
-    use tl_ui::pages::performance::actions::{PerfRenameFan, PerfSetFanTempSensor};
+    use tl_ui_kit::components::dialog::TlDialogView;
+    use tl_ui_kit::components::menu::{
+        MenuEntryInfo, MenuEntryKind, TlMenuPopup, open_context_menu,
+    };
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_perf::performance::PAGE_PANEL_ID;
+    use tl_ui_perf::performance::actions::{PerfRenameFan, PerfSetFanTempSensor};
 
     const FAN: &str = "fan:nct6797:2";
     const FAN_IDX: u16 = 10;
@@ -4366,11 +4368,11 @@ mod smartctl_fallback {
     use gpui_kit::Modifiers;
     use tl_model::snapshot::{SmartData, SmartKind};
     use tl_model::table::Total;
-    use tl_ui::components::window_frame::{TestClientFrame, frame_bottom};
-    use tl_ui::hub::GlobalHub;
-    use tl_ui::i18n::tr;
-    use tl_ui::pages::performance::actions::PerfShowSmart;
     use tl_ui::windows::smart::{SmartWindow, find_smart};
+    use tl_ui_base::hub::GlobalHub;
+    use tl_ui_base::i18n::tr;
+    use tl_ui_kit::components::window_frame::{TestClientFrame, frame_bottom};
+    use tl_ui_perf::performance::actions::PerfShowSmart;
 
     const SDA: &str = "disk:sda";
     const IDX: DeviceIdx = DeviceIdx(3);

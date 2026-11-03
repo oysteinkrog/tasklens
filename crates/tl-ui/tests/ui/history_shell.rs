@@ -21,16 +21,16 @@ use tl_model::snapshot::ComponentHeader;
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::Validity;
 use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::host::HostContext;
-use tl_ui::hub::{GlobalHub, SnapshotHub};
-use tl_ui::pages::processes::history::HistoryPage;
-use tl_ui::pages::processes::history::table::HistoryTableDelegate;
-use tl_ui::settings_global::{SettingKey, TlSettings};
-use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate};
 use tl_ui::window::settings::{PageBuilder, PageId, all_pages};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+use tl_ui_base::settings_global::{SettingKey, TlSettings};
+use tl_ui_procs::pages::processes::history::HistoryPage;
+use tl_ui_procs::pages::processes::history::table::HistoryTableDelegate;
 use tl_ui_settings::settings::{
     AppearanceSettings, HistorySettings, Settings, ThemeSettings, UiState,
 };
+use tl_ui_table::table::tree_table::{TlTreeTable, TreeTableDelegate};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const S: TimeNs = 1_000_000_000;
@@ -49,14 +49,14 @@ fn init(cx: &mut TestAppContext) -> Arc<FakeEngine> {
     let engine = FakeEngine::new();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         let client: Arc<dyn EngineClient> = engine.clone();
         let hub = cx.new(|cx| SnapshotHub::new(client, cx));
         cx.set_global(GlobalHub(hub));
@@ -191,20 +191,20 @@ fn draw(vcx: &mut VisualTestContext) {
 fn filter_typed_before_history_mode_applies(cx: &mut TestAppContext) {
     use tl_model::command::Tab;
     use tl_ui::app::StartOptions;
-    use tl_ui::components::toast;
-    use tl_ui::demand::{DemandAggregator, GlobalDemand};
     use tl_ui::window::filter::FILTER_DEBOUNCE;
     use tl_ui::window::main::{self as shell, main_window_view, open_main_window};
+    use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui_kit::components::toast;
 
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
         let appearance = AppearanceSettings::default();
-        tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-        tl_ui::theme::metrics::init_metrics(&appearance, cx);
-        tl_ui::i18n::init_strings(cx, "en-US");
-        tl_ui::table::actions::bind_keys_table(cx);
+        tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+        tl_ui_base::theme::metrics::init_metrics(&appearance, cx);
+        tl_ui_base::i18n::init_strings(cx, "en-US");
+        tl_ui_table::table::actions::bind_keys_table(cx);
         cx.set_global(BootSettings {
             settings: Settings::default(),
             state: UiState::default(),
@@ -218,7 +218,7 @@ fn filter_typed_before_history_mode_applies(cx: &mut TestAppContext) {
         cx.set_global(GlobalHub(hub));
         cx.set_global(GlobalDemand(demand));
         toast::init(cx);
-        tl_ui::actions::bind_keys_global(cx);
+        tl_ui_kit::actions::bind_keys_global(cx);
         cx.set_global(StartOptions::default());
         shell::init(cx);
     });
@@ -281,16 +281,16 @@ mod mode {
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::snapshot::ProcessSnapshot;
     use tl_model::validity::FieldValidity;
-    use tl_ui::actions::{SelectTab, ToggleHistoryMode};
     use tl_ui::app::StartOptions;
-    use tl_ui::components::menu::TlMenu;
-    use tl_ui::demand::{DemandAggregator, GlobalDemand};
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::processes::delegate::ProcRowId;
-    use tl_ui::pages::processes::history::actions::DeleteFromHistory;
     use tl_ui::window::main::{
         self as shell, GlobalShellEvents, PauseChanged, main_window_view, open_main_window,
     };
+    use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui_kit::actions::{SelectTab, ToggleHistoryMode};
+    use tl_ui_kit::components::menu::TlMenu;
+    use tl_ui_procs::pages::processes::ProcessesPage;
+    use tl_ui_procs::pages::processes::delegate::ProcRowId;
+    use tl_ui_procs::pages::processes::history::actions::DeleteFromHistory;
 
     use super::*;
 
@@ -353,10 +353,10 @@ mod mode {
         cx.update(|cx| {
             gpui_kit::init(cx);
             let appearance = AppearanceSettings::default();
-            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-            tl_ui::theme::metrics::init_metrics(&appearance, cx);
-            tl_ui::i18n::init_strings(cx, "en-US");
-            tl_ui::table::actions::bind_keys_table(cx);
+            tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui_base::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui_base::i18n::init_strings(cx, "en-US");
+            tl_ui_table::table::actions::bind_keys_table(cx);
             // `history.enabled` is a host setting: the engine's snapshot carries it.
             engine.publish_host_settings(|v| v.history.enabled = recording);
             cx.set_global(BootSettings {
@@ -371,8 +371,8 @@ mod mode {
             let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
             cx.set_global(GlobalHub(hub));
             cx.set_global(GlobalDemand(demand));
-            tl_ui::components::toast::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
+            tl_ui_kit::components::toast::init(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
             cx.set_global(StartOptions::default());
             shell::init(cx);
         });
@@ -682,7 +682,7 @@ fn processes_page(cx: &mut TestAppContext) -> PageBuilder {
 /// The `[history]` host settings the window shows (tasklens-q4x76.23).
 fn history_settings(cx: &mut TestAppContext) -> HistorySettings {
     cx.run_until_parked();
-    cx.update(|cx| tl_ui::host_settings::values(&HostContext::local(cx), cx).history)
+    cx.update(|cx| tl_ui_base::host_settings::values(&HostContext::local(cx), cx).history)
 }
 
 #[gpui_kit::test]
@@ -767,7 +767,7 @@ fn history_scrub_synth_deterministic() {
         NEAR_VIEW_NS, PROCESSES, SPAN_END_NS, SPAN_START_NS, ScrubSynth,
     };
     use tl_ui::bench::synth::SEED;
-    use tl_ui::pages::processes::history::hover::top_only;
+    use tl_ui_procs::pages::processes::history::hover::top_only;
 
     let t = SPAN_START_NS + 3_600 * S;
     let near = (t - NEAR_VIEW_NS, t);

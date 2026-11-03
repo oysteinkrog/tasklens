@@ -35,24 +35,26 @@ use tl_model::validity::Validity;
 use tl_ui_settings::settings::{DeviceVisibility, GRAPH_RANGES_S, MEMORY_BY_APP_TOP_N};
 
 use super::{CheckSection, PageBuilder, PageId};
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::input::TlTextInput;
-use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::validity::copy_text;
-use crate::host::HostContext;
-use crate::i18n::tr;
-use crate::pages::performance::card::{CardWords, card_words};
-use crate::pages::performance::gpu::device_engines;
-use crate::pages::performance::overview::timeline;
-use crate::pages::performance::{
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{
+    SettingKey, SettingValue, TlSettings, set_fan_label, set_fan_temp,
+};
+use tl_ui_base::text::style::{t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
+use tl_ui_kit::components::input::TlTextInput;
+use tl_ui_kit::components::select::{TlSelect, TlSelectItem, TlSelectState};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::validity::copy_text;
+use tl_ui_perf::performance::card::{CardWords, card_words};
+use tl_ui_perf::performance::gpu::device_engines;
+use tl_ui_perf::performance::overview::timeline;
+use tl_ui_perf::performance::{
     DeviceKey, DeviceKind as PerfKind, DeviceRow, PerformanceSettingsView, sidebar_order,
     type_number,
 };
-use crate::selector::TlSelector;
-use crate::settings_global::{SettingKey, SettingValue, TlSettings, set_fan_label, set_fan_temp};
-use crate::text::style::{t_base, t_sm};
-use crate::theme::{current, metrics};
 
 pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(host, PageId::Performance);
@@ -399,7 +401,7 @@ pub fn device_list_rows(host: &HostContext, cx: &mut App) -> Vec<DeviceListRow> 
 /// The type word of a row: the card heading for single devices, the PERF-054 type for network
 /// interfaces.
 fn kind_text(row: &DeviceRow, rows: &[DeviceRow], words: &CardWords) -> SharedString {
-    let numbered = |template: &crate::template::Template| {
+    let numbered = |template: &tl_ui_base::template::Template| {
         let mut out = String::new();
         let _ = template.write(&mut out, &[&type_number(rows, &row.key)]);
         SharedString::from(out)

@@ -29,22 +29,22 @@ mod shell {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_ui::actions::SelectTab;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
-    use tl_ui::components::toast;
-    use tl_ui::demand::{DemandAggregator, GlobalDemand};
-    use tl_ui::hub::{GlobalHub, SnapshotHub};
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::settings_global::TlSettings;
-    use tl_ui::table::tree_table::TreeTableDelegate as _;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageFactory, PageSlot, ShellPage, main_window_view,
         open_main_window, set_test_page,
     };
     use tl_ui::window::status::StatusChanged;
+    use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_kit::actions::SelectTab;
+    use tl_ui_kit::components::toast;
+    use tl_ui_procs::pages::processes::ProcessesPage;
     use tl_ui_settings::settings::{
         AppearanceSettings, Settings, StartTab, ThemeSettings, UiState,
     };
+    use tl_ui_table::table::tree_table::TreeTableDelegate as _;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::{every_kind, snapshot};
@@ -116,9 +116,9 @@ mod shell {
         cx.update(|cx| {
             gpui_kit::init(cx);
             let appearance = AppearanceSettings::default();
-            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-            tl_ui::i18n::init_strings(cx, "en-US");
-            tl_ui::table::actions::bind_keys_table(cx);
+            tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui_base::i18n::init_strings(cx, "en-US");
+            tl_ui_table::table::actions::bind_keys_table(cx);
             cx.set_global(BootSettings {
                 settings: Settings::default(),
                 state,
@@ -128,12 +128,12 @@ mod shell {
             TlSettings::init(cx);
             cx.set_global(EngineGlobal(client.clone()));
             let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
-            tl_ui::action_tracker::install(client.clone(), Some(hub.clone()), cx);
+            tl_ui_base::action_tracker::install(client.clone(), Some(hub.clone()), cx);
             let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
             cx.set_global(GlobalHub(hub));
             cx.set_global(GlobalDemand(demand));
             toast::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
             cx.set_global(StartOptions {
                 tab,
                 ..StartOptions::default()
@@ -218,13 +218,13 @@ mod toolbar {
     use tl_model::command::Tab;
     use tl_model::health::HelperState;
     use tl_model::table::TableMode;
-    use tl_ui::actions::{CycleViewMode, ToggleHideSystem};
-    use tl_ui::components::icons::TlIcon;
-    use tl_ui::i18n::tr_calls;
-    use tl_ui::pages::processes::toolbar::{
+    use tl_ui::window::toolbar::{Toolbar, ToolbarContent, ToolbarModel};
+    use tl_ui_base::i18n::tr_calls;
+    use tl_ui_kit::actions::{CycleViewMode, ToggleHideSystem};
+    use tl_ui_kit::components::icons::TlIcon;
+    use tl_ui_procs::pages::processes::toolbar::{
         HIDE_SYSTEM_ID, ProcessesButtons, ProcessesToolbar, VIEW_MODE_ID, toolbar_words,
     };
-    use tl_ui::window::toolbar::{Toolbar, ToolbarContent, ToolbarModel};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings, UiState};
 
     use super::shell::{open_with, select};
@@ -265,13 +265,13 @@ mod toolbar {
     fn rig(cx: &mut TestAppContext, model: ToolbarModel) -> (Entity<Host>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
         });
         let (view, cx) = cx.add_window_view(move |_, cx| Host {
             focus: cx.focus_handle(),
@@ -479,13 +479,13 @@ mod jump {
     use tl_model::process::{GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcessRecord};
     use tl_model::snapshot::Snapshot;
     use tl_model::table::{TableMode, TableQuery, TableRow};
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::processes::actions::ProcessesShowHidden;
-    use tl_ui::pages::processes::delegate::ProcRowId;
-    use tl_ui::pages::processes::jump::JumpTexts;
-    use tl_ui::pages::processes::table::GroupHeader;
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{ShellPage, main_window_view};
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_procs::pages::processes::ProcessesPage;
+    use tl_ui_procs::pages::processes::actions::ProcessesShowHidden;
+    use tl_ui_procs::pages::processes::delegate::ProcRowId;
+    use tl_ui_procs::pages::processes::jump::JumpTexts;
+    use tl_ui_procs::pages::processes::table::GroupHeader;
     use tl_ui_settings::settings::UiState;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -762,16 +762,16 @@ mod jump {
         use tl_model::system::MemGroupBand;
         use tl_model::time::now_boot_ns;
         use tl_model::validity::Validity;
-        use tl_ui::demand::GlobalDemand;
-        use tl_ui::hub::GlobalHub;
-        use tl_ui::pages::performance::memory::MemoryPage;
-        use tl_ui::pages::performance::memory_apps::LEGEND_ID;
-        use tl_ui::pages::performance::overview::mem_box::{APPS_MODE, MemBox};
-        use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
-        use tl_ui::pages::processes::ProcessesPage;
-        use tl_ui::settings_global::TlSettings;
         use tl_ui::window::main::{MainWindow, PageFactory, PageSlot, ShellPage, main_window_view};
         use tl_ui::window::status::StatusChanged;
+        use tl_ui_base::demand::GlobalDemand;
+        use tl_ui_base::hub::GlobalHub;
+        use tl_ui_base::settings_global::TlSettings;
+        use tl_ui_perf::performance::memory::MemoryPage;
+        use tl_ui_perf::performance::memory_apps::LEGEND_ID;
+        use tl_ui_perf::performance::overview::mem_box::{APPS_MODE, MemBox};
+        use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
+        use tl_ui_procs::pages::processes::ProcessesPage;
         use tl_ui_settings::settings::{MemoryView, UiState};
         use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -947,7 +947,7 @@ mod jump {
             let opened = open_with_perf(cx, UiState::default(), perf);
             let mut r = rig_on(opened);
             r.vcx.update(|_, cx| {
-                tl_ui::components::kv_grid::init(cx);
+                tl_ui_kit::components::kv_grid::init(cx);
                 TlSettings::update(cx, |d| {
                     d.settings.performance.memory_view = MemoryView::Apps
                 });
@@ -979,7 +979,7 @@ mod jump {
         fn legend_click_cold(cx: &mut TestAppContext, perf: PageFactory) {
             let (engine, mut vcx) = open_on_perf(cx, perf);
             vcx.update(|_, cx| {
-                tl_ui::components::kv_grid::init(cx);
+                tl_ui_kit::components::kv_grid::init(cx);
                 TlSettings::update(cx, |d| {
                     d.settings.performance.memory_view = MemoryView::Apps
                 });
@@ -1040,9 +1040,9 @@ mod jump {
     mod top_procs {
         use gpui_kit::{Context, Modifiers, TestAppContext, Window, px, size};
         use tl_model::snapshot::Snapshot;
-        use tl_ui::hub::GlobalHub;
-        use tl_ui::pages::performance::overview::procs_box::{PROC_ROW_ID_PREFIX, ProcsBox};
         use tl_ui::window::main::{MainWindow, PageSlot};
+        use tl_ui_base::hub::GlobalHub;
+        use tl_ui_perf::performance::overview::procs_box::{PROC_ROW_ID_PREFIX, ProcsBox};
 
         use super::*;
 
@@ -1319,10 +1319,10 @@ mod filter {
     use tl_model::command::Tab;
     use tl_model::snapshot::Snapshot;
     use tl_model::table::TableMode;
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::processes::filter::include_children_visible;
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{FilterChanged, GlobalShellEvents, main_window_view};
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_procs::pages::processes::ProcessesPage;
+    use tl_ui_procs::pages::processes::filter::include_children_visible;
     use tl_ui_settings::settings::UiState;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -1487,7 +1487,7 @@ mod filter {
         r.publish_empty();
         let page = r.page.clone();
         let text = r.vcx.update(|_, cx| {
-            use tl_ui::table::tree_table::TreeTableDelegate as _;
+            use tl_ui_table::table::tree_table::TreeTableDelegate as _;
             page.read(cx).table().read(cx).delegate.empty_text()
         });
         assert_eq!(text.as_deref(), Some("No processes match the filter"));
@@ -1536,8 +1536,8 @@ mod pause {
     use tl_model::ids::NodeId;
     use tl_model::process::ProcFlags;
     use tl_model::snapshot::Snapshot;
-    use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::window::main::{ShellState, main_window_view};
+    use tl_ui_procs::pages::processes::ProcessesPage;
     use tl_ui_settings::settings::UiState;
 
     use super::delegate::{key, record, row, snapshot};
@@ -1708,11 +1708,11 @@ mod status {
     use tl_model::process::{GroupRowKind, ProcFlags};
     use tl_model::snapshot::Snapshot;
     use tl_model::table::TableRow;
-    use tl_ui::actions::{EndHelperSession, StartHelperSession};
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::window::main::{FilterChanged, GlobalShellEvents, main_window_view};
     use tl_ui::window::status::{StatusActionKind, StatusChanged};
+    use tl_ui_kit::actions::{EndHelperSession, StartHelperSession};
+    use tl_ui_procs::pages::processes::ProcessesPage;
+    use tl_ui_procs::pages::processes::delegate::ProcRowId;
     use tl_ui_settings::settings::UiState;
 
     use super::delegate::{group, key, record, row, snapshot};
@@ -2008,15 +2008,15 @@ mod pick {
     use tl_model::process::{ProcFlags, ProcessRecord};
     use tl_model::snapshot::{ComponentHeader, PickOutcome, PickResult, Snapshot, WindowsSnapshot};
     use tl_model::validity::Validity;
-    use tl_ui::actions::StartWindowPick;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::dialog::{DialogButton, TlDialogView};
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::i18n::init_strings;
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
-    use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window_on, set_test_page};
+    use tl_ui_base::i18n::init_strings;
+    use tl_ui_kit::actions::StartWindowPick;
+    use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_procs::pages::processes::ProcessesPage;
+    use tl_ui_procs::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
+    use tl_ui_procs::pages::processes::delegate::ProcRowId;
     use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -2424,7 +2424,7 @@ mod delegate {
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
 
-    use tl_ui::pages::processes::table::GroupHeader;
+    use tl_ui_procs::pages::processes::table::GroupHeader;
 
     pub(super) fn key(pid: u32) -> ProcessKey {
         ProcessKey {
@@ -2648,13 +2648,13 @@ mod keys {
     use tl_model::ids::NodeId;
     use tl_model::process::ProcFlags;
     use tl_model::snapshot::Snapshot;
-    use tl_ui::actions::FocusFilter;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::i18n::init_strings;
+    use tl_ui_base::i18n::init_strings;
+    use tl_ui_kit::actions::FocusFilter;
 
-    use tl_ui::pages::processes::delegate::ProcRowId;
-    use tl_ui::pages::processes::{ProcessesPage, bind_keys_processes};
     use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui_procs::pages::processes::delegate::ProcRowId;
+    use tl_ui_procs::pages::processes::{ProcessesPage, bind_keys_processes};
     use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 

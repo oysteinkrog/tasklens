@@ -5,11 +5,11 @@
 use gpui_kit::App;
 
 use super::{PageBuilder, PageId};
-use crate::components::button::TlButtonKind;
-use crate::host::HostContext;
-use crate::i18n::tr;
-use crate::pages::minigraph::actions::ResetMinigraphLayout;
-use crate::settings_global::SettingKey;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::SettingKey;
+use tl_ui_kit::components::button::TlButtonKind;
+use tl_ui_perf_core::minigraph::actions::ResetMinigraphLayout;
 
 pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(host, PageId::Graphs);

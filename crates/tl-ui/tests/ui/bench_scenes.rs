@@ -13,7 +13,6 @@ use tl_model::demand::CpuDemand;
 use tl_model::ids::{NodeId, ProcessKey};
 use tl_model::table::ProcessTableView;
 use tl_model::time::now_boot_ns;
-use tl_ui::anim::AnimationDriver;
 use tl_ui::bench::engine::{BenchEngine, BenchFeed};
 use tl_ui::bench::scenes::{SOAK_TITLES, TABLE_SCROLL_PX_PER_S, TableScroller, open_scene};
 use tl_ui::bench::stats::{BenchReport, OUTPUT_PERIOD_NS};
@@ -21,10 +20,11 @@ use tl_ui::bench::synth::{
     BenchRng, SEED, TABLE_GROUP_SIZE, TABLE_GROUPS, TABLE_PROCESSES, TableSynth,
 };
 use tl_ui::bench::{BenchClocks, BenchError, BenchOptions, BenchScene, run};
-use tl_ui::demand::GlobalDemand;
-use tl_ui::pages::performance::DeviceKey;
-use tl_ui::pages::performance::cpu::CpuPage;
-use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::demand::GlobalDemand;
+use tl_ui_perf::performance::DeviceKey;
+use tl_ui_perf::performance::cpu::CpuPage;
+use tl_ui_perf::performance::overview::{OVERVIEW_KEY, OverviewPage};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 static FAKE_CPU: AtomicU64 = AtomicU64::new(0);

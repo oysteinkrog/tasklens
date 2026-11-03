@@ -15,12 +15,12 @@ use gpui_kit::{
 };
 use tracing::warn;
 
-use super::registry::{GlobalRegistry, WindowKey};
-use crate::components::dialog::{DialogIcon, DialogResult, TlDialog};
-use crate::i18n::tr;
-use crate::settings_global::{SettingKey, SettingValue, TlSettings};
-use crate::text::style::t_base;
-use crate::theme::{current, metrics};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_base::text::style::t_base;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::dialog::{DialogIcon, DialogResult, TlDialog};
 
 const TITLE: &str = "shell-public-ip-title";
 const LINE_1: &str = "shell-public-ip-line-1";

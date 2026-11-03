@@ -11,11 +11,11 @@ use tl_model::snapshot::{DiskDetails, SmartAttr, SmartData};
 use tl_model::table::Total;
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::pages::performance::DeviceKey;
-use tl_ui::pages::performance::actions::PerfShowSmart;
-use tl_ui::theme::current;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::windows::smart::{SmartColumn, SmartWindow, find_smart};
+use tl_ui_base::theme::current;
+use tl_ui_perf::performance::DeviceKey;
+use tl_ui_perf::performance::actions::PerfShowSmart;
 use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -97,7 +97,7 @@ fn setup(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
     };
     cx.update(|cx| {
         TasklensUi::init(cx, client, init);
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         cx.set_reduce_motion(true);
     });
     let handle = cx
@@ -174,7 +174,7 @@ fn window_count(main: &mut VisualTestContext) -> usize {
             .into_iter()
             .filter_map(|w| w.downcast::<gpui_kit::base::Root>())
             .filter(|h| {
-                tl_ui::components::window_frame::TlSecondaryWindow::<SmartWindow>::find(*h, cx)
+                tl_ui_kit::components::window_frame::TlSecondaryWindow::<SmartWindow>::find(*h, cx)
                     .is_some()
             })
             .count()
@@ -366,7 +366,7 @@ fn smart_table_sorts(cx: &mut TestAppContext) {
     let sort = |vcx: &mut VisualTestContext| {
         vcx.update(|_, cx| {
             table.update(cx, |t, cx| {
-                use tl_ui::table::tree_table::TreeTableDelegate as _;
+                use tl_ui_table::table::tree_table::TreeTableDelegate as _;
                 t.delegate_mut().on_sort(SmartColumn::Normalized, cx)
             })
         })

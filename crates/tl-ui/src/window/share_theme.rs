@@ -24,17 +24,17 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::main::ShellState;
-use super::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::{
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{t_base, t_sm};
+use tl_ui_base::theme::share_code::encode_tl1;
+use tl_ui_base::theme::{ThemeDef, ThemeStore, current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::text::style::{t_base, t_sm};
-use crate::theme::share_code::encode_tl1;
-use crate::theme::{ThemeDef, ThemeStore, current, metrics};
 
 /// The key context of the window content.
 pub const CONTEXT: &str = "TlShareTheme";

@@ -46,17 +46,17 @@ use tl_ui_settings::settings::Settings;
 use super::main::{UI_SCALE_TOAST, push_main_toast};
 use super::titlebar::{MenuBarFactory, MenuRowHeight, bar_height};
 use super::{menus_debug, menus_file, menus_help, menus_settings, menus_view};
-use crate::actions::{MenuId, OpenMenu};
-use crate::components::menu::TlMenuPopup;
-use crate::components::slider::{TlSliderEvent, set_from_elsewhere};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr, tr_args, tr_en};
-pub use crate::pages::minigraph::menu::graph_color_menu;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::text::style::label_style;
-use crate::theme::{current, metrics};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::actions::{MenuId, OpenMenu};
+use tl_ui_kit::components::menu::TlMenuPopup;
+use tl_ui_kit::components::slider::{TlSliderEvent, set_from_elsewhere};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+pub use tl_ui_perf_core::minigraph::menu::graph_color_menu;
 
 /// The menus in bar order.
 const ORDER: [MenuId; 5] = [

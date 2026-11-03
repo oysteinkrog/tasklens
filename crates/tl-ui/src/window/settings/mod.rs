@@ -53,23 +53,23 @@ use gpui_kit::{
 use tracing::warn;
 
 use super::main::ShellState;
-use super::registry::{GlobalRegistry, WindowKey};
-use crate::actions::OpenSettings;
-use crate::components::banner::{TlBanner, TlBannerKind};
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::checkbox::TlCheckbox;
-use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
-use crate::components::slider::{TlSlider, TlSliderEvent};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::host::HostContext;
-use crate::host_settings;
-use crate::hub::{ComponentMask, SnapshotChanged};
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::settings_global::{SettingKey, SettingValue, TlSettings};
-use crate::text::style::t_sm;
-use crate::theme::{current, metrics};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::host_settings;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_base::text::style::t_sm;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::actions::OpenSettings;
+use tl_ui_kit::components::banner::{TlBanner, TlBannerKind};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
+use tl_ui_kit::components::checkbox::TlCheckbox;
+use tl_ui_kit::components::select::{TlSelect, TlSelectItem, TlSelectState};
+use tl_ui_kit::components::slider::{TlSlider, TlSliderEvent};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 
 /// Window size and minimum size before the UI scale.
 pub const SIZE: (f32, f32) = (900., 640.);
@@ -1468,7 +1468,7 @@ fn read(host: &HostContext, cx: &App, key: SettingKey) -> serde_json::Value {
     // A saved `history` click acts as `pause` while the host's recording is off (UI-PRF-057),
     // and `history` is not in the list then.
     if key == SettingKey::PerformanceTimelineClick && cx.has_global::<TlSettings>() {
-        use crate::pages::performance::overview::timeline;
+        use tl_ui_perf::performance::overview::timeline;
         return serde_json::Value::from(timeline::click_key(timeline::click_mode(host.hub(), cx)));
     }
     if let Some(value) = host_settings::read_key(&host_settings::current(host, cx).values, key) {

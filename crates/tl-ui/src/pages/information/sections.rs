@@ -28,11 +28,11 @@ use tl_model::validity::Validity;
 use tl_ui_settings::settings::PerformanceSettings;
 
 use super::section::InfoRow;
-use crate::actions::OpenAdditionalSetup;
-use crate::components::kv_grid::{TlValue, UnsupportedWord};
-use crate::i18n::{Strings, tr, tr_en};
-use crate::pages::performance::net::public_ip_text;
-use crate::template::Template;
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::template::Template;
+use tl_ui_kit::actions::OpenAdditionalSetup;
+use tl_ui_kit::components::kv_grid::{TlValue, UnsupportedWord};
+use tl_ui_perf::performance::net::public_ip_text;
 
 /// What the builders read.
 pub struct InfoInputs<'a> {

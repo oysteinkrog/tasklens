@@ -4,9 +4,9 @@
 use gpui_kit::App;
 
 use super::{PageBuilder, PageId};
-use crate::host::HostContext;
-use crate::i18n::tr;
-use crate::settings_global::{SettingKey, SettingValue};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::{SettingKey, SettingValue};
 
 pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(host, PageId::Units);

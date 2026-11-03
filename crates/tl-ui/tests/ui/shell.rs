@@ -10,7 +10,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::table::TableMode;
 use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::settings_global::{
+use tl_ui_base::settings_global::{
     Section, SettingKey, SettingKind, SettingValue, TlSettings, animations_on,
 };
 use tl_ui_settings::settings::{Settings, UiState};
@@ -330,12 +330,12 @@ mod toolbar {
     use tl_model::command::Tab;
     use tl_model::health::HelperState;
     use tl_model::table::TableMode;
-    use tl_ui::components::icons::TlIcon;
-    use tl_ui::components::tooltip::DELAY_CONTROL;
-    use tl_ui::theme::current;
     use tl_ui::window::toolbar::{
         DefaultToolbar, Toolbar, ToolbarContent, ToolbarModel, toolbar_icon, toolbar_toggle,
     };
+    use tl_ui_base::theme::current;
+    use tl_ui_kit::components::icons::TlIcon;
+    use tl_ui_kit::components::tooltip::DELAY_CONTROL;
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     gpui_kit::actions!(tl_toolbar_test, [Go]);
@@ -423,7 +423,7 @@ mod toolbar {
     ) -> Rig<'_> {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings {
@@ -651,14 +651,14 @@ mod titlebar {
     use tl_model::health::HelperState;
     use tl_model::table::TableMode;
     use tl_model::validity::Validity;
-    use tl_ui::actions::CloseWindow;
-    use tl_ui::components::icons::TlIcon;
-    use tl_ui::hub::{GlobalHub, SnapshotHub};
-    use tl_ui::theme::current;
     use tl_ui::window::titlebar::{
         MenuBarFactory, MenuRowHeight, TitleBarProbe, TitleBarView, keep_above_supported,
     };
     use tl_ui::window::toolbar::{ToolbarContent, ToolbarModel, toolbar_toggle};
+    use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+    use tl_ui_base::theme::current;
+    use tl_ui_kit::actions::CloseWindow;
+    use tl_ui_kit::components::icons::TlIcon;
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -737,7 +737,7 @@ mod titlebar {
         let closes = Rc::new(Cell::new(0));
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings {
@@ -746,7 +746,7 @@ mod titlebar {
                 },
                 Vec::new(),
             );
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_global(opts.probe);
             if opts.menu {
                 cx.set_global(MenuBarFactory(menu_bar));
@@ -1163,16 +1163,16 @@ mod tabstrip {
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::table::TableMode;
-    use tl_ui::actions::SelectTab;
     use tl_ui::app::{BootSettings, EngineGlobal};
-    use tl_ui::components::menu::context_menu_layer;
     use tl_ui::pages::information::actions::CopyInformationAll;
-    use tl_ui::settings_global::TlSettings;
-    use tl_ui::theme::current;
     use tl_ui::window::filter::FilterBox;
     use tl_ui::window::tabstrip::{
         AccentRuleProbe, FILTER_GAP, OVERFLOW_BUTTON, OVERFLOW_SLOT, TabStrip,
     };
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_base::theme::current;
+    use tl_ui_kit::actions::SelectTab;
+    use tl_ui_kit::components::menu::context_menu_layer;
     use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -1225,7 +1225,7 @@ mod tabstrip {
         let selects = Rc::new(RefCell::new(Vec::new()));
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings {
@@ -1234,7 +1234,7 @@ mod tabstrip {
                 },
                 Vec::new(),
             );
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             let engine = FakeEngine::new();
             let client: Arc<dyn EngineClient> = engine;
             cx.set_global(EngineGlobal(client));
@@ -1366,7 +1366,7 @@ mod tabstrip {
     fn copy_icon_hover_look(cx: &mut TestAppContext) {
         let mut r = rig(cx, 100, all(), Tab::Information, false);
         let (secondary, primary, hover) = r.cx.update(|_, cx| {
-            let t = tl_ui::theme::current(cx);
+            let t = tl_ui_base::theme::current(cx);
             (t.text_secondary, t.text_primary, t.tab_hover)
         });
         let drawn = drawn_copy(&mut r).expect("copy icon drawn");
@@ -1876,7 +1876,7 @@ mod tabstrip {
         assert_eq!(shapes(&mut r), first, "a plain re-render does not shape");
 
         r.cx.update(|_, cx| {
-            tl_ui::theme::store::apply_metrics(
+            tl_ui_base::theme::store::apply_metrics(
                 &AppearanceSettings {
                     ui_scale_pct: 150,
                     ..AppearanceSettings::default()
@@ -1892,7 +1892,9 @@ mod tabstrip {
             "{at_100:?} {at_150:?}"
         );
 
-        r.cx.update(|_, cx| tl_ui::i18n::set_test_catalogue(cx, "shell-tab-services = Dienste\n"));
+        r.cx.update(|_, cx| {
+            tl_ui_base::i18n::set_test_catalogue(cx, "shell-tab-services = Dienste\n")
+        });
         settle(r.cx);
         assert_eq!(shapes(&mut r), first + 2, "language change shapes once");
         assert_eq!(labels(&mut r)[2], "Dienste");
@@ -1911,9 +1913,9 @@ mod status {
         prelude::FluentBuilder as _, px, size,
     };
     use smallvec::{SmallVec, smallvec};
-    use tl_ui::components::badge::{TlBadgeKind, badge_colors};
-    use tl_ui::theme::current;
     use tl_ui::window::status::{StatusAction, StatusActionKind, StatusChip};
+    use tl_ui_base::theme::current;
+    use tl_ui_kit::components::badge::{TlBadgeKind, badge_colors};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     gpui_kit::actions!(tl_status_test, [ShowRestricted, ShowAdmin]);
@@ -1969,7 +1971,7 @@ mod status {
         let admin = Rc::new(Cell::new(0));
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings {
@@ -1978,7 +1980,7 @@ mod status {
                 },
                 Vec::new(),
             );
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             let (r, a) = (restricted.clone(), admin.clone());
             cx.on_action(move |_: &ShowRestricted, _| r.set(r.get() + 1));
             cx.on_action(move |_: &ShowAdmin, _| a.set(a.get() + 1));
@@ -2247,7 +2249,7 @@ mod status {
     /// the page text, and its link dispatches `SwitchToEngineService`.
     #[gpui_kit::test]
     fn status_chip_engine_segment(cx: &mut TestAppContext) {
-        use tl_ui::engine_link::{EngineLinkState, SwitchToEngineService, set_state};
+        use tl_ui_base::engine_link::{EngineLinkState, SwitchToEngineService, set_state};
 
         let mut r = rig(cx, 100, None, false);
         let switches = Rc::new(Cell::new(0));
@@ -2314,7 +2316,7 @@ mod status {
         use tl_model::health::{
             EngineCaps, HealthSnapshot, HelperState, SourceHealth, SourceId, SourceState,
         };
-        use tl_ui::theme::current;
+        use tl_ui_base::theme::current;
 
         use super::{Rig, bounds, draw, drawn, read, rig};
 
@@ -2428,7 +2430,9 @@ mod status {
             let opened = std::rc::Rc::new(std::cell::Cell::new(0));
             let o = opened.clone();
             r.cx.update(|_, cx| {
-                cx.on_action(move |_: &tl_ui::actions::OpenCollectorHealth, _| o.set(o.get() + 1));
+                cx.on_action(move |_: &tl_ui_kit::actions::OpenCollectorHealth, _| {
+                    o.set(o.get() + 1)
+                });
             });
             let health = snapshot(1, &[(SourceId::Cpu, SourceState::Failed)]);
             set_health(&mut r, &health, Tab::Performance);
@@ -2530,27 +2534,27 @@ mod main_window {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_ui::actions::{
-        CloseWindow, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, SelectTab,
-        ShowMainWindow, ToggleMainWindow, ZoomWindow,
-    };
-    use tl_ui::anim::AnimationDriver;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions, UiExit, UiExitSlot};
-    use tl_ui::components::toast::{self, ToastKind};
-    use tl_ui::components::window_frame::{TlWindowKind, TlWindowSpec, window_options};
-    use tl_ui::demand::{DemandAggregator, GlobalDemand};
-    use tl_ui::hub::{GlobalHub, SnapshotHub};
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{
         self as shell, CloseOutcome, GlobalShellEvents, MainWindow, PageFactory, PageSlot,
         PauseChanged, ShellPage, ShellState, first_frame_ms_from, main_window_options,
         main_window_view, open_main_window, push_main_toast, restored_bounds, set_test_page,
     };
-    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::window::status::StatusChanged;
     use tl_ui::window::titlebar::TitleBarProbe;
-    use tl_ui::windows::detached_graph::detached_window_options;
-    use tl_ui::windows::mini::mini_window_options;
+    use tl_ui_base::anim::AnimationDriver;
+    use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+    use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_kit::actions::{
+        CloseWindow, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, SelectTab,
+        ShowMainWindow, ToggleMainWindow, ZoomWindow,
+    };
+    use tl_ui_kit::components::toast::{self, ToastKind};
+    use tl_ui_kit::components::window_frame::{TlWindowKind, TlWindowSpec, window_options};
+    use tl_ui_perf::mini::mini_window_options;
+    use tl_ui_perf_core::detached_graph::detached_window_options;
     use tl_ui_settings::settings::{
         AppearanceSettings, Decorations, Settings, StartTab, ThemeSettings, UiState, WindowState,
     };
@@ -2654,8 +2658,8 @@ mod main_window {
                 decorations: opts.decorations,
                 ..AppearanceSettings::default()
             };
-            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             let mut settings = Settings {
                 appearance,
                 ..Settings::default()
@@ -2683,13 +2687,13 @@ mod main_window {
                 // The tracker reads the hub's helper state later, when GlobalHub is set, so
                 // it gets the hub the test installs below.
                 let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
-                tl_ui::action_tracker::install(client.clone(), Some(hub.clone()), cx);
+                tl_ui_base::action_tracker::install(client.clone(), Some(hub.clone()), cx);
                 let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
                 cx.set_global(GlobalHub(hub));
                 cx.set_global(GlobalDemand(demand));
             }
             toast::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
             cx.set_global(StartOptions {
                 tab: opts.arg,
                 ..StartOptions::default()
@@ -3731,9 +3735,9 @@ mod main_window {
 
         use gpui_kit::{AppContext as _, TestAppContext, VisualTestContext, px};
         use tl_model::command::Tab;
-        use tl_ui::actions::{ScaleDown, ScaleReset, ScaleUp};
-        use tl_ui::settings_global::TlSettings;
-        use tl_ui::theme::metrics;
+        use tl_ui_base::settings_global::TlSettings;
+        use tl_ui_base::theme::metrics;
+        use tl_ui_kit::actions::{ScaleDown, ScaleReset, ScaleUp};
 
         use super::{Opts, act, bounds, draw, main, rig, toast_top};
 
@@ -3874,15 +3878,15 @@ mod main_window {
         use gpui_kit::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px};
         use tl_model::command::Tab;
         use tl_model::table::TableMode;
-        use tl_ui::actions::{ClearFilter, FocusFilter, SelectTab};
         use tl_ui::app::UiExit;
-        use tl_ui::components::input::{FILTER_WIDTH, FILTER_WIDTH_WIDE};
-        use tl_ui::settings_global::TlSettings;
-        use tl_ui::theme::current;
         use tl_ui::window::filter::{
             FILTER_DEBOUNCE, FilterBox, include_children_visible, shown_on,
         };
         use tl_ui::window::main::{FilterChanged, GlobalShellEvents};
+        use tl_ui_base::settings_global::TlSettings;
+        use tl_ui_base::theme::current;
+        use tl_ui_kit::actions::{ClearFilter, FocusFilter, SelectTab};
+        use tl_ui_kit::components::input::{FILTER_WIDTH, FILTER_WIDTH_WIDE};
 
         use super::{Opts, act, draw, exit, main, page, rig};
 
@@ -3997,7 +4001,7 @@ mod main_window {
         fn tree_rig(cx: &mut TestAppContext) -> Rig {
             let mut r = filter_rig(cx);
             r.vcx
-                .update(|_, cx| tl_ui::actions::register_global_handlers(cx));
+                .update(|_, cx| tl_ui_kit::actions::register_global_handlers(cx));
             r.set_mode(TableMode::Tree);
             r
         }
@@ -4254,13 +4258,13 @@ mod main_window {
             IntoElement, Render, Styled, TestAppContext, VisualTestContext, Window, div, point, px,
         };
         use tl_model::command::Tab;
-        use tl_ui::actions::{RefreshCurrentTab, SelectTab};
-        use tl_ui::components::menu::{TlMenu, context_menu_open, open_context_menu_at};
         use tl_ui::window::filter::{FILTER_DEBOUNCE, FilterBox};
         use tl_ui::window::main::{
             FilterChanged, GlobalShellEvents, MainWindow, PageSlot, ShellPage, set_test_page,
         };
         use tl_ui::window::status::StatusChanged;
+        use tl_ui_kit::actions::{RefreshCurrentTab, SelectTab};
+        use tl_ui_kit::components::menu::{TlMenu, context_menu_open, open_context_menu_at};
 
         use super::{Opts, act, draw, main, open, setup};
 
@@ -4504,10 +4508,10 @@ mod main_window {
         use tl_model::client::EngineClient;
         use tl_model::command::Tab;
         use tl_model::table::TableMode;
-        use tl_ui::actions::{CycleViewMode, SetViewMode, ToggleHideSystem};
         use tl_ui::app::EngineGlobal;
-        use tl_ui::settings_global::TlSettings;
         use tl_ui::window::main::view_mode_tooltip;
+        use tl_ui_base::settings_global::TlSettings;
+        use tl_ui_kit::actions::{CycleViewMode, SetViewMode, ToggleHideSystem};
         use tl_ui_testkit::fake_engine::FakeEngine;
 
         use super::{Opts, act, main, open, setup};
@@ -4621,12 +4625,12 @@ mod main_window {
         fn set_view_mode_same_is_noop(cx: &mut TestAppContext) {
             let (mut vcx, _) = view_rig(cx, TableMode::Tree, false);
             let version = vcx.update(|_, cx| {
-                TlSettings::get(cx).version(tl_ui::settings_global::Section::Processes)
+                TlSettings::get(cx).version(tl_ui_base::settings_global::Section::Processes)
             });
             act(&mut vcx, SetViewMode(TableMode::Tree));
             assert_eq!(mode(&mut vcx), TableMode::Tree);
             let after = vcx.update(|_, cx| {
-                TlSettings::get(cx).version(tl_ui::settings_global::Section::Processes)
+                TlSettings::get(cx).version(tl_ui_base::settings_global::Section::Processes)
             });
             assert_eq!(after, version, "no settings write");
             assert!(toasts(&mut vcx).is_empty());
@@ -4771,7 +4775,7 @@ mod main_window {
 
     // ---- History toggle (E20-025) ----
 
-    use tl_ui::actions::ToggleHistoryMode;
+    use tl_ui_kit::actions::ToggleHistoryMode;
 
     fn history_mode(vcx: &mut VisualTestContext) -> bool {
         vcx.update(|_, cx| TlSettings::state(cx).processes.history_mode)
@@ -4841,7 +4845,7 @@ mod main_window {
     fn history_icon_colours_and_tooltips(cx: &mut TestAppContext) {
         let mut vcx = rig(cx, Opts::default());
         let (accent, secondary, hover) = vcx.update(|_, cx| {
-            let t = tl_ui::theme::current(cx);
+            let t = tl_ui_base::theme::current(cx);
             (t.accent, t.text_secondary, t.tab_hover)
         });
         let off = drawn_history(&mut vcx);
@@ -4889,14 +4893,14 @@ mod startup_items {
     use tl_ui::app::{
         AppEnv, CrashReport, StartOptions, TasklensUi, ToastKindTag, UiExit, UiExitSlot, UiInit,
     };
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{
         CloseOutcome, MainWindow, PageSlot, SELECT_PID_WAIT, ShellPage, main_window_view,
         open_main_window, set_test_page,
     };
-    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::window::status::StatusChanged;
     use tl_ui::window::titlebar::TitleBarProbe;
+    use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_base::settings_global::TlSettings;
     use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -5367,8 +5371,8 @@ mod startup_items {
     // ---- Always-on-top pin (E20-022) ----
 
     use gpui_kit::{Modifiers, MouseButton, Pixels, point, px};
-    use tl_ui::components::icons::TlIcon;
     use tl_ui::window::titlebar::DrawnPin;
+    use tl_ui_kit::components::icons::TlIcon;
 
     impl Rig {
         fn keep_aboves(&self) -> Vec<bool> {
@@ -5516,9 +5520,9 @@ mod startup_items {
 
     // ---- Secondary-window pins (E20-029) ----
 
-    use tl_ui::components::window_frame::ToggleAlwaysOnTop;
-    use tl_ui::host::HostContext;
     use tl_ui::window::settings::open_settings;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_kit::components::window_frame::ToggleAlwaysOnTop;
 
     impl Rig {
         /// `KeepAbove` commands as (caption, on).
@@ -5562,7 +5566,7 @@ mod startup_items {
         let _vcx = open(cx);
         r.publish_windows(cx, Validity::Valid, "tasklens");
         let before =
-            cx.read(|cx| TlSettings::get(cx).version(tl_ui::settings_global::Section::Window));
+            cx.read(|cx| TlSettings::get(cx).version(tl_ui_base::settings_global::Section::Window));
         pin(cx, WindowKey::Settings, "Settings");
         assert_eq!(
             r.keep_above_captions(),
@@ -5577,7 +5581,7 @@ mod startup_items {
             ]
         );
         let after =
-            cx.read(|cx| TlSettings::get(cx).version(tl_ui::settings_global::Section::Window));
+            cx.read(|cx| TlSettings::get(cx).version(tl_ui_base::settings_global::Section::Window));
         assert_eq!(before, after, "no setting changed");
         assert!(!on_top(cx));
     }
@@ -5715,8 +5719,8 @@ mod startup_items {
     use std::rc::Rc;
 
     use tl_model::health::HelperState;
-    use tl_ui::components::shield::StartHelperSession;
     use tl_ui::window::main::HelperInstalled;
+    use tl_ui_kit::components::shield::StartHelperSession;
 
     /// `init` with the helper `installed`, `privilege.unlock_at_launch`, Shift held at launch,
     /// blank pages for the unbuilt tabs, and a counter of `StartHelperSession`.
@@ -5837,7 +5841,7 @@ mod startup_items {
 
     // ---- Window picker slot and picking mode (E20-027) ----
 
-    use tl_ui::actions::{CancelWindowPick, StartWindowPick};
+    use tl_ui_kit::actions::{CancelWindowPick, StartWindowPick};
 
     const PICK_START: &str = "Click a window to select its process. Hold CTRL while clicking to terminate process. Esc cancels.";
 

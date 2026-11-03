@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui_kit::TestAppContext;
 use tl_model::command::{SetupPhase, SetupRun, SetupState, SetupStep};
-use tl_ui::settings_global::TlSettings;
+use tl_ui_base::settings_global::TlSettings;
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 pub use tl_ui_pagehost::helpers::{is_open, publish_helper, toasts, window_count};

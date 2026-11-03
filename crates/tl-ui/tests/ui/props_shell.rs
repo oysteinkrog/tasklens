@@ -18,8 +18,8 @@ use tl_model::system::CpuSet;
 use tl_model::table::Total;
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
-use tl_ui::host::HostContext;
-use tl_ui::windows::props::general::GeneralTab;
+use tl_ui_base::host::HostContext;
+use tl_ui_procs::windows::props::general::GeneralTab;
 
 const KEY: ProcessKey = ProcessKey {
     start_ticks: 77,
@@ -181,12 +181,12 @@ mod window {
 
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 
-    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
 
     use tl_ui::window::main::{main_window_view, open_main_window_on};
-    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
-    use tl_ui::windows::app_props::{AppPropsWindow, open_app_properties};
-    use tl_ui::windows::props::{PropsWindow, open_process_properties};
+    use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_procs::windows::app_props::{AppPropsWindow, open_app_properties};
+    use tl_ui_procs::windows::props::{PropsWindow, open_process_properties};
     use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -220,7 +220,7 @@ mod window {
         };
         cx.update(|cx| {
             TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_reduce_motion(true);
         });
         let handle = cx
@@ -510,7 +510,7 @@ mod window {
             )
             .expect("panel drawn");
         let (sp3, sp4, row_h) = rig.vcx.update(|_, cx| {
-            let m = tl_ui::theme::metrics(cx);
+            let m = tl_ui_base::theme::metrics(cx);
             (m.sp[3], m.sp[4], px(26. * m.ui_scale))
         });
         let label = rig
@@ -712,7 +712,7 @@ mod window {
 
         // Enter on the grid cursor runs the same link. Go back to Processes first, so the
         // check fails when Enter does nothing.
-        rig.main.dispatch_action(tl_ui::actions::SelectTab(0));
+        rig.main.dispatch_action(tl_ui_kit::actions::SelectTab(0));
         rig.main.run_until_parked();
         assert_eq!(main_tab(cx), Tab::Processes, "the tab was reset");
         focus_fields(&mut rig);
@@ -783,9 +783,9 @@ mod window {
     // ---- File descriptors tab (E23-021, UI-PWN-012) ----
 
     use tl_model::details::{FdDetail, FdKind, FdRow};
-    use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
-    use tl_ui::table::actions::OpenContextMenu;
-    use tl_ui::windows::props::fds::FdsTab;
+    use tl_ui_kit::components::menu::{MenuEntryKind, open_context_menu};
+    use tl_ui_procs::windows::props::fds::FdsTab;
+    use tl_ui_table::table::actions::OpenContextMenu;
 
     fn fd(fd: i32, kind: FdKind, name: &str, flags: Option<u32>, pos: Option<u64>) -> FdRow {
         FdRow {
@@ -934,7 +934,7 @@ mod window {
 
     // ---- Environment tab (E23-022, UI-PWN-016, R-099) ----
 
-    use tl_ui::settings_global::TlSettings;
+    use tl_ui_base::settings_global::TlSettings;
 
     // ---- Strings tab (E23-021, UI-PWN-017) ----
 

@@ -1,12 +1,12 @@
 //! The key/value grid state words and the CPU Details cache and boot time words come from the
 //! catalogue, translated once per strings version (R-132). Split from `components.rs`, which moved
-//! to tl-ui-kit: this part reads `tl_ui::pages::performance`, so it stays in the shell crate.
+//! to tl-ui-kit: this part reads `tl_ui_perf::performance`, so it stays in the shell crate.
 
 use gpui_kit::{
     App, Context, IntoElement, Modifiers, ParentElement, Render, Styled, TestAppContext,
     VisualTestContext, Window, div, px,
 };
-use tl_ui::components::checkbox::bind_keys_components;
+use tl_ui_kit::components::checkbox::bind_keys_components;
 
 fn setup(cx: &mut App) {
     tl_ui_pagehost::install_theme(cx);
@@ -20,16 +20,16 @@ fn draw(cx: &mut VisualTestContext) {
 use gpui_kit::{MouseButton, SharedString, point};
 use tl_model::snapshot::{CacheInfo, CacheLevelInfo, CpuStaticInfo, SystemSnapshot};
 use tl_model::validity::Validity;
-use tl_ui::components::kv_grid::{
+use tl_ui_base::i18n::{init_strings, set_test_catalogue, tr_calls};
+use tl_ui_kit::components::kv_grid::{
     KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord, kv_words,
     shown_text_in,
 };
-use tl_ui::components::tooltip::DELAY_CONTROL;
-use tl_ui::i18n::{init_strings, set_test_catalogue, tr_calls};
-use tl_ui::pages::performance::cpu_details::{
+use tl_ui_kit::components::tooltip::DELAY_CONTROL;
+use tl_ui_perf::performance::cpu_details::{
     CpuLiveInputs, ROW_L1, ROW_L3, ROW_UP_TIME, cpu_details_model, update_live, update_static,
 };
-use tl_ui::pages::performance::details::KeyValueModel;
+use tl_ui_perf::performance::details::KeyValueModel;
 
 const MARKERS: &str = "
 fnd-kv-collecting = <collecting>
@@ -144,7 +144,7 @@ fn kv_grid_words_follow_test_locale(cx: &mut TestAppContext) {
 /// (o55.37).
 #[gpui_kit::test]
 fn counted_template_plural_forms(cx: &mut TestAppContext) {
-    use tl_ui::template::Template;
+    use tl_ui_base::template::Template;
 
     const KEY: &str = "perf-gpu-enc-sessions";
     fn written(t: &Template, n: u64) -> String {

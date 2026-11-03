@@ -20,12 +20,12 @@ mod tab {
     use tl_model::ids::DeviceIdx;
     use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
     use tl_ui::app::{BootSettings, EngineGlobal};
-    use tl_ui::components::kv_grid;
-    use tl_ui::demand::DemandAggregator;
-    use tl_ui::hub::SnapshotHub;
-    use tl_ui::i18n::init_strings;
-    use tl_ui::pages::performance::{PerformancePage, SIDEBAR_PANEL_ID};
-    use tl_ui::settings_global::TlSettings;
+    use tl_ui_base::demand::DemandAggregator;
+    use tl_ui_base::hub::SnapshotHub;
+    use tl_ui_base::i18n::init_strings;
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_kit::components::kv_grid;
+    use tl_ui_perf::performance::{PerformancePage, SIDEBAR_PANEL_ID};
     use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -77,7 +77,7 @@ mod tab {
     fn hidden_overview() -> Settings {
         let mut s = Settings::default();
         s.performance.device_overrides.insert(
-            tl_ui::pages::performance::overview::OVERVIEW_KEY.to_owned(),
+            tl_ui_perf::performance::overview::OVERVIEW_KEY.to_owned(),
             tl_ui_settings::settings::DeviceVisibility::Hide,
         );
         s
@@ -103,13 +103,13 @@ mod tab {
         let seen = Rc::clone(&persisted);
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
             init_strings(cx, "en-US");
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
@@ -146,14 +146,14 @@ mod tab {
     #[gpui_kit::test]
     fn performance_tab_initial_focus_is_sidebar(cx: &mut TestAppContext) {
         use tl_model::command::Tab;
-        use tl_ui::actions::SelectTab;
         use tl_ui::app::StartOptions;
-        use tl_ui::demand::GlobalDemand;
-        use tl_ui::hub::GlobalHub;
         use tl_ui::window::main::{
             self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
         };
         use tl_ui::window::titlebar::TitleBarProbe;
+        use tl_ui_base::demand::GlobalDemand;
+        use tl_ui_base::hub::GlobalHub;
+        use tl_ui_kit::actions::SelectTab;
 
         install(cx, UiState::default(), 16);
         cx.update(|cx| {
@@ -162,8 +162,8 @@ mod tab {
             let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
             cx.set_global(GlobalHub(hub));
             cx.set_global(GlobalDemand(demand));
-            tl_ui::components::toast::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
+            tl_ui_kit::components::toast::init(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
             cx.set_global(StartOptions::default());
             set_test_page(cx, Tab::Processes, |_, cx: &mut Context<MainWindow>| {
                 let page = cx.new(|cx| FakeProcesses(cx.focus_handle().tab_stop(true)));
@@ -215,20 +215,20 @@ mod summary {
     use tl_model::system::Metric;
     use tl_model::validity::Validity;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
-    use tl_ui::components::kv_grid;
-    use tl_ui::components::motion::M_FAST;
-    use tl_ui::demand::{DemandAggregator, GlobalDemand};
-    use tl_ui::hub::{GlobalHub, SnapshotHub};
-    use tl_ui::i18n::init_strings;
-    use tl_ui::pages::performance::memory::MemoryPage;
-    use tl_ui::pages::performance::overview::OVERVIEW_KEY;
-    use tl_ui::pages::performance::summary::SummaryView;
-    use tl_ui::pages::performance::{DeviceKey, PerformancePage};
-    use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
     };
     use tl_ui::window::titlebar::TitleBarProbe;
+    use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+    use tl_ui_base::i18n::init_strings;
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_kit::components::kv_grid;
+    use tl_ui_kit::components::motion::M_FAST;
+    use tl_ui_perf::performance::memory::MemoryPage;
+    use tl_ui_perf::performance::overview::OVERVIEW_KEY;
+    use tl_ui_perf::performance::summary::SummaryView;
+    use tl_ui_perf::performance::{DeviceKey, PerformancePage};
     use tl_ui_settings::settings::{
         AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
     };
@@ -366,13 +366,13 @@ mod summary {
         let (hub, demand) = cx.update(|cx| {
             gpui_kit::init(cx);
             cx.set_reduce_motion(reduce_motion);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
             init_strings(cx, "en-US");
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
@@ -387,10 +387,10 @@ mod summary {
             let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
             cx.set_global(GlobalHub(hub.clone()));
             cx.set_global(GlobalDemand(demand.clone()));
-            tl_ui::components::toast::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
-            tl_ui::components::menu::bind_keys(cx);
-            tl_ui::pages::performance::actions::bind_keys_performance(cx);
+            tl_ui_kit::components::toast::init(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
+            tl_ui_kit::components::menu::bind_keys(cx);
+            tl_ui_perf::performance::actions::bind_keys_performance(cx);
             cx.set_global(StartOptions::default());
             set_test_page(cx, Tab::Processes, |_, cx: &mut Context<MainWindow>| {
                 let page = cx.new(|cx| FakeProcesses(cx.focus_handle().tab_stop(true)));
@@ -411,7 +411,7 @@ mod summary {
         vcx.update(|window, _| window.activate_window());
         draw(vcx);
         let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
-        vcx.dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
+        vcx.dispatch_action(tl_ui_kit::actions::SelectTab(Tab::Performance as usize));
         draw(vcx);
         // Let the tab switch fade (`motion.tab_switch_ms`, timed on the test clock) end, or it
         // asks for a frame on every later draw.
@@ -522,7 +522,7 @@ mod summary {
     fn page_panel(r: &mut Rig) -> gpui_kit::Point<gpui_kit::Pixels> {
         let b = r
             .vcx
-            .debug_bounds(tl_ui::pages::performance::PAGE_PANEL_ID)
+            .debug_bounds(tl_ui_perf::performance::PAGE_PANEL_ID)
             .expect("the page panel");
         b.origin + gpui_kit::point(gpui_kit::px(6.), gpui_kit::px(6.))
     }
@@ -663,8 +663,8 @@ mod summary {
     /// once.
     #[gpui_kit::test]
     fn copy_pushes_toast_once(cx: &mut TestAppContext) {
-        use tl_ui::components::toast::ToastQueue;
-        use tl_ui::pages::performance::actions::PerfCopyDeviceInfo;
+        use tl_ui_kit::components::toast::ToastQueue;
+        use tl_ui_perf::performance::actions::PerfCopyDeviceInfo;
 
         fn toasts(r: &mut Rig) -> Vec<String> {
             r.vcx.update(|window, cx| {
@@ -690,7 +690,8 @@ mod summary {
         r.vcx.update(|_, cx| {
             cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()))
         });
-        r.vcx.update(|_, cx| tl_ui::components::menu::bind_keys(cx));
+        r.vcx
+            .update(|_, cx| tl_ui_kit::components::menu::bind_keys(cx));
         let at = page_panel(&mut r);
         right_click(r.vcx, at);
         draw(r.vcx);
