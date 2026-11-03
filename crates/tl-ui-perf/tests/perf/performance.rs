@@ -1648,20 +1648,22 @@ mod tab {
     #[cfg(feature = "bench")]
     #[gpui_kit::test]
     fn bench_show_both_behind_bench_feature(cx: &mut TestAppContext) {
-        use tl_ui_perf::performance::cpu::OVERALL_ID;
-        use tl_ui_perf::performance::cpu_grid::GRID_ID;
+        use tl_ui_overview::widget::metric_widget::widget_id;
+        use tl_ui_perf::performance::cpu_grid::grid_id;
 
         let mut r = open(cx, UiState::default(), 32, 1600., 1000.);
         let cpu = cpu_page(&mut r);
-        r.vcx.update(|_, cx| {
-            cpu.update(cx, |p, cx| {
-                p.bench_show_both = true;
-                cx.notify();
-            })
-        });
+        r.vcx
+            .update(|_, cx| cpu.update(cx, |p, cx| p.set_bench_show_both(true, cx)));
         draw(r.vcx);
-        let overall = r.vcx.debug_bounds(OVERALL_ID).expect("overall chart");
-        let grid = r.vcx.debug_bounds(GRID_ID).expect("grid");
+        let (overall, grid) = r.vcx.update(|_, cx| {
+            let p = cpu.read(cx);
+            let total = p.widget_of("total", cx).expect("the total widget");
+            let id = p.container_id();
+            (widget_id(id, total).leak(), grid_id(id).leak())
+        });
+        let overall = r.vcx.debug_bounds(overall).expect("overall chart");
+        let grid = r.vcx.debug_bounds(grid).expect("grid");
         assert_eq!(overall.size.height, px(300.));
         assert!(grid.top() > overall.bottom(), "grid below the chart");
         let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");

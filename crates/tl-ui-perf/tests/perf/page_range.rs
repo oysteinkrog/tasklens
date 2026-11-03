@@ -42,7 +42,8 @@ fn page_switch_moves_the_overview(cx: &mut TestAppContext) {
             .page(&DeviceKey(Arc::from("cpu")))
             .and_then(|v| v.clone().downcast::<CpuPage>().ok())
             .expect("a CpuPage");
-        cpu.read(cx).overall().read(cx).spec.range_ns
+        // The default CPU page shows the per-core grid.
+        cpu.read(cx).grid().view.read(cx).spec.range_ns
     });
     assert_eq!(cpu_range, 3_600 * S);
 

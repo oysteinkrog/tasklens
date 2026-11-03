@@ -283,11 +283,9 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
         .expect("a CpuPage");
     r.vcx.update(|_, cx| {
         let page = cpu.read(cx);
-        assert!(
-            page.overall().read(cx).spec.hover,
-            "CPU overall takes hover"
-        );
-        if let Some(secondary) = page.secondary() {
+        // The default per-core grid; the total chart is a widget of the other presets.
+        assert!(page.grid().view.read(cx).spec.hover, "CPU grid takes hover");
+        if let Some(secondary) = page.secondary(cx) {
             assert!(secondary.read(cx).spec.hover, "CPU secondary takes hover");
         }
         // The overlaid and stacked all-cores modes build their charts from these specs.
@@ -455,7 +453,7 @@ mod shared_range {
         view_of(r, k).downcast::<T>().expect("page type")
     }
 
-    /// The chart ranges in s: CPU Overall, Memory Physical, Disk Active, Network Throughput,
+    /// The chart ranges in s: the CPU per-core grid, Memory Physical, Disk Active, Network Throughput,
     /// GPU Memory, Fan Speed, the CPU per-core grid, the GPU engine grid and the Battery chart.
     fn ranges(r: &mut Rig) -> [u64; 9] {
         let cpu = page::<CpuPage>(r, "cpu");
@@ -468,7 +466,8 @@ mod shared_range {
         r.vcx.update(|_, cx| {
             let ns = |c: &Entity<tl_ui_chart::chart::ChartView>| c.read(cx).spec.range_ns / S;
             [
-                ns(cpu.read(cx).overall()),
+                // The default CPU page shows the per-core grid, not the Overall chart.
+                cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
                 ns(memory.read(cx).physical()),
                 ns(disk.read(cx).active_chart()),
                 ns(net.read(cx).throughput()),

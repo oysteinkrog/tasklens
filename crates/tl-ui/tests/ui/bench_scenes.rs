@@ -86,7 +86,7 @@ fn bench_scene_perf_cpu_builds_32_cells_and_9_cards(cx: &mut TestAppContext) {
         (
             cpu.grid().view.read(cx).spec.cells.len(),
             page.sidebar().read(cx).cards().len(),
-            cpu.bench_show_both,
+            cpu.bench_show_both(),
             page.selected().map(|k| k.0.to_string()),
         )
     });
@@ -485,7 +485,7 @@ fn work(scene: &tl_ui::bench::scenes::SceneWindow, cx: &mut VisualTestContext) -
             .downcast::<CpuPage>()
             .expect("a CpuPage")
             .read(cx);
-        let overall = cpu.overall().read(cx);
+        let overall = cpu.overall(cx).expect("the Overall chart").read(cx);
         let grid = cpu.grid().view.read(cx);
         let mut w = Work {
             paints: v.paints(),

@@ -959,7 +959,6 @@ mod grid {
 // CPU page entity (E24, UI-PRF-023, UI-PRF-053; ADR-008, R-126).
 
 mod page {
-    use std::time::Duration;
 
     use gpui_kit::{
         AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render,
@@ -975,17 +974,18 @@ mod page {
     use tl_ui_chart::chart::grid_element::grid_layout;
     use tl_ui_chart::chart::scale::{ScaleState, compute};
     use tl_ui_kit::components::kv_grid;
+    use tl_ui_overview::widget::metric_widget::widget_id;
     use tl_ui_perf::performance::actions::{
         PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel,
     };
     use tl_ui_perf::performance::cpu::{
-        CPU_EXTRA_MODES_ENABLED, CpuPage, FADE_NEW_ID, FADE_OLD_ID, OVERALL_ID, OVERLAID_ID,
-        PageSettingsView, PowerState, SECONDARY_ID, STACKED_ID, SecondaryAvail, mode_items,
-        overlaid_spec, secondary_items,
+        CPU_EXTRA_MODES_ENABLED, CpuPage, PageSettingsView, PowerState, SecondaryAvail,
+        layout_secondary, mode_items, overlaid_spec, secondary_items,
     };
-    use tl_ui_perf::performance::cpu_grid::GRID_ID;
+    use tl_ui_perf::performance::cpu_grid::grid_id;
     use tl_ui_perf::performance::page::DevicePage as _;
     use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
+    use tl_ui_settings::layout::FixedWidget;
     use tl_ui_settings::settings::CpuSecondaryGraph;
     use tl_ui_settings::settings::{
         AppearanceSettings, CpuGraphMode, Settings, ThemeSettings, UiState,
@@ -1025,7 +1025,9 @@ mod page {
 
     /// A CPU page over 16 logical CPUs (package `DeviceIdx(0)`, CPU `id` at `100 + id`) in a
     /// 1000 px wide window, with `settings`.
-    fn open(cx: &mut TestAppContext, settings: Settings) -> Rig<'_> {
+    fn open(cx: &mut TestAppContext, mut settings: Settings) -> Rig<'_> {
+        // As the load does: the CPU page's old keys convert to its entry (tasklens-hzire.5).
+        settings.clamp();
         let engine = FakeEngine::new();
         engine.publish_with(|s| {
             let mut entries = vec![cpu_entry(0, DeviceIdentity::CpuPackage)];
@@ -1106,6 +1108,35 @@ mod page {
         r.vcx.update(|_, cx| demand.read(cx).merged())
     }
 
+    /// The per-core grid's debug selector on the CPU page.
+    fn grid_sel() -> &'static str {
+        grid_id("page.cpu").leak()
+    }
+
+    /// The debug selector of the page's first widget of `metric`, if the layout has one.
+    fn widget_sel(r: &mut Rig, metric: &str) -> Option<&'static str> {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            p.widget_of(metric, cx)
+                .map(|id| &*widget_id(p.container_id(), id).leak())
+        })
+    }
+
+    /// The debug selector of the page's fixed widget `kind`, if the layout has one.
+    fn fixed_sel(r: &mut Rig, kind: FixedWidget) -> Option<&'static str> {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            let c = p.container().read(cx);
+            c.layout()
+                .widgets
+                .iter()
+                .find(|w| w.content == tl_ui_settings::layout::WidgetContent::Fixed(kind.clone()))
+                .map(|w| &*widget_id(p.container_id(), w.id).leak())
+        })
+    }
+
     #[gpui_kit::test]
     fn cpu_mode_button_labels(cx: &mut TestAppContext) {
         let mut s = Settings::default();
@@ -1114,10 +1145,13 @@ mod page {
         let page = r.page.clone();
         let (label, words) = r.vcx.update(|_, cx| {
             let p = page.read(cx);
-            (p.words().mode(p.mode()).to_string(), p.words().clone())
+            (
+                p.words().mode(p.mode().expect("a flow layout")).to_string(),
+                p.words().clone(),
+            )
         });
         assert_eq!(label, "Per core");
-        assert!(r.vcx.debug_bounds(OVERALL_ID).is_none());
+        assert!(r.vcx.update(|_, cx| page.read(cx).overall(cx).is_none()));
 
         // The caret sits right of the label.
         let button = r
@@ -1134,7 +1168,7 @@ mod page {
         );
 
         // 1000 px less 16 px padding on each side: 6 columns, 3 rows of 112 px, 8 px gaps.
-        let grid = r.vcx.debug_bounds(GRID_ID).expect("grid shown");
+        let grid = r.vcx.debug_bounds(grid_sel()).expect("grid shown");
         assert_eq!(grid.size.width, px(968.));
         assert_eq!(grid_layout(16, grid.size.width, px(120.), px(8.)).cols, 6);
         assert_eq!(grid.size.height, px(352.));
@@ -1212,8 +1246,6 @@ mod page {
         r.vcx.dispatch_action(PerfSetCpuGraphMode {
             mode: CpuGraphMode::Overall,
         });
-        // Past the cross-fade, so only the new area is drawn.
-        r.vcx.executor().advance_clock(Duration::from_millis(250));
         draw(r.vcx);
         let page = r.page.clone();
         let (mode, setting) = r.vcx.update(|_, cx| {
@@ -1222,10 +1254,12 @@ mod page {
                 TlSettings::settings(cx).performance.cpu_graph_mode,
             )
         });
-        assert_eq!(mode, CpuGraphMode::Overall);
-        assert_eq!(setting, CpuGraphMode::Overall);
-        assert!(r.vcx.debug_bounds(OVERALL_ID).is_some(), "overall chart");
-        assert!(r.vcx.debug_bounds(GRID_ID).is_none(), "no grid");
+        assert_eq!(mode, Some(CpuGraphMode::Overall));
+        // The button edits the page's entry; the old key stays as it was (ADR-019 phase 3).
+        assert_eq!(setting, CpuGraphMode::PerCore);
+        let overall = widget_sel(&mut r, "total").expect("a total widget");
+        assert!(r.vcx.debug_bounds(overall).is_some(), "overall chart");
+        assert!(r.vcx.debug_bounds(grid_sel()).is_none(), "no grid");
         assert_eq!(merged(&mut r).cpu, CpuDemand::Total);
 
         r.vcx.dispatch_action(PerfSetCpuGraphMode {
@@ -1236,15 +1270,17 @@ mod page {
 
     #[gpui_kit::test]
     fn cpu_kernel_toggle_updates_specs(cx: &mut TestAppContext) {
-        let r = open(cx, Settings::default());
+        let r = open(cx, with_mode(CpuGraphMode::Overall));
         let page = r.page.clone();
         let read = |vcx: &mut VisualTestContext| {
+            draw(vcx);
             vcx.update(|_, cx| {
                 let p = page.read(cx);
+                let overall = p.overall(cx).expect("overall chart");
                 (
                     p.kernel(),
-                    p.overall().read(cx).spec.series.len(),
-                    p.overall().read(cx).labels.legend.len(),
+                    overall.read(cx).spec.series.len(),
+                    overall.read(cx).labels.legend.len(),
                     p.grid()
                         .view
                         .read(cx)
@@ -1312,17 +1348,14 @@ mod page {
     #[cfg(feature = "bench")]
     #[gpui_kit::test]
     fn bench_show_both_layout(cx: &mut TestAppContext) {
-        let r = open(cx, Settings::default());
+        let mut r = open(cx, Settings::default());
         let page = r.page.clone();
-        r.vcx.update(|_, cx| {
-            page.update(cx, |p, cx| {
-                p.bench_show_both = true;
-                cx.notify();
-            })
-        });
+        r.vcx
+            .update(|_, cx| page.update(cx, |p, cx| p.set_bench_show_both(true, cx)));
         draw(r.vcx);
-        let overall = r.vcx.debug_bounds(OVERALL_ID).expect("overall chart");
-        let grid = r.vcx.debug_bounds(GRID_ID).expect("grid");
+        let overall = widget_sel(&mut r, "total").expect("the total widget");
+        let overall = r.vcx.debug_bounds(overall).expect("overall chart");
+        let grid = r.vcx.debug_bounds(grid_sel()).expect("grid");
         assert_eq!(overall.size.height, px(300.));
         assert!(grid.top() > overall.bottom(), "grid below the chart");
     }
@@ -1341,7 +1374,7 @@ mod page {
         });
         let page = r.page.clone();
         let mode = r.vcx.update(|_, cx| page.read(cx).mode());
-        assert_eq!(mode, CpuGraphMode::AllCoresStacked);
+        assert_eq!(mode, Some(CpuGraphMode::AllCoresStacked));
     }
 
     fn with_mode(mode: CpuGraphMode) -> Settings {
@@ -1352,10 +1385,11 @@ mod page {
 
     #[gpui_kit::test]
     fn cpu_overlaid_series_alpha(cx: &mut TestAppContext) {
-        let r = open(cx, with_mode(CpuGraphMode::AllCoresOverlaid));
+        let mut r = open(cx, with_mode(CpuGraphMode::AllCoresOverlaid));
         let page = r.page.clone();
         r.vcx.update(|_, cx| {
-            let chart = page.read(cx).overlaid().expect("overlaid chart").read(cx);
+            let chart = page.read(cx).overlaid(cx).expect("overlaid chart");
+            let chart = chart.read(cx);
             assert_eq!(chart.spec.series.len(), 16);
             for s in &chart.spec.series {
                 assert!((s.line.a - 0.08).abs() < 1e-6, "max(1/16, 0.08)");
@@ -1377,11 +1411,16 @@ mod page {
             assert_eq!(spec.series.len(), 4);
             assert!(spec.series.iter().all(|s| (s.line.a - 0.25).abs() < 1e-6));
         });
-        assert!(r.vcx.debug_bounds(OVERLAID_ID).is_some());
+        let overlaid = widget_sel(&mut r, "cores_overlaid").expect("an overlaid widget");
+        assert!(r.vcx.debug_bounds(overlaid).is_some());
     }
 
+    /// The all-cores charts show their name and no value: ADR-019 phase 3 gives
+    /// `cores_overlaid` and `cores_stacked` the chart and name forms only.
     #[gpui_kit::test]
-    fn cpu_all_cores_value_is_overall(cx: &mut TestAppContext) {
+    fn cpu_all_cores_show_no_value(cx: &mut TestAppContext) {
+        use tl_ui_chart::chart::ValueAlign;
+
         let r = open(cx, with_mode(CpuGraphMode::AllCoresOverlaid));
         r.engine.publish_with(|s| {
             let sys = Arc::make_mut(&mut s.system);
@@ -1390,22 +1429,31 @@ mod page {
         });
         draw(r.vcx);
         let page = r.page.clone();
-        let text = |cx: &mut gpui_kit::App, stacked: bool| {
+        let look = |cx: &mut gpui_kit::App, stacked: bool| {
             let p = page.read(cx);
-            let v = if stacked { p.stacked() } else { p.overlaid() };
-            v.and_then(|v| v.read(cx).value_text().map(|t| t.to_string()))
+            let v = if stacked {
+                p.stacked(cx)
+            } else {
+                p.overlaid(cx)
+            };
+            let v = v.expect("chart").read(cx);
+            (
+                v.labels.value_align,
+                v.labels.heading.as_ref().map(|h| h.to_string()),
+            )
         };
+        let utilization = Some("Utilization".to_owned());
         assert_eq!(
-            r.vcx.update(|_, cx| text(cx, false)).as_deref(),
-            Some("18.6%")
+            r.vcx.update(|_, cx| look(cx, false)),
+            (ValueAlign::Hidden, utilization.clone())
         );
-        // A chart created later gets the current value at once.
         r.vcx.dispatch_action(PerfSetCpuGraphMode {
             mode: CpuGraphMode::AllCoresStacked,
         });
+        draw(r.vcx);
         assert_eq!(
-            r.vcx.update(|_, cx| text(cx, true)).as_deref(),
-            Some("18.6%")
+            r.vcx.update(|_, cx| look(cx, true)),
+            (ValueAlign::Hidden, utilization)
         );
     }
 
@@ -1418,7 +1466,7 @@ mod page {
             (
                 p.kernel_enabled(),
                 p.words().kernel_toggle(p.kernel()).to_string(),
-                p.demand_part().cpu,
+                p.demand_part(cx).cpu,
             )
         });
         assert!(!enabled);
@@ -1430,6 +1478,7 @@ mod page {
         r.vcx.dispatch_action(PerfSetCpuGraphMode {
             mode: CpuGraphMode::Overall,
         });
+        draw(r.vcx);
         assert!(r.vcx.update(|_, cx| page.read(cx).kernel_enabled()));
     }
 
@@ -1440,10 +1489,11 @@ mod page {
         use tl_ui_chart::chart::scale::{ScaleState, compute};
         use tl_ui_settings::settings::NetworkUnit;
 
-        let r = open(cx, with_mode(CpuGraphMode::AllCoresStacked));
+        let mut r = open(cx, with_mode(CpuGraphMode::AllCoresStacked));
         let page = r.page.clone();
         let (y, stack, axis_max, fmt, n) = r.vcx.update(|_, cx| {
-            let chart = page.read(cx).stacked().expect("stacked chart").read(cx);
+            let chart = page.read(cx).stacked(cx).expect("stacked chart");
+            let chart = chart.read(cx);
             (
                 chart.spec.y,
                 chart.spec.stack,
@@ -1467,51 +1517,33 @@ mod page {
             &mut axis,
         );
         assert_eq!(axis, "1600%");
-        assert!(r.vcx.debug_bounds(STACKED_ID).is_some());
+        let stacked = widget_sel(&mut r, "cores_stacked").expect("a stacked widget");
+        assert!(r.vcx.debug_bounds(stacked).is_some());
     }
 
+    /// A mode change shows at once: ADR-019 phase 3 drops the 1.3.0 cross-fade.
     #[gpui_kit::test]
-    fn cpu_mode_change_crossfade(cx: &mut TestAppContext) {
-        let r = open(cx, with_mode(CpuGraphMode::Overall));
-        let page = r.page.clone();
-        assert!(!r.vcx.update(|_, cx| cx.reduce_motion()));
+    fn cpu_mode_change_shows_at_once(cx: &mut TestAppContext) {
+        let mut r = open(cx, with_mode(CpuGraphMode::Overall));
+        assert!(r.vcx.debug_bounds(grid_sel()).is_none());
         r.vcx.dispatch_action(PerfSetCpuGraphMode {
             mode: CpuGraphMode::AllCoresOverlaid,
         });
-        // First frame: both areas, the old fading out and the new fading in.
+        // One frame, no clock advance: only the new chart.
+        r.vcx.run_until_parked();
         r.vcx.update(|window, cx| window.draw(cx).clear(cx));
-        assert_eq!(
-            r.vcx.update(|_, cx| page.read(cx).fading_from()),
-            Some(CpuGraphMode::Overall)
+        assert!(
+            widget_sel(&mut r, "total").is_none(),
+            "the total chart went"
         );
-        assert!(r.vcx.debug_bounds(FADE_OLD_ID).is_some());
-        assert!(r.vcx.debug_bounds(FADE_NEW_ID).is_some());
-        assert!(r.vcx.debug_bounds(OVERALL_ID).is_some());
-        assert!(r.vcx.debug_bounds(OVERLAID_ID).is_some());
-        // After m_base only the new area.
-        r.vcx.executor().advance_clock(Duration::from_millis(250));
-        draw(r.vcx);
-        assert_eq!(r.vcx.update(|_, cx| page.read(cx).fading_from()), None);
-        assert!(r.vcx.debug_bounds(FADE_OLD_ID).is_none());
-        assert!(r.vcx.debug_bounds(OVERALL_ID).is_none());
-        assert!(r.vcx.debug_bounds(OVERLAID_ID).is_some());
-    }
-
-    #[gpui_kit::test]
-    fn cpu_mode_change_instant_reduced_motion(cx: &mut TestAppContext) {
-        let mut settings = with_mode(CpuGraphMode::Overall);
-        settings.motion.animations = false;
-        let r = open(cx, settings);
-        let page = r.page.clone();
+        let overlaid = widget_sel(&mut r, "cores_overlaid").expect("an overlaid widget");
+        assert!(r.vcx.debug_bounds(overlaid).is_some());
         r.vcx.dispatch_action(PerfSetCpuGraphMode {
             mode: CpuGraphMode::PerCore,
         });
-        assert_eq!(r.vcx.update(|_, cx| page.read(cx).fading_from()), None);
-        // One frame, no clock advance: only the new area.
+        r.vcx.run_until_parked();
         r.vcx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(r.vcx.debug_bounds(FADE_OLD_ID).is_none());
-        assert!(r.vcx.debug_bounds(OVERALL_ID).is_none());
-        assert!(r.vcx.debug_bounds(GRID_ID).is_some());
+        assert!(r.vcx.debug_bounds(grid_sel()).is_some());
     }
 
     #[gpui_kit::test]
@@ -1604,10 +1636,11 @@ mod page {
         let page = r.page.clone();
         let (heading, tip) = r.vcx.update(|_, cx| {
             let p = page.read(cx);
-            let view = p.secondary().expect("secondary chart").read(cx);
+            let view = p.secondary(cx).expect("secondary chart");
+            let view = view.read(cx);
             (
                 view.labels.heading.as_ref().map(|h| h.to_string()),
-                p.secondary_fallback_text().map(|t| t.to_string()),
+                p.secondary_fallback_text(cx).map(|t| t.to_string()),
             )
         });
         assert_eq!(heading.as_deref(), Some("Temperature"));
@@ -1616,7 +1649,20 @@ mod page {
             Some("Power draw is not available. Showing Temperature.")
         );
         assert_eq!(saved_secondary(&mut r), CpuSecondaryGraph::Power);
-        assert!(r.vcx.debug_bounds(SECONDARY_ID).is_some());
+        // The note is the tooltip on the Temperature widget's name.
+        let temp = widget_sel(&mut r, "temp").expect("a temperature widget");
+        assert!(r.vcx.debug_bounds(temp).is_some());
+        let tip = r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            let id = p.widget_of("temp", cx).expect("temp");
+            let c = p.container().read(cx);
+            c.source(id)
+                .and_then(|s| s.read(cx).tip().map(|t| t.to_string()))
+        });
+        assert_eq!(
+            tip.as_deref(),
+            Some("Power draw is not available. Showing Temperature.")
+        );
 
         // No temperature either: Clock speed.
         publish_secondary(
@@ -1628,7 +1674,7 @@ mod page {
         );
         let tip = r.vcx.update(|_, cx| {
             page.read(cx)
-                .secondary_fallback_text()
+                .secondary_fallback_text(cx)
                 .map(|t| t.to_string())
         });
         assert_eq!(
@@ -1646,7 +1692,10 @@ mod page {
         );
         let (choice, tip) = r.vcx.update(|_, cx| {
             let p = page.read(cx);
-            (p.secondary_choice(), p.secondary_fallback_text().cloned())
+            (
+                p.secondary_choice(cx),
+                p.secondary_fallback_text(cx).cloned(),
+            )
         });
         assert_eq!(choice, Some(CpuSecondaryGraph::Power));
         assert_eq!(tip, None);
@@ -1711,15 +1760,21 @@ mod page {
             Some(RaplState::Readable),
             None,
         );
-        assert!(r.vcx.debug_bounds(SECONDARY_ID).is_some());
+        let power = widget_sel(&mut r, "power_draw").expect("a power draw widget");
+        assert!(r.vcx.debug_bounds(power).is_some());
         r.vcx.dispatch_action(PerfSetCpuSecondaryGraph {
             choice: CpuSecondaryGraph::None,
         });
         draw(r.vcx);
         let page = r.page.clone();
-        assert!(r.vcx.update(|_, cx| page.read(cx).secondary().is_none()));
-        assert!(r.vcx.debug_bounds(SECONDARY_ID).is_none());
-        assert_eq!(saved_secondary(&mut r), CpuSecondaryGraph::None);
+        assert!(r.vcx.update(|_, cx| page.read(cx).secondary(cx).is_none()));
+        assert!(widget_sel(&mut r, "power_draw").is_none());
+        // The page's entry lists no secondary graph; the old key stays as it was.
+        let listed = r
+            .vcx
+            .update(|_, cx| layout_secondary(page.read(cx).container().read(cx).layout()));
+        assert_eq!(listed, CpuSecondaryGraph::None);
+        assert_eq!(saved_secondary(&mut r), CpuSecondaryGraph::Power);
     }
 
     #[gpui_kit::test]
@@ -1730,7 +1785,8 @@ mod page {
         publish_secondary(&mut r, Validity::Valid, Validity::Valid, None, Some(5050));
         let page = r.page.clone();
         let (y, labels) = r.vcx.update(|_, cx| {
-            let view = page.read(cx).secondary().expect("clock chart").read(cx);
+            let view = page.read(cx).secondary(cx).expect("clock chart");
+            let view = view.read(cx);
             (view.spec.y, view.labels.clone())
         });
         assert_eq!(
@@ -1787,7 +1843,6 @@ mod page {
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::time::now_boot_ns;
     use tl_ui_overview::overview::parts::{core_spark_id, take_core_labels};
-    use tl_ui_perf::performance::cpu::{BOARD_AREA_ID, BOARD_CHART_ID};
     use tl_ui_perf::performance::cpu_board::{BOARD_ID, CpuBoard};
     use tl_ui_settings::settings::{CoreSmoothing, CoreSort};
 
@@ -1801,9 +1856,7 @@ mod page {
 
     fn board(r: &mut Rig) -> Entity<CpuBoard> {
         let page = r.page.clone();
-        r.vcx
-            .update(|_, cx| page.read(cx).board().cloned())
-            .expect("board")
+        r.vcx.update(|_, cx| page.read(cx).board()).expect("board")
     }
 
     /// `CPU_TOTAL` of logical CPU `id` (device `100 + id`) from `pct[id]`, as the series set.
@@ -1873,12 +1926,15 @@ mod page {
         assert_eq!((n, sparks), (16, 16));
         assert!(layout.cols * layout.rows >= 16, "{layout:?}");
 
-        let area = r.vcx.debug_bounds(BOARD_AREA_ID).expect("board area");
-        let chart = r.vcx.debug_bounds(BOARD_CHART_ID).expect("total chart");
+        let area = fixed_sel(&mut r, FixedWidget::CpuCoreBoard).expect("a board widget");
+        let area = r.vcx.debug_bounds(area).expect("board area");
+        let chart = widget_sel(&mut r, "total").expect("a total widget");
+        let chart = r.vcx.debug_bounds(chart).expect("total chart");
         let rows = r.vcx.debug_bounds(BOARD_ID).expect("board");
         assert_eq!(area.size.height, px(300.));
+        assert_eq!(chart.size.height, px(300.));
         assert!(chart.right() < rows.left(), "the chart left of the board");
-        assert!(r.vcx.debug_bounds(GRID_ID).is_none(), "no per-core grid");
+        assert!(r.vcx.debug_bounds(grid_sel()).is_none(), "no per-core grid");
         for i in 0..16 {
             let id: &'static str = Box::leak(core_spark_id(i).into_boxed_str());
             let spark = r.vcx.debug_bounds(id);
@@ -1889,7 +1945,8 @@ mod page {
         let page = r.page.clone();
         let (series, kernel_on) = r.vcx.update(|_, cx| {
             let p = page.read(cx);
-            (p.overall().read(cx).spec.series.len(), p.kernel_enabled())
+            let overall = p.overall(cx).expect("total chart");
+            (overall.read(cx).spec.series.len(), p.kernel_enabled())
         });
         assert_eq!(series, 2);
         assert!(kernel_on);
@@ -2036,16 +2093,14 @@ mod page {
         r.vcx.update(|window, _| window.activate_window());
         publish_core_clocks(&mut r, 1);
         let page = r.page.clone();
-        let (lines, view) = r.vcx.update(|_, cx| {
-            let c = page.read(cx).core_clocks().expect("core clocks");
-            (c.lines().clone(), c.view().clone())
-        });
-        assert_eq!(lines.devices.len(), 8, "one line per physical core");
-        assert_eq!(lines.line_of_cpu[9], Some(1), "CPU 9 is core 1's sibling");
+        let view = r
+            .vcx
+            .update(|_, cx| page.read(cx).chart_of("core_clocks", cx))
+            .expect("core clocks");
         let (spec, set) = r
             .vcx
             .read_entity(&view, |v, _| (v.spec.clone(), v.line_set().cloned()));
-        assert_eq!(spec.series.len(), 8);
+        assert_eq!(spec.series.len(), 8, "one line per physical core");
         assert!(
             spec.series
                 .iter()
@@ -2066,7 +2121,8 @@ mod page {
         assert_eq!(merged(&mut r).cpu, CpuDemand::PerCore);
 
         // Hover: every core, fastest first, each with its peak in the range.
-        let chart = r.vcx.debug_bounds(SECONDARY_ID).expect("secondary chart");
+        let chart = widget_sel(&mut r, "core_clocks").expect("a core clocks widget");
+        let chart = r.vcx.debug_bounds(chart).expect("secondary chart");
         let at = gpui_kit::point(chart.right() - px(10.), chart.center().y);
         r.vcx.simulate_mouse_move(at, None, Modifiers::none());
         draw(r.vcx);
