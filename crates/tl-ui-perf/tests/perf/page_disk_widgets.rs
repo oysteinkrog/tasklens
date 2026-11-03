@@ -843,3 +843,16 @@ fn page_disk_partitions_appear_place_once(cx: &mut TestAppContext) {
     );
     assert!(r.vcx.debug_bounds(selector).is_some());
 }
+
+/// The page's widgets draw the same in the flow layout, in Edit Widgets and after Apply
+/// (tasklens-hzire.10, the look sweep).
+#[gpui_kit::test]
+fn page_disk_look_survives_edit_and_apply(cx: &mut TestAppContext) {
+    let mut r = open(cx, PerformanceSettings::default());
+    let container = r.container();
+    let editor = {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| page.read(cx).editor().clone())
+    };
+    super::page_look::sweep(r.vcx, &container, &editor, "disk");
+}

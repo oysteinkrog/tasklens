@@ -316,3 +316,36 @@ fn old_page_keys_stay_for_1_3_0() {
         assert_eq!(toml::to_string(&older).expect("serializes"), text, "{name}");
     }
 }
+
+/// The pages without an old toggle (disk, adapter, fan, battery, Aggregate storage and
+/// Aggregate graphics) never convert, whatever the old page keys of any fixture say, and never
+/// get an entry of their own at load. Their built-in default is the whole of their migration
+/// (tasklens-hzire.10).
+#[test]
+fn pages_without_old_toggles_never_convert() {
+    let pages = [
+        "page.disk:disk:sda",
+        "page.net:net:eth0",
+        "page.fan:fan:hwmon3:1",
+        "page.bat:BAT0",
+        "page.aggregate:disk",
+        "page.aggregate:gpu",
+    ];
+    for name in all_names() {
+        let (s, _) = load(&fixture(&name));
+        for page in pages {
+            assert!(
+                !page_needs_conversion_for(&s.performance, page, ALL),
+                "{name}: {page}"
+            );
+            assert!(
+                s.performance.layouts.entry(page).is_none(),
+                "{name}: {page}"
+            );
+            assert!(
+                convert_page(&s.performance, page).is_some(),
+                "{name}: {page}"
+            );
+        }
+    }
+}

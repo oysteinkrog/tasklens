@@ -834,3 +834,13 @@ fn page_widget_add_lists_own_device_and_parts(cx: &mut TestAppContext) {
     let container = r.container();
     assert!(r.vcx.update(|_, cx| container.read(cx).fixed(id).is_some()));
 }
+
+/// The page's widgets draw the same in the flow layout, in Edit Widgets and after Apply
+/// (tasklens-hzire.10, the look sweep).
+#[gpui_kit::test]
+fn page_fan_look_survives_edit_and_apply(cx: &mut TestAppContext) {
+    let mut r = open(cx, 1200., 900.);
+    let container = r.container();
+    let editor = r.editor();
+    super::page_look::sweep(r.vcx, &container, &editor, "fan");
+}

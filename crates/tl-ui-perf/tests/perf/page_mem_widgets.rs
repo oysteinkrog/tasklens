@@ -1204,3 +1204,16 @@ fn page_mem_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
         "the same entities"
     );
 }
+
+/// The page's widgets draw the same in the flow layout, in Edit Widgets and after Apply
+/// (tasklens-hzire.10, the look sweep).
+#[gpui_kit::test]
+fn page_mem_look_survives_edit_and_apply(cx: &mut TestAppContext) {
+    let mut r = open(cx, PerformanceSettings::default());
+    let container = r.container();
+    let editor = {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| page.read(cx).editor().clone())
+    };
+    super::page_look::sweep(r.vcx, &container, &editor, "mem");
+}

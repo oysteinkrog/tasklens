@@ -875,3 +875,16 @@ fn page_net_default_demand_as_1_3_0(cx: &mut TestAppContext) {
     assert!(d.any_surface_visible && d.nets);
     assert!(!d.disks && !d.memory && !d.gpus && !d.cpu_fast && !d.sensors);
 }
+
+/// The page's widgets draw the same in the flow layout, in Edit Widgets and after Apply
+/// (tasklens-hzire.10, the look sweep).
+#[gpui_kit::test]
+fn page_net_look_survives_edit_and_apply(cx: &mut TestAppContext) {
+    let mut r = open(cx, PerformanceSettings::default(), None);
+    let container = r.container();
+    let editor = {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| page.read(cx).editor().clone())
+    };
+    super::page_look::sweep(r.vcx, &container, &editor, "net");
+}

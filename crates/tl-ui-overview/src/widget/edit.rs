@@ -655,9 +655,12 @@ impl WidgetEditor {
             .map(|w| {
                 let how = match placement.bounds(w.id) {
                     Some(b) => Drawn::At(b),
-                    None if c
-                        .source(w.id)
-                        .is_some_and(|s| s.read(cx).availability() == Availability::Available) =>
+                    // A page scrolls, so a widget it does not place takes no space in its flow
+                    // (a secondary fallback not shown) and is left out; only a box cuts one.
+                    None if grid::grid_fills(&self.id)
+                        && c.source(w.id).is_some_and(|s| {
+                            s.read(cx).availability() == Availability::Available
+                        }) =>
                     {
                         Drawn::Cut
                     }
