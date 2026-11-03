@@ -32,6 +32,12 @@
 //! legend at the right in whole rows.
 //!
 //! The chart itself is a cached `ChartView`; this view re-renders for the legend and hover only.
+//!
+//! [`AppsChart`] serves a metric kind, [`AppsMetric`] (UI-PRF-062 "Build"). The kind picks the
+//! metric id, the fixed bands and their colours, the value format, the Y scale and the settings
+//! section. Ranking, colour picks, legend, hover, stacking and history reads are shared. This
+//! file fills in the Memory kind; the Cpu kind's bands, words and settings come with
+//! tasklens-qkvs0.8, and nothing makes a Cpu chart before that.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -49,9 +55,12 @@ use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::snapshot::Snapshot;
-use tl_model::system::WineGroupInfo;
+use tl_model::system::{MemGroupBand, WineGroupInfo};
 use tl_model::units;
-use tl_ui_settings::settings::{GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS};
+use tl_ui_settings::settings::{
+    GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS, MEMORY_BY_APP_TOP_N,
+    PerformanceSettings,
+};
 use tracing::warn;
 
 use super::parts::{ChartSettings, box_chart, class_probe};
@@ -64,7 +73,7 @@ use tl_ui_base::settings_global::{Section, TlSettings};
 use tl_ui_base::shell::{ProcessJump, ShellApi, ShellState};
 use tl_ui_base::template::Template;
 use tl_ui_base::text::style::{numeric_style, t_sm};
-use tl_ui_base::theme::{UiMetrics, current, metrics};
+use tl_ui_base::theme::{GraphPalette, UiMetrics, current, metrics};
 use tl_ui_chart::chart::geometry::right_edge_ns;
 use tl_ui_chart::chart::view::{
     HistoryClock, derived_view, find_tiered, history_view, reads_history,
@@ -97,6 +106,170 @@ pub const KERNEL_PARTS: [(&str, f32, bool); 6] = [
     ("k:driver", 0.45, true),
     ("k:filecache", 0.50, true),
 ];
+
+/// What an [`AppsChart`] shows (UI-PRF-062 "Build"). Everything that differs between the
+/// kinds is here; the chart code is shared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppsMetric {
+    /// Memory by app (UI-PRF-060): series `MEM_GROUP` in bytes, 0..MemTotal, the six parts of
+    /// "Shared and kernel" as fixed bands, `performance.memory_by_app`.
+    Memory,
+    /// CPU by app (UI-PRF-062): series `CPU_GROUP` in percent of all CPUs, 0..100. Its fixed
+    /// bands, words and settings section come with tasklens-qkvs0.8; until then it has no fixed
+    /// bands, the default top N and no saved colour picks.
+    Cpu,
+}
+
+impl AppsMetric {
+    /// The series of each band on its `DeviceIdentity::MemGroup` device.
+    pub fn metric_id(self) -> MetricId {
+        match self {
+            Self::Memory => MetricId::MEM_GROUP,
+            Self::Cpu => MetricId::CPU_GROUP,
+        }
+    }
+
+    /// The series of `device` for this kind.
+    pub fn series(self, device: DeviceIdx) -> SeriesId {
+        SeriesId {
+            device,
+            metric: self.metric_id(),
+        }
+    }
+
+    /// The fixed bands above "Other apps", bottom first: key, fill alpha against
+    /// [`fill`](Self::fill), and whether the value is worked out rather than read. They are
+    /// never ranked and never get a group colour.
+    pub fn fixed_bands(self) -> &'static [(&'static str, f32, bool)] {
+        match self {
+            Self::Memory => &KERNEL_PARTS,
+            Self::Cpu => &[],
+        }
+    }
+
+    /// The key prefix of the fixed bands: a key with it is never a group.
+    fn fixed_prefix(self) -> &'static str {
+        match self {
+            Self::Memory => KERNEL_PREFIX,
+            Self::Cpu => "cpu:",
+        }
+    }
+
+    /// The band that is the sum of the fixed bands, drawn as itself less the fixed bands for
+    /// history written before they existed ([`BandKind::Shared`]). `None` when the kind has none.
+    fn aggregate_key(self) -> Option<&'static str> {
+        match self {
+            Self::Memory => Some(SHARED_KEY),
+            Self::Cpu => None,
+        }
+    }
+
+    /// The band that gets a sample on every sweep: its newest sample is the chart's newest time.
+    fn clock_key(self) -> &'static str {
+        match self {
+            Self::Memory => SHARED_KEY,
+            Self::Cpu => OTHER_KEY,
+        }
+    }
+
+    /// The theme colour the fixed bands fill with, at their alpha.
+    fn fill(self, graph: &GraphPalette) -> Hsla {
+        match self {
+            Self::Memory => graph.mem_fill,
+            Self::Cpu => graph.cpu_fill,
+        }
+    }
+
+    /// The format of the page chart's own value.
+    fn value_fmt(self) -> ValueFormat {
+        match self {
+            Self::Memory => ValueFormat::Bytes,
+            Self::Cpu => ValueFormat::Percent,
+        }
+    }
+
+    /// The top of the Y scale: MemTotal in bytes, or 100 percent.
+    fn total(self, snap: &Snapshot) -> u64 {
+        match self {
+            Self::Memory => snap.system.memory.total,
+            Self::Cpu => 100,
+        }
+    }
+
+    /// The Y scale over [`total`](Self::total).
+    fn y_scale(self, total: u64) -> YScale {
+        match self {
+            Self::Memory => YScale::FixedTotal(total as f32),
+            Self::Cpu => YScale::Fixed { min: 0., max: 100. },
+        }
+    }
+
+    /// Writes a band value for the legend and the tooltip: bytes, or percent with one decimal.
+    fn write_value(self, out: &mut String, value: f64) {
+        match self {
+            Self::Memory => units::bytes(out, value.max(0.) as u64),
+            Self::Cpu => units::percent(out, value.max(0.) as f32),
+        }
+    }
+
+    /// The bands the reducer published in the newest snapshot, with their process counts.
+    fn published(self, snap: &Snapshot) -> &[MemGroupBand] {
+        match self {
+            Self::Memory => &snap.system.memory.groups,
+            Self::Cpu => &snap.system.cpu.groups,
+        }
+    }
+
+    /// The page chart's value: In use from the memory totals (a sum of the bands would show
+    /// "-" while a ranked group has no sample at the newest time).
+    fn value_text(self, snap: &Snapshot) -> Option<SharedString> {
+        match self {
+            Self::Memory => {
+                let mut text = String::new();
+                units::bytes(&mut text, snap.system.memory.used);
+                Some(SharedString::from(text))
+            }
+            Self::Cpu => None,
+        }
+    }
+
+    /// The Fluent keys of the page chart's heading and range word.
+    fn word_keys(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Memory => ("perf-mem-heading-physical", "perf-mem-range-memory"),
+            Self::Cpu => (
+                "perf-cpu-heading-utilization",
+                "perf-cpu-heading-utilization",
+            ),
+        }
+    }
+
+    /// Groups drawn as their own band, from the kind's settings section.
+    fn top_n(self, s: &PerformanceSettings) -> usize {
+        match self {
+            Self::Memory => usize::from(s.memory_by_app.top_n),
+            Self::Cpu => usize::from(MEMORY_BY_APP_TOP_N.1),
+        }
+    }
+
+    /// The saved colour picks of the kind's settings section.
+    fn picks(self, s: &PerformanceSettings) -> Vec<GroupColor> {
+        match self {
+            Self::Memory => s.memory_by_app.colors.clone(),
+            Self::Cpu => Vec::new(),
+        }
+    }
+
+    /// Saves the colour picks to the kind's settings section.
+    fn save_picks(self, picks: Vec<GroupColor>, cx: &mut App) {
+        match self {
+            Self::Memory => {
+                TlSettings::update(cx, |d| d.settings.performance.memory_by_app.colors = picks);
+            }
+            Self::Cpu => {}
+        }
+    }
+}
 
 /// The chart re-ranks at most this often.
 pub const RERANK_NS: u64 = 10_000_000_000;
@@ -346,9 +519,10 @@ pub enum BandKind {
     Group(u8),
     Other,
     /// "Shared and kernel" where the six parts have no samples (history written by 1.0.8):
-    /// `memgroup:shared` minus the parts.
+    /// `memgroup:shared` minus the parts ([`AppsMetric`]'s aggregate band).
     Shared,
-    /// A part of "Shared and kernel", by its index in [`KERNEL_PARTS`].
+    /// A fixed band of the kind, by its index in [`AppsMetric::fixed_bands`]: for Memory a part
+    /// of "Shared and kernel" ([`KERNEL_PARTS`]).
     Kernel(u8),
 }
 
@@ -359,7 +533,7 @@ impl BandKind {
     }
 }
 
-/// One band, bottom first in [`MemoryAppsChart::bands`].
+/// One band, bottom first in [`AppsChart::bands`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Band {
     pub key: Arc<str>,
@@ -379,7 +553,7 @@ pub struct Band {
     pub processes: Option<u32>,
     /// The prefix and Windows image names of a Wine group, from the newest snapshot.
     pub wine: Option<Arc<WineGroupInfo>>,
-    /// Bytes at the newest sample.
+    /// The value at the newest sample: bytes for Memory, percent for Cpu.
     pub value: f64,
 }
 
@@ -389,13 +563,6 @@ struct Group {
     key: Arc<str>,
     name: Arc<str>,
     device: DeviceIdx,
-}
-
-fn series_id(device: DeviceIdx) -> SeriesId {
-    SeriesId {
-        device,
-        metric: MetricId::MEM_GROUP,
-    }
 }
 
 /// The value of `view` at `t_ns`: the nearest sample (the earlier one on a tie) when it is valid
@@ -450,15 +617,16 @@ pub struct AppsWords {
 }
 
 impl AppsWords {
-    fn refresh(&mut self, version: &mut u64, cx: &App) -> bool {
+    fn refresh(&mut self, version: &mut u64, metric: AppsMetric, cx: &App) -> bool {
         let v = cx.global::<Strings>().strings_version;
         if v == *version {
             return false;
         }
         *version = v;
+        let (heading, range) = metric.word_keys();
         *self = AppsWords {
-            heading: tr(cx, "perf-mem-heading-physical"),
-            range: tr(cx, "perf-mem-range-memory"),
+            heading: tr(cx, heading),
+            range: tr(cx, range),
             more: Some(Template::new(cx, "perf-mem-apps-more", &["count"])),
             count: Some(Template::new(cx, "perf-mem-apps-count", &["count"])),
             share: Some(Template::new(cx, "perf-mem-apps-share", &["share"])),
@@ -489,9 +657,9 @@ struct AppsSettings {
 
 impl AppsSettings {
     /// The Overview box takes its range and look from the box charts (UI-PRF-055).
-    fn read(place: AppsPlace, cx: &App) -> Self {
+    fn read(metric: AppsMetric, place: AppsPlace, cx: &App) -> Self {
         let s = TlSettings::settings(cx);
-        let top_n = usize::from(s.performance.memory_by_app.top_n);
+        let top_n = metric.top_n(&s.performance);
         match place {
             AppsPlace::Page => Self {
                 top_n,
@@ -520,12 +688,13 @@ struct Hover {
     at: Option<(Point<Pixels>, u64)>,
 }
 
-/// The memory-by-app chart with its legend (UI-PRF-060).
-pub struct MemoryAppsChart {
+/// The by-app chart of one [`AppsMetric`] with its legend (UI-PRF-060, UI-PRF-062).
+pub struct AppsChart {
+    metric: AppsMetric,
     place: AppsPlace,
     chart: Entity<ChartView>,
     hub: Entity<SnapshotHub>,
-    /// The series of every memory group device for the chart range, sorted by device, from
+    /// The kind's series of every memory group device for the chart range, sorted by device, from
     /// [`source`](Self::source).
     views: Vec<(DeviceIdx, Arc<SeriesView>)>,
     /// The history clock while `views` come from the device metric history.
@@ -538,15 +707,19 @@ pub struct MemoryAppsChart {
     ranker: Ranker,
     /// Every group with a series, by key.
     groups: Vec<Group>,
-    /// Devices of the two fixed bands and the six parts of "Shared and kernel".
+    /// Devices of "Other apps", of the kind's aggregate band ("Shared and kernel"), of the
+    /// band that gives the newest time, and of the fixed bands in
+    /// [`AppsMetric::fixed_bands`] order.
     other: Option<DeviceIdx>,
-    shared: Option<DeviceIdx>,
-    parts: [Option<DeviceIdx>; 6],
-    /// `memgroup:shared` minus the six parts, at the times of `memgroup:shared`.
+    aggregate: Option<DeviceIdx>,
+    reference: Option<DeviceIdx>,
+    parts: SmallVec<[Option<DeviceIdx>; 6]>,
+    /// The aggregate minus the fixed bands, at the times of the aggregate.
     older: Option<Arc<SeriesView>>,
-    /// Whether "Shared and kernel (older data)" and each part, in [`KERNEL_PARTS`] order, is
-    /// above 0 somewhere in the visible range; the others have no band.
-    kernel_on: [bool; 7],
+    /// Whether the aggregate band ("Shared and kernel (older data)") and each fixed band, in
+    /// [`AppsMetric::fixed_bands`] order, is above 0 somewhere in the visible range; the others
+    /// have no band.
+    kernel_on: SmallVec<[bool; 7]>,
     /// The ranked keys the bands were built from, and the "Other apps" keys.
     top: Vec<Arc<str>>,
     rest: Vec<Arc<str>>,
@@ -577,23 +750,29 @@ fn section_versions(cx: &App) -> [u64; 3] {
     ]
 }
 
-impl MemoryAppsChart {
-    /// The Memory page's chart.
-    pub fn new(hub: Entity<SnapshotHub>, cx: &mut Context<Self>) -> Self {
-        Self::new_in(hub, AppsPlace::Page, cx)
+impl AppsChart {
+    /// The page's chart of `metric`.
+    pub fn new(hub: Entity<SnapshotHub>, metric: AppsMetric, cx: &mut Context<Self>) -> Self {
+        Self::new_in(hub, metric, AppsPlace::Page, cx)
     }
 
-    /// The chart for `place`. In the Overview box the chart is a box chart: it reads the device
-    /// metric history at 1 h, 24 h and 7 d and holds while the Overview waits for a picked time.
-    pub fn new_in(hub: Entity<SnapshotHub>, place: AppsPlace, cx: &mut Context<Self>) -> Self {
-        let settings = AppsSettings::read(place, cx);
+    /// The chart of `metric` for `place`. In the Overview box the chart is a box chart: it reads
+    /// the device metric history at 1 h, 24 h and 7 d and holds while the Overview waits for a
+    /// picked time.
+    pub fn new_in(
+        hub: Entity<SnapshotHub>,
+        metric: AppsMetric,
+        place: AppsPlace,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let settings = AppsSettings::read(metric, place, cx);
         let mut words = AppsWords::default();
         let mut strings_version = u64::MAX;
-        words.refresh(&mut strings_version, cx);
+        words.refresh(&mut strings_version, metric, cx);
         let snap = Arc::clone(hub.read(cx).current());
-        let total = snap.system.memory.total;
-        let spec = Self::spec_of(&[], None, total, settings);
-        let labels = Self::labels_of(place, &words);
+        let total = metric.total(&snap);
+        let spec = Self::spec_of(metric, &[], None, total, settings);
+        let labels = Self::labels_of(metric, place, &words);
         let chart = match place {
             AppsPlace::Page => cx.new(|cx| {
                 ChartView::new(spec, labels, &hub, cx)
@@ -612,6 +791,7 @@ impl MemoryAppsChart {
             subs.push(cx.observe_global::<OverviewPause>(Self::on_pause));
         }
         let mut this = Self {
+            metric,
             place,
             chart,
             host_clock: hub.read(cx).clock().clone(),
@@ -622,10 +802,11 @@ impl MemoryAppsChart {
             ranker: Ranker::default(),
             groups: Vec::new(),
             other: None,
-            shared: None,
-            parts: [None; 6],
+            aggregate: None,
+            reference: None,
+            parts: SmallVec::new(),
             older: None,
-            kernel_on: [false; 7],
+            kernel_on: SmallVec::new(),
             top: Vec::new(),
             rest: Vec::new(),
             bands: Vec::new(),
@@ -644,6 +825,10 @@ impl MemoryAppsChart {
         };
         this.refresh(&snap, true, cx);
         this
+    }
+
+    pub fn metric(&self) -> AppsMetric {
+        self.metric
     }
 
     pub fn place(&self) -> AppsPlace {
@@ -680,11 +865,11 @@ impl MemoryAppsChart {
 
     /// The page chart has its heading, value and range word; the box frame draws those in the
     /// Overview.
-    fn labels_of(place: AppsPlace, words: &AppsWords) -> ChartLabels {
+    fn labels_of(metric: AppsMetric, place: AppsPlace, words: &AppsWords) -> ChartLabels {
         match place {
             AppsPlace::Page => ChartLabels {
                 heading: Some(words.heading.clone()),
-                value_fmt: ValueFormat::Bytes,
+                value_fmt: metric.value_fmt(),
                 value_align: ValueAlign::Right,
                 range_word: words.range.clone(),
                 legend: SmallVec::new(),
@@ -692,7 +877,7 @@ impl MemoryAppsChart {
             },
             AppsPlace::Overview => ChartLabels {
                 heading: None,
-                value_fmt: ValueFormat::Bytes,
+                value_fmt: metric.value_fmt(),
                 value_align: ValueAlign::Hidden,
                 range_word: SharedString::default(),
                 legend: SmallVec::new(),
@@ -701,9 +886,15 @@ impl MemoryAppsChart {
         }
     }
 
-    /// The stacked spec of `bands` (bottom first), 0..MemTotal. With a hovered band the others
-    /// drop to [`DIM`].
-    fn spec_of(bands: &[Band], hovered: Option<usize>, total: u64, s: AppsSettings) -> ChartSpec {
+    /// The stacked spec of `bands` (bottom first) on the kind's Y scale over `total`. With a
+    /// hovered band the others drop to [`DIM`].
+    fn spec_of(
+        metric: AppsMetric,
+        bands: &[Band],
+        hovered: Option<usize>,
+        total: u64,
+        s: AppsSettings,
+    ) -> ChartSpec {
         let mut series: SmallVec<[ChartSeries; 4]> = SmallVec::new();
         for (i, band) in bands.iter().enumerate() {
             let dim = if hovered.is_some_and(|h| h != i) {
@@ -745,7 +936,7 @@ impl MemoryAppsChart {
         }
         ChartSpec {
             series,
-            y: YScale::FixedTotal(total as f32),
+            y: metric.y_scale(total),
             range_ns: s.range_ns,
             grid: GridStyle {
                 lines: true,
@@ -762,7 +953,13 @@ impl MemoryAppsChart {
     }
 
     fn rebuild_spec(&self, cx: &mut Context<Self>) {
-        let spec = Self::spec_of(&self.bands, self.hover.band, self.total, self.settings);
+        let spec = Self::spec_of(
+            self.metric,
+            &self.bands,
+            self.hover.band,
+            self.total,
+            self.settings,
+        );
         self.chart.update(cx, |v, cx| v.set_spec(spec, cx));
     }
 
@@ -818,7 +1015,7 @@ impl MemoryAppsChart {
         }
     }
 
-    /// Fills `views` with the series of every memory group device. History views (band means
+    /// Fills `views` with the kind's series of every memory group device. History views (band means
     /// only, as a stacked chart draws them) are built again only when the history or the
     /// catalog changed.
     fn resolve_views(&mut self, snap: &Snapshot, force: bool, cx: &App) {
@@ -851,7 +1048,7 @@ impl MemoryAppsChart {
             if !matches!(e.identity, DeviceIdentity::MemGroup { .. }) {
                 continue;
             }
-            let id = series_id(e.idx);
+            let id = self.metric.series(e.idx);
             let view = match source {
                 Source::History => hist
                     .get(id)
@@ -875,27 +1072,27 @@ impl MemoryAppsChart {
             .map(|i| &self.views[i].1)
     }
 
-    /// The time of the newest sample. The reference clock is the "Shared and kernel" band, which
-    /// gets a sample on every sweep.
+    /// The time of the newest sample. The reference clock is the kind's clock band ("Shared and
+    /// kernel" for Memory), which gets a sample on every sweep.
     fn newest(&self) -> Option<u64> {
-        self.shared
+        self.reference
             .and_then(|d| self.view(d))
             .and_then(|v| v.samples.last().map(|s| s.t_ns))
     }
 
-    /// Builds [`older`](Self::older) from the views and returns which kernel bands are above 0
-    /// in the visible range up to `newest`.
-    fn kernel_bands_on(&mut self, newest: Option<u64>) -> [bool; 7] {
+    /// Builds [`older`](Self::older) from the views and returns which of the aggregate band and
+    /// the fixed bands are above 0 in the visible range up to `newest`.
+    fn kernel_bands_on(&mut self, newest: Option<u64>) -> SmallVec<[bool; 7]> {
         let part_views: SmallVec<[Option<&SeriesView>; 6]> = self
             .parts
             .iter()
             .map(|p| p.and_then(|d| self.view(d)).map(|v| &**v))
             .collect();
         let older = self
-            .shared
+            .aggregate
             .and_then(|d| self.view(d))
             .map(|a| Arc::new(derived_view(a, part_views.iter().copied())));
-        let mut on = [false; 7];
+        let mut on: SmallVec<[bool; 7]> = smallvec![false; part_views.len() + 1];
         if let Some(newest) = newest {
             let from = newest.saturating_sub(self.settings.range_ns);
             let above = |v: &SeriesView| {
@@ -919,29 +1116,35 @@ impl MemoryAppsChart {
         if self.parts.iter().any(Option::is_some) {
             return self.words.shared_older.clone();
         }
-        self.shared
+        self.aggregate
             .and_then(|d| self.hub.read(cx).current().devices.get(d))
             .map(|e| SharedString::from(e.display_name.to_string()))
-            .unwrap_or_else(|| SharedString::from(SHARED_KEY))
+            .unwrap_or_else(|| SharedString::from(self.metric.aggregate_key().unwrap_or_default()))
     }
 
     /// Re-reads the groups, ranks them (sticky unless `force`), and rebuilds the bands and the
     /// spec when the bands changed. The legend values follow every call.
     fn refresh(&mut self, snap: &Snapshot, force: bool, cx: &mut Context<Self>) {
         self.resolve_views(snap, force, cx);
-        let fixed = (self.other, self.shared, self.parts);
+        let metric = self.metric;
+        let fixed_bands = metric.fixed_bands();
+        let fixed = (self.other, self.aggregate, std::mem::take(&mut self.parts));
         self.groups.clear();
         self.other = None;
-        self.shared = None;
-        self.parts = [None; 6];
+        self.aggregate = None;
+        self.reference = None;
+        self.parts.resize(fixed_bands.len(), None);
         for e in snap.devices.entries.iter() {
             if let DeviceIdentity::MemGroup { key } = &e.identity {
+                if **key == *metric.clock_key() {
+                    self.reference = Some(e.idx);
+                }
                 match &**key {
                     OTHER_KEY => self.other = Some(e.idx),
-                    SHARED_KEY => self.shared = Some(e.idx),
-                    // The parts of "Shared and kernel" are never ranked or given a colour.
-                    k if k.starts_with(KERNEL_PREFIX) => {
-                        if let Some(i) = KERNEL_PARTS.iter().position(|p| p.0 == k) {
+                    k if Some(k) == metric.aggregate_key() => self.aggregate = Some(e.idx),
+                    // The fixed bands are never ranked or given a colour.
+                    k if k.starts_with(metric.fixed_prefix()) => {
+                        if let Some(i) = fixed_bands.iter().position(|p| p.0 == k) {
                             self.parts[i] = Some(e.idx);
                         }
                     }
@@ -954,7 +1157,7 @@ impl MemoryAppsChart {
             }
         }
 
-        let reference = self.shared.and_then(|d| self.view(d));
+        let reference = self.reference.and_then(|d| self.view(d));
         let newest = self.newest();
         let mut means: Vec<(Arc<str>, f64)> = Vec::new();
         if let (Some(reference), Some(newest)) = (reference, newest) {
@@ -984,13 +1187,13 @@ impl MemoryAppsChart {
         let kernel_on = self.kernel_bands_on(newest);
 
         let (top, rest) = split_top(self.ranker.order(), self.settings.top_n);
-        let total = snap.system.memory.total;
+        let total = metric.total(snap);
         // A fixed band whose device arrives or moves needs new bands too, even with no group
         // ranked.
         let structure_changed = top != self.top.as_slice()
             || rest != self.rest.as_slice()
             || total != self.total
-            || (self.other, self.shared, self.parts) != fixed
+            || (self.other, self.aggregate, &self.parts) != (fixed.0, fixed.1, &fixed.2)
             || kernel_on != self.kernel_on
             || force;
         if structure_changed {
@@ -1009,11 +1212,7 @@ impl MemoryAppsChart {
             // The box frame shows the value.
             return;
         }
-        // The value is In use from the memory totals: a sum of the bands would show "-" while
-        // a ranked group has no sample at the newest time.
-        let mut text = String::new();
-        units::bytes(&mut text, snap.system.memory.used);
-        let text = Some(SharedString::from(text));
+        let text = metric.value_text(snap);
         self.chart.update(cx, |v, cx| v.set_value_text(text, cx));
     }
 
@@ -1021,14 +1220,11 @@ impl MemoryAppsChart {
     /// they changed.
     fn build_bands(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
-        let mut picks = TlSettings::settings(cx)
-            .performance
-            .memory_by_app
-            .colors
-            .clone();
+        let metric = self.metric;
+        let mut picks = metric.picks(&TlSettings::settings(cx).performance);
         let (slots, changed) = pick_colors(&mut picks, &self.top);
         if changed {
-            TlSettings::update(cx, |d| d.settings.performance.memory_by_app.colors = picks);
+            metric.save_picks(picks, cx);
         }
         let group = |key: &Arc<str>| self.groups.iter().find(|g| g.key == *key);
         let mut bands: Vec<Band> = Vec::with_capacity(self.top.len() + 2);
@@ -1041,7 +1237,7 @@ impl MemoryAppsChart {
                 kind: BandKind::Group(slot),
                 color,
                 line: color,
-                series: smallvec![series_id(g.device)],
+                series: smallvec![metric.series(g.device)],
                 minus: Arc::from([]),
                 processes: None,
                 wine: None,
@@ -1059,9 +1255,9 @@ impl MemoryAppsChart {
                 .rest
                 .iter()
                 .filter_map(group)
-                .map(|g| series_id(g.device))
+                .map(|g| metric.series(g.device))
                 .collect();
-            series.push(series_id(other));
+            series.push(metric.series(other));
             let color = Hsla {
                 a: theme.text_secondary.a * OTHER_ALPHA,
                 ..theme.text_secondary
@@ -1079,27 +1275,35 @@ impl MemoryAppsChart {
                 value: 0.,
             });
         }
-        if let Some(shared) = self.shared
+        let fill = metric.fill(&theme.graph);
+        if let Some((shared, key)) = self.aggregate.zip(metric.aggregate_key())
             && self.kernel_on[0]
         {
             let color = Hsla {
-                a: theme.graph.mem_fill.a * SHARED_ALPHA,
-                ..theme.graph.mem_fill
+                a: fill.a * SHARED_ALPHA,
+                ..fill
             };
             bands.push(Band {
-                key: Arc::from(SHARED_KEY),
+                key: Arc::from(key),
                 name: self.shared_name(cx),
                 kind: BandKind::Shared,
                 color,
                 line: color,
-                series: smallvec![series_id(shared)],
-                minus: self.parts.iter().flatten().map(|&d| series_id(d)).collect(),
+                series: smallvec![metric.series(shared)],
+                minus: self
+                    .parts
+                    .iter()
+                    .flatten()
+                    .map(|&d| metric.series(d))
+                    .collect(),
                 processes: None,
                 wine: None,
                 value: 0.,
             });
         }
-        for (i, (&(key, alpha, _), part)) in KERNEL_PARTS.iter().zip(self.parts).enumerate() {
+        for (i, (&(key, alpha, _), part)) in
+            metric.fixed_bands().iter().zip(&self.parts).enumerate()
+        {
             let Some(device) = part.filter(|_| self.kernel_on[i + 1]) else {
                 continue;
             };
@@ -1108,11 +1312,11 @@ impl MemoryAppsChart {
                 name: name_of(key, Some(device)),
                 kind: BandKind::Kernel(i as u8),
                 color: Hsla {
-                    a: theme.graph.mem_fill.a * alpha,
-                    ..theme.graph.mem_fill
+                    a: fill.a * alpha,
+                    ..fill
                 },
                 line: theme.graph.chart_bg,
-                series: smallvec![series_id(device)],
+                series: smallvec![metric.series(device)],
                 minus: Arc::from([]),
                 processes: None,
                 wine: None,
@@ -1127,7 +1331,7 @@ impl MemoryAppsChart {
 
     /// Each band's newest value and process count. Returns whether one changed.
     fn update_values(&mut self, snap: &Snapshot, newest: u64) -> bool {
-        let published = &snap.system.memory.groups;
+        let published = self.metric.published(snap);
         let count_of = |key: &str| {
             published
                 .iter()
@@ -1173,7 +1377,7 @@ impl MemoryAppsChart {
         if w <= 0. || h <= 0. || self.total == 0 {
             return None;
         }
-        let reference = self.shared.and_then(|d| self.view(d))?;
+        let reference = self.reference.and_then(|d| self.view(d))?;
         let newest = reference.samples.last()?.t_ns;
         let now = self.host_clock.now_ns();
         let right = match self.clock {
@@ -1195,7 +1399,7 @@ impl MemoryAppsChart {
     }
 
     /// The value of `band` at `t`: the sum of its series, or for [`BandKind::Shared`] the part
-    /// of `memgroup:shared` the six parts do not cover.
+    /// of the aggregate (`memgroup:shared`) the fixed bands do not cover.
     fn band_value(&self, band: &Band, t: u64) -> f64 {
         if band.kind == BandKind::Shared {
             return self.older.as_deref().map_or(0., |v| value_at(v, t));
@@ -1233,7 +1437,7 @@ impl MemoryAppsChart {
             return;
         }
         self.settings_versions = versions;
-        let new = AppsSettings::read(self.place, cx);
+        let new = AppsSettings::read(self.metric, self.place, cx);
         if new == self.settings {
             return;
         }
@@ -1259,7 +1463,7 @@ impl MemoryAppsChart {
 
     fn sync_words(&mut self, cx: &mut Context<Self>) {
         let mut version = self.strings_version;
-        if !self.words.refresh(&mut version, cx) {
+        if !self.words.refresh(&mut version, self.metric, cx) {
             return;
         }
         self.strings_version = version;
@@ -1267,14 +1471,15 @@ impl MemoryAppsChart {
         for band in self.bands.iter_mut().filter(|b| b.kind == BandKind::Shared) {
             band.name = shared.clone();
         }
-        let labels = Self::labels_of(self.place, &self.words);
+        let labels = Self::labels_of(self.metric, self.place, &self.words);
         self.chart.update(cx, |v, cx| v.set_labels(labels, cx));
         cx.notify();
     }
 
     /// The tooltip lines of band `i` at time `t` (`None`: the newest sample): name, value,
-    /// share of In use and the process count, for a Wine group its Windows image names and
-    /// prefix, and for a worked-out kernel part that it is an estimate.
+    /// share of the top of the stack (In use for Memory) and the process count, for a Wine group
+    /// its Windows image names and prefix, and for a worked-out fixed band that it is an
+    /// estimate.
     pub fn tooltip_lines(&self, i: usize, t: Option<u64>, _: &App) -> SmallVec<[String; 4]> {
         let Some(band) = self.bands.get(i) else {
             return SmallVec::new();
@@ -1291,7 +1496,7 @@ impl MemoryAppsChart {
         };
         let mut lines: SmallVec<[String; 4]> = smallvec![band.name.to_string()];
         let mut text = String::new();
-        units::bytes(&mut text, value.max(0.) as u64);
+        self.metric.write_value(&mut text, value);
         lines.push(text);
         if in_use > 0.
             && let Some(share) = &self.words.share
@@ -1323,7 +1528,11 @@ impl MemoryAppsChart {
             }
         }
         if let BandKind::Kernel(k) = band.kind
-            && KERNEL_PARTS[usize::from(k)].2
+            && self
+                .metric
+                .fixed_bands()
+                .get(usize::from(k))
+                .is_some_and(|p| p.2)
         {
             lines.push(self.words.estimate.to_string());
         }
@@ -1425,7 +1634,7 @@ impl MemoryAppsChart {
             },
         };
         let mut value = String::new();
-        units::bytes(&mut value, band.value.max(0.) as u64);
+        self.metric.write_value(&mut value, band.value);
         let count = band
             .processes
             .filter(|n| *n > 1)
@@ -1509,7 +1718,7 @@ pub fn overview_legend(size: Size<Pixels>, rows: usize, m: &UiMetrics) -> (bool,
     (below, shown, more)
 }
 
-impl Render for MemoryAppsChart {
+impl Render for AppsChart {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *metrics(cx);
         let theme = current(cx).clone();
@@ -1704,7 +1913,7 @@ mod tests {
 
     fn view_of(samples: Vec<Sample>) -> SeriesView {
         SeriesView {
-            id: series_id(DeviceIdx(0)),
+            id: AppsMetric::Memory.series(DeviceIdx(0)),
             version: 0,
             period_ns: 1_000_000_000,
             samples: samples.into(),

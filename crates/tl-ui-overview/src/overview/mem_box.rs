@@ -7,7 +7,8 @@
 //! the rows, with a horizontal splitter. `chart` is the composition chart alone. `charts` (D-029)
 //! is one filled chart per row, each under a header with its name, value and percent, placed by
 //! the Arrange choice. `apps` (D-036, UI-PRF-060) is the memory-by-app stacked chart with its
-//! legend ([`MemoryAppsChart`] in its Overview place), made the first time the box shows it.
+//! legend ([`AppsChart`] of [`AppsMetric::Memory`] in its Overview place), made the first time
+//! the box shows it.
 //!
 //! The box is its own view and reads `SYSTEM` only, so a tick with only series changes does not
 //! touch it. It formats its text only when the memory totals' hash changes. Each sparkline is a
@@ -53,7 +54,7 @@ use super::fit::{fit_text, whole_rows};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::mem_flow::{self, MemFlowKeys, MemLook, MemPlan, PlanCell};
-use super::memory_apps::{AppsPlace, MemoryAppsChart};
+use super::memory_apps::{AppsChart, AppsMetric, AppsPlace};
 use super::parts::{
     ChartSettings, GridFit, Meter, SPARK_GRID, SPARK_W, arrange_grid, box_chart, box_frame,
     chart_section_versions, class_probe, edit_chrome, grid_cells, spark_chart,
@@ -561,7 +562,7 @@ pub struct MemBox {
     /// One chart per row for `charts`.
     cell_charts: [Entity<ChartView>; ROWS],
     /// The memory-by-app chart, made the first time the box or one of its widgets shows it.
-    apps: Rc<OnceCell<Entity<MemoryAppsChart>>>,
+    apps: Rc<OnceCell<Entity<AppsChart>>>,
     /// Whether the box shows Memory by app now ([`MemAppsPlaced`]).
     apps_placed: bool,
     mode: MemMode,
@@ -618,23 +619,20 @@ fn saved_grid(cx: &App) -> Option<ContainerLayout> {
 
 /// The memory-by-app chart in `cell`, made in its Overview place the first time it is asked for.
 fn apps_chart(
-    cell: &OnceCell<Entity<MemoryAppsChart>>,
+    cell: &OnceCell<Entity<AppsChart>>,
     hub: &Entity<SnapshotHub>,
     cx: &mut App,
-) -> Entity<MemoryAppsChart> {
+) -> Entity<AppsChart> {
     if let Some(chart) = cell.get() {
         return chart.clone();
     }
     let hub = hub.clone();
-    let chart = cx.new(|cx| MemoryAppsChart::new_in(hub, AppsPlace::Overview, cx));
+    let chart = cx.new(|cx| AppsChart::new_in(hub, AppsMetric::Memory, AppsPlace::Overview, cx));
     cell.get_or_init(|| chart).clone()
 }
 
 /// The content of the box's fixed widgets: Memory by app draws the box's memory-by-app chart.
-fn fixed_content(
-    cell: Rc<OnceCell<Entity<MemoryAppsChart>>>,
-    hub: Entity<SnapshotHub>,
-) -> FixedContent {
+fn fixed_content(cell: Rc<OnceCell<Entity<AppsChart>>>, hub: Entity<SnapshotHub>) -> FixedContent {
     Rc::new(move |kind: &FixedWidget, cx: &mut App| match kind {
         FixedWidget::MemoryByApp => Some(apps_chart(&cell, &hub, cx).into()),
         _ => None,
@@ -688,7 +686,7 @@ impl MemBox {
         let flow = mem_flow::flow_layout(default_keys());
         let saved = saved_grid(cx);
         let plan = PlanCell::default();
-        let apps: Rc<OnceCell<Entity<MemoryAppsChart>>> = Rc::default();
+        let apps: Rc<OnceCell<Entity<AppsChart>>> = Rc::default();
         let container = {
             let store = Rc::new(RefCell::new(SourceStore::new(hub)));
             let shown = saved.clone().unwrap_or_else(|| flow.clone());
@@ -971,7 +969,7 @@ impl MemBox {
     }
 
     /// The memory-by-app chart, once the box or one of its widgets has shown it.
-    pub fn apps(&self) -> Option<&Entity<MemoryAppsChart>> {
+    pub fn apps(&self) -> Option<&Entity<AppsChart>> {
         self.apps.get()
     }
 

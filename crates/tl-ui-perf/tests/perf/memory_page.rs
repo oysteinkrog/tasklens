@@ -934,8 +934,8 @@ mod by_app {
     use tl_ui_base::settings_global::{SettingKey, SettingValue};
     use tl_ui_perf::performance::memory::VIEW_SWITCH_ID;
     use tl_ui_perf::performance::memory_apps::{
-        APPS_ID, BandKind, KERNEL_PARTS, LEGEND_ID, MemoryAppsChart, Ranker, TOOLTIP_ID,
-        legend_fit, legend_order, pick_colors, split_top,
+        APPS_ID, AppsChart, BandKind, KERNEL_PARTS, LEGEND_ID, Ranker, TOOLTIP_ID, legend_fit,
+        legend_order, pick_colors, split_top,
     };
     use tl_ui_settings::settings::{GroupColor, MemoryView, OverviewRange};
 
@@ -1521,7 +1521,7 @@ mod by_app {
     }
 
     /// The By app charts of the rig: the page's, then the Overview box's when it has one.
-    fn charts(r: &mut Rig<'_>) -> Vec<Entity<MemoryAppsChart>> {
+    fn charts(r: &mut Rig<'_>) -> Vec<Entity<AppsChart>> {
         let (page, mem_box) = (r.page.clone(), r.mem_box.clone());
         r.vcx.update(|_, cx| {
             let mut out: Vec<_> = page.read(cx).apps().into_iter().collect();

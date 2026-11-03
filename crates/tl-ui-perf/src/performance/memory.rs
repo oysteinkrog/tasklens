@@ -70,7 +70,7 @@ use super::memory_views::{
     MemoryPartView, PART_BAR, PART_COMPRESSED, PART_MODULES, PART_SWAP_DEVICES, PART_SWITCH,
     PartDraw, PartShown,
 };
-use super::overview::memory_apps::{GROUPS_SHOWN, MemoryAppsChart};
+use super::overview::memory_apps::{AppsChart, AppsMetric, GROUPS_SHOWN};
 use super::page::{
     DevicePage, DevicePageFrame, details_draw, page_history_request, page_range_ns, page_words,
 };
@@ -1633,15 +1633,15 @@ fn is_details(w: &WidgetSetting) -> bool {
 }
 
 /// The memory-by-app chart, made the first time a layout places it.
-type AppsSlot = Rc<RefCell<Option<Entity<MemoryAppsChart>>>>;
+type AppsSlot = Rc<RefCell<Option<Entity<AppsChart>>>>;
 
 /// The chart of `slot`, made now when it has none.
-fn apps_of(slot: &AppsSlot, hub: &Entity<SnapshotHub>, cx: &mut App) -> Entity<MemoryAppsChart> {
+fn apps_of(slot: &AppsSlot, hub: &Entity<SnapshotHub>, cx: &mut App) -> Entity<AppsChart> {
     if let Some(apps) = &*slot.borrow() {
         return apps.clone();
     }
     let hub = hub.clone();
-    let apps = cx.new(|cx| MemoryAppsChart::new(hub, cx));
+    let apps = cx.new(|cx| AppsChart::new(hub, AppsMetric::Memory, cx));
     *slot.borrow_mut() = Some(apps.clone());
     apps
 }
@@ -1921,7 +1921,7 @@ impl MemoryPage {
     }
 
     /// The memory-by-app chart, once a layout has placed it.
-    pub fn apps(&self) -> Option<Entity<MemoryAppsChart>> {
+    pub fn apps(&self) -> Option<Entity<AppsChart>> {
         self.apps.borrow().clone()
     }
 

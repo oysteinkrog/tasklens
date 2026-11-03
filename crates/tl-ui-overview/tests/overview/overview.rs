@@ -4534,7 +4534,7 @@ mod mem_by_app_box {
     use tl_ui_base::theme::metrics;
     use tl_ui_overview::overview::mem_box::{MEM_APPS_ID, MemBox};
     use tl_ui_overview::overview::memory_apps::{
-        APPS_ID, BandKind, LEGEND_ID, MemoryAppsChart, overview_legend,
+        APPS_ID, AppsChart, BandKind, LEGEND_ID, overview_legend,
     };
     use tl_ui_settings::settings::{
         AppearanceSettings, OverviewRange, Settings, ThemeSettings, UiState,
@@ -4629,7 +4629,7 @@ mod mem_by_app_box {
     struct Rig<'a> {
         engine: Arc<FakeEngine>,
         host: Entity<Host>,
-        apps: Entity<MemoryAppsChart>,
+        apps: Entity<AppsChart>,
         vcx: &'a mut VisualTestContext,
     }
 

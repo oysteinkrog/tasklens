@@ -2,11 +2,11 @@
 //! widgets", UI-PRF-061 phase 2).
 //!
 //! A [`FixedWidgetView`] is a GPUI entity keyed by its widget id. It hosts the content view that
-//! its box draws today, out of the box frame: Memory by app (`MemoryAppsChart` in its Overview
-//! place) in the Memory box. The box keeps the content view and hands it over through the
-//! container's [`FixedContent`], so the flow look and a grid layout draw the same view, with its
-//! own clicks, tooltips, legend and demand. The view has no forms and no compositions: it draws
-//! its content at its rectangle.
+//! its box draws today, out of the box frame: Memory by app (`AppsChart` of `AppsMetric::Memory`
+//! in its Overview place) in the Memory box. The box keeps the content view and hands it over
+//! through the container's [`FixedContent`], so the flow look and a grid layout draw the same
+//! view, with its own clicks, tooltips, legend and demand. The view has no forms and no
+//! compositions: it draws its content at its rectangle.
 //!
 //! Render contract: the widget renders again only when its content view, its setting or its
 //! edit mode changes. The content is a cached child view that renders for its own changes; a
