@@ -894,6 +894,28 @@ fn stacked_entry_half_period_off_leaves_no_hole() {
     }
 }
 
+/// The sweep period drops from 10 s to 1 s with no gap flag, as for the By app groups when the
+/// view starts asking for per-second sweeps. No dotted gap is drawn and the bands meet at every
+/// x across the join (tasklens-r9b7g).
+#[test]
+fn stacked_period_change_leaves_no_hole() {
+    let data: Vec<Vec<Sample>> = [10.0f32, 20.0, 30.0]
+        .into_iter()
+        .map(|v| {
+            let mut s = series(6, 10 * SEC, 0, |_| v);
+            s.extend(series(10, SEC, 51 * SEC, |_| v));
+            s
+        })
+        .collect();
+    let map = exact_map(&data[2]);
+    let cache = stack_three(&data);
+    assert!(cache.gaps.is_empty());
+    for q in 0..60 * 8 {
+        let at = map.x_local(data[2][0].t_ns + q as u64 * SEC / 8);
+        assert_bands_meet(&cache.fills, at);
+    }
+}
+
 /// One fill segment of a stacked band: x, top y and floor y at its left and right ends.
 struct Seg {
     x: (f32, f32),
