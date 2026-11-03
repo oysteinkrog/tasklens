@@ -209,16 +209,20 @@ pub struct CpuWindow {
 }
 
 impl CpuWindow {
-    /// The window from `old` to `new`, or `None` when Δtotal is 0 or a counter went down.
-    /// iowait is left out of the check: Linux can move it backwards (as in the CPU sampler).
+    /// The window from `old` to `new`, or `None` when Δtotal is 0 or any counter of the `cpu`
+    /// line went down. iowait is checked too: Linux can move it backwards, and a falling iowait
+    /// makes Δbusy larger than Δtotal, so the shares could pass 100%.
     pub fn between(old: &CpuTimes, new: &CpuTimes) -> Option<Self> {
         let down = new.user < old.user
             || new.nice < old.nice
             || new.system < old.system
             || new.idle < old.idle
+            || new.iowait < old.iowait
             || new.irq < old.irq
             || new.softirq < old.softirq
             || new.steal < old.steal
+            || new.guest < old.guest
+            || new.guest_nice < old.guest_nice
             || new.total() < old.total();
         if down {
             return None;

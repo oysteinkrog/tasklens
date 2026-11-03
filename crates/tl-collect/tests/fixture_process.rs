@@ -1592,6 +1592,21 @@ fn cpu_window_from_stat() {
     );
     fs::write(&stat, stat_text(600, 300)).expect("write stat");
     assert!(window_at(&mut core, 21 * SEC, 16 * SEC).is_some());
+
+    // A falling iowait (500 to 450) while user grows by 100: Δtotal is 50 and Δbusy 100, which
+    // would be a 200% busy share. No window, then the next read has one again.
+    fs::write(&stat, "cpu  1000 0 0 1000 500 0 0 0 0 0\n").expect("write stat");
+    window_at(&mut core, 22 * SEC, 17 * SEC);
+    fs::write(&stat, "cpu  1100 0 0 1000 450 0 0 0 0 0\n").expect("write stat");
+    assert_eq!(
+        window_at(&mut core, 23 * SEC, 18 * SEC),
+        None,
+        "iowait went down"
+    );
+    fs::write(&stat, "cpu  1150 0 0 1050 450 0 0 0 0 0\n").expect("write stat");
+    let w = window_at(&mut core, 24 * SEC, 19 * SEC).expect("a window after the iowait drop");
+    assert_eq!(w.total_ticks, 100);
+    assert!(close(w.busy_pct, 50.0), "{w:?}");
 }
 
 use tl_collect::proc::detail::{DetailRead, ThreadInfo, ThreadReader, WchanValue, thread_exists};
