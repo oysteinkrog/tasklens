@@ -681,6 +681,7 @@ impl Source for FakeSweep {
             file_nr: None,
             online_cpus: 1,
             low_memory: None,
+            cpu: None,
         };
         (self, SourceUpdate::Processes(sweep))
     }

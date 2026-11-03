@@ -852,6 +852,7 @@ mod tests {
             file_nr: None,
             online_cpus: 1,
             low_memory: None,
+            cpu: None,
         }
     }
 

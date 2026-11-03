@@ -61,7 +61,7 @@ use crate::desktop::DesktopSource;
 use crate::helper::{HelperCallError, HelperHandle, HelperReadError};
 use crate::source::{self, Source, WorkerIo};
 use crate::supervise::WorkerFactory;
-use crate::update::{ProcessSweep, SourceUpdate, WorkerError};
+use crate::update::{ProcessSweep, SourceUpdate, SweepCpu, WorkerError};
 use crate::workers::WorkerSpec;
 
 /// `processes.interval_ms` is clamped to this range (ADR-008).
@@ -382,6 +382,12 @@ impl Source for ProcessesSource {
             file_nr,
             online_cpus: u16::try_from(self.ctx.online_cpus).unwrap_or(u16::MAX),
             low_memory: None,
+            cpu: out.cpu_window.map(|window| {
+                Box::new(SweepCpu {
+                    window,
+                    cgroups: std::mem::take(&mut out.cgroup_cpu),
+                })
+            }),
         };
         (self, SourceUpdate::Processes(sweep))
     }

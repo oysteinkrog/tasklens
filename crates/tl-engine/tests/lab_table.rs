@@ -1943,6 +1943,7 @@ fn sweep_named(records: Vec<ProcessRecord>, app_names: Vec<(GroupKey, Arc<str>)>
         file_nr: None,
         online_cpus: 1,
         low_memory: None,
+        cpu: None,
     }))
 }
 

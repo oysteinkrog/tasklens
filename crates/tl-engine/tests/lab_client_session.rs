@@ -305,6 +305,7 @@ fn sweep(t_ns: u64, pids: &[u32]) -> EngineMsg {
         file_nr: None,
         online_cpus: 1,
         low_memory: None,
+        cpu: None,
     }))
 }
 

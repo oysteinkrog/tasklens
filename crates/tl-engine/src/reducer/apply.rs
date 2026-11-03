@@ -27,13 +27,13 @@ use tl_model::snapshot::{
     ServicesSnapshot, Snapshot, StartupSnapshot, SystemSnapshot, UnitRecord, WindowsSnapshot,
 };
 use tl_model::system::{
-    GpuEngine, GpuTotals, MemGroupBand, MemoryTotals, Metric, NetTotals, SensorKind,
+    CpuTotals, GpuEngine, GpuTotals, MemGroupBand, MemoryTotals, Metric, NetTotals, SensorKind,
 };
 use tl_model::table::{Manager, SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
-use super::mem_groups::{DEVICE_KEY_PREFIX, MemGroups, kernel_parts};
+use super::mem_groups::{CpuBands, DEVICE_KEY_PREFIX, KTHREADS, MemGroups, kernel_parts};
 use super::power::{GpuShare, PowerEstimator};
 use super::process_series::ProcessSeries;
 use super::suspend::Transition;
@@ -50,7 +50,8 @@ use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
     ConnectionsUpdate, CpuCoreSample, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate,
     DeviceKinds, DeviceList, DiskSample, EngineMsg, GpuSample, HelperUpdate, HistoryUpdate,
-    MemorySample, NetSample, SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, source_of,
+    MemorySample, NetSample, SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, SweepCpu,
+    source_of,
 };
 use crate::workers::history::{HistoryMsg, SessionList};
 use crate::workers::process_detail::pss_keys;
@@ -164,6 +165,11 @@ impl ApplyState {
                 self.gpu_power.remove(&idx);
             }
         }
+    }
+
+    /// The memory group state: group keys, band devices and the shown lists (D-036, D-042).
+    pub fn mem_groups(&self) -> &MemGroups {
+        &self.mem_groups
     }
 
     /// The measured power of GPU `device` from its last sample, if valid.
@@ -320,7 +326,7 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
         DeviceKind::Fan => &[MetricId::FAN_RPM, MetricId::FAN_PWM],
         DeviceKind::Battery => &[MetricId::BATTERY_PCT, MetricId::BATTERY_POWER],
         DeviceKind::Aggregate => &[],
-        DeviceKind::MemGroup => &[MetricId::MEM_GROUP],
+        DeviceKind::MemGroup => &[MetricId::MEM_GROUP, MetricId::CPU_GROUP],
     }
 }
 
@@ -597,8 +603,10 @@ impl Reducer {
                     self.mark(ComponentMask::INVENTORY);
                 }
             }
-            SourceUpdate::Processes(sweep) => {
+            SourceUpdate::Processes(mut sweep) => {
                 let observed = (sweep.observed_start, sweep.observed_end);
+                // The sweep's CPU window, for the CPU group series (D-042).
+                let cpu = sweep.cpu.take();
                 let sink = self.record_sink.as_deref_mut();
                 self.processes
                     .apply_sweep(sweep, now_boot_ns(), settings.interval_ms, sink);
@@ -619,8 +627,9 @@ impl Reducer {
                 }
                 self.publish_processes(observed, Some(observed.1));
                 // Before the table, so its memory group filter uses this sweep's keys.
-                let mem_groups =
-                    self.record_system(observed.1, |r| r.apply_mem_groups(observed.1, period));
+                let mem_groups = self.record_system(observed.1, |r| {
+                    r.apply_mem_groups(observed.1, period, cpu.as_deref())
+                });
                 if history_only {
                     return mem_groups;
                 }
@@ -1505,7 +1514,10 @@ impl Reducer {
             st.pseudo.irq_pct =
                 (st.irq_seen || st.irq_zero_samples < IRQ_ZERO_SAMPLES).then_some(s.irq_pct);
         }
-        self.system_mut(t).cpu = totals;
+        let system = self.system_mut(t);
+        // The CPU-by-app bands come from the process sweep, not from this sample (D-042).
+        let groups = std::mem::take(&mut system.cpu.groups);
+        system.cpu = CpuTotals { groups, ..totals };
         self.sample_ok(SourceId::Cpu, t, period);
         self.mark(ComponentMask::SERIES);
         Ok(())
@@ -1620,14 +1632,26 @@ impl Reducer {
     /// groups, "Other apps" and "Shared and kernel" as `MEM_GROUP` series (D-036, UI-PRF-060).
     /// A group that leaves the top 20 gets one gap sample. A sweep without records still
     /// publishes the two fixed bands, with all of In use in "Shared and kernel".
-    fn apply_mem_groups(&mut self, t: TimeNs, period: u64) -> Result<(), InvariantViolation> {
+    ///
+    /// The same pass gives the CPU group series (`apply_cpu_groups`, D-042). Afterwards
+    /// `MemGroups.devices` keeps only the keys this sweep published, at most 53.
+    fn apply_mem_groups(
+        &mut self,
+        t: TimeNs,
+        period: u64,
+        cpu: Option<&SweepCpu>,
+    ) -> Result<(), InvariantViolation> {
         let processes = Arc::clone(&self.components.processes);
         let mem = &self.components.system.memory;
         let in_use = readable(mem.validity).then_some(mem.used);
-        let bands =
-            self.apply_state
-                .mem_groups
-                .bands(&processes.records, &processes.extras, in_use);
+        let bands = self.apply_state.mem_groups.bands_with_cpu(
+            &processes.records,
+            &processes.extras,
+            in_use,
+            cpu,
+        );
+        // The keys published in this sweep, memory and CPU together.
+        let mut keep: FxHashSet<Arc<str>> = FxHashSet::default();
 
         let parts = bands
             .shared_bytes
@@ -1638,6 +1662,7 @@ impl Reducer {
         for g in &bands.top {
             let idx = self.mem_group_device(&g.group.key, &g.group.name)?;
             self.push(idx, MetricId::MEM_GROUP, t, g.bytes as f32, true, period);
+            keep.insert(Arc::clone(&g.group.key));
             shown.push(idx);
             published.push(MemGroupBand {
                 key: Arc::clone(&g.group.key),
@@ -1664,6 +1689,7 @@ impl Reducer {
         ];
         for (key, name, bytes, process_count) in fixed {
             let idx = self.mem_group_device(&key, &name)?;
+            keep.insert(Arc::clone(&key));
             let value = bytes.unwrap_or(0) as f32;
             self.push(idx, MetricId::MEM_GROUP, t, value, bytes.is_some(), period);
             published.push(MemGroupBand {
@@ -1679,6 +1705,7 @@ impl Reducer {
         let kernel_keys = self.apply_state.mem_groups.kernel_keys.clone();
         for (i, (key, name)) in kernel_keys.iter().enumerate() {
             let idx = self.mem_group_device(key, name)?;
+            keep.insert(Arc::clone(key));
             let bytes = parts.map_or(0, |p| p[i]);
             self.push(
                 idx,
@@ -1701,7 +1728,98 @@ impl Reducer {
             Arc::make_mut(&mut self.components.system).memory.groups = published.into();
             self.mark(ComponentMask::SYSTEM);
         }
+        self.apply_cpu_groups(t, period, bands.cpu.as_ref(), &mut keep)?;
+        let devices = &mut self.apply_state.mem_groups.devices;
+        if devices.len() > keep.len() {
+            devices.retain(|key, _| keep.contains(key));
+        }
         self.mark(ComponentMask::SERIES);
+        Ok(())
+    }
+
+    /// Pushes the CPU top 20, "Other apps" and the five system bands as `CPU_GROUP` series and
+    /// fills `Snapshot.system.cpu.groups` (D-042, UI-PRF-062 "Data binding"). A group that leaves
+    /// the CPU top 20 gets one gap sample. Without a window (`cpu` is `None`) every CPU band with
+    /// a device gets a gap, no device is added and the band list stays as it was. Adds the keys
+    /// it publishes to `keep`.
+    fn apply_cpu_groups(
+        &mut self,
+        t: TimeNs,
+        period: u64,
+        cpu: Option<&CpuBands>,
+        keep: &mut FxHashSet<Arc<str>>,
+    ) -> Result<(), InvariantViolation> {
+        let groups = &self.apply_state.mem_groups;
+        let other = (
+            Arc::clone(&groups.other_key),
+            Arc::clone(&groups.other_name),
+        );
+        let cpu_keys = groups.cpu_keys.clone();
+        let Some(cpu) = cpu else {
+            for idx in std::mem::take(&mut self.apply_state.mem_groups.cpu_shown) {
+                self.gaps(idx, &[MetricId::CPU_GROUP], t);
+            }
+            // Only bands that have a device: a band that never had a value has no series.
+            for (key, _) in std::iter::once(other).chain(cpu_keys) {
+                let Some(&(idx, _)) = self.apply_state.mem_groups.devices.get(&key) else {
+                    continue;
+                };
+                self.gaps(idx, &[MetricId::CPU_GROUP], t);
+                keep.insert(key);
+            }
+            return Ok(());
+        };
+
+        let mut published = Vec::with_capacity(cpu.top.len() + 6);
+        let mut shown = Vec::with_capacity(cpu.top.len());
+        for g in &cpu.top {
+            let idx = self.mem_group_device(&g.group.key, &g.group.name)?;
+            self.push(idx, MetricId::CPU_GROUP, t, g.pct as f32, true, period);
+            keep.insert(Arc::clone(&g.group.key));
+            shown.push(idx);
+            published.push(MemGroupBand {
+                key: Arc::clone(&g.group.key),
+                name: Arc::clone(&g.group.name),
+                process_count: g.processes,
+                device: idx,
+                wine: g.wine.clone(),
+            });
+        }
+        let system =
+            cpu_keys
+                .into_iter()
+                .zip(cpu.system)
+                .enumerate()
+                .map(|(i, ((key, name), pct))| {
+                    let count = if i == KTHREADS { cpu.kernel_threads } else { 0 };
+                    (key, name, pct, count)
+                });
+        let fixed = std::iter::once((other.0, other.1, cpu.other_pct, cpu.other_processes));
+        for (key, name, pct, process_count) in fixed.chain(system) {
+            let idx = self.mem_group_device(&key, &name)?;
+            self.push(idx, MetricId::CPU_GROUP, t, pct as f32, true, period);
+            keep.insert(Arc::clone(&key));
+            published.push(MemGroupBand {
+                key,
+                name,
+                process_count,
+                device: idx,
+                wine: None,
+            });
+        }
+
+        let groups = &mut self.apply_state.mem_groups;
+        let left: Vec<DeviceIdx> = std::mem::replace(&mut groups.cpu_shown, shown)
+            .into_iter()
+            .filter(|idx| !groups.cpu_shown.contains(idx))
+            .collect();
+        for idx in left {
+            self.gaps(idx, &[MetricId::CPU_GROUP], t);
+        }
+        if *self.components.system.cpu.groups != *published {
+            Arc::make_mut(&mut self.components.system).cpu.groups = published.into();
+            self.mark(ComponentMask::SYSTEM);
+        }
         Ok(())
     }
 

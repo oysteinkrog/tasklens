@@ -13,6 +13,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustc_hash::FxHashMap;
+use tl_collect::proc::sweep::CpuWindow;
 use tl_model::actions::{ActionId, CgroupRef};
 use tl_model::command::{Command, SetupState};
 use tl_model::demand::DeviceHistoryRequest;
@@ -355,6 +357,19 @@ pub struct ProcessSweep {
     pub online_cpus: u16,
     /// `Some` only from the E32 stripped sweep (R-150 item 2).
     pub low_memory: Option<Arc<LowMemoryInfo>>,
+    /// The sweep's own `/proc/stat` window and cgroup CPU deltas (D-042, UI-PRF-062 "Sweep
+    /// window"). `None` when the sweep has no window. Boxed so `EngineMsg` stays within 256
+    /// bytes.
+    pub cpu: Option<Box<SweepCpu>>,
+}
+
+/// The CPU window of one process sweep (D-042, UI-PRF-062).
+#[derive(Debug, Clone, Default)]
+pub struct SweepCpu {
+    pub window: CpuWindow,
+    /// `SweepOutput.cgroup_cpu`: per cgroup path, its `cpu.stat` delta in percent of all CPUs
+    /// over `window`.
+    pub cgroups: FxHashMap<Arc<str>, f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -578,6 +593,7 @@ mod tests {
             file_nr: None,
             online_cpus: 1,
             low_memory,
+            cpu: None,
         })
     }
 

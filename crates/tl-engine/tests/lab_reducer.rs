@@ -16,6 +16,8 @@ use asupersync::{Cx, LabConfig, LabRuntime};
 use smallvec::SmallVec;
 use tl_collect::SysRoot;
 use tl_collect::counters::Clock;
+use tl_collect::parse::stat::CpuTimes;
+use tl_collect::proc::sweep::CpuWindow;
 use tl_engine::client_session::ClientSessionId;
 use tl_engine::reducer::{DRAIN_MAX, InvariantViolation, Publisher, Reducer};
 use tl_engine::source::{Source, WorkerCommand, WorkerControl};
@@ -23,7 +25,7 @@ use tl_engine::update::{
     ConnectionsUpdate, CpuCoreSample, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate,
     DeviceKinds, DeviceList, DiskSample, DrmProcessVram, EngineMsg, GpuInfoUpdate, GpuSample,
     GpuStaticInfo, HelperUpdate, HistoryUpdate, MemorySample, NetSample, ProcessSweep, PssEntry,
-    SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate,
+    SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, SweepCpu,
 };
 use tl_engine::workers::cpu::CpuSource;
 use tl_engine::workers::history::{HistoryMsg, HistorySink, HistoryTx};
@@ -186,6 +188,7 @@ fn sweep_msg(t_ns: TimeNs) -> EngineMsg {
         file_nr: None,
         online_cpus: 1,
         low_memory: None,
+        cpu: None,
     }))
 }
 
@@ -1790,6 +1793,7 @@ fn every_source_update() -> Vec<SourceUpdate> {
             file_nr: None,
             online_cpus: 1,
             low_memory: None,
+            cpu: None,
         }),
         SourceUpdate::Details(tl_engine::update::DetailsUpdate::Pss {
             t_ns: 0,
@@ -4380,4 +4384,185 @@ fn memory_group_bands_published() {
     assert_eq!(value(&rig, shared).value, 200.0 * mib);
     assert_eq!(at(&rig, other), 3 * SEC);
     assert_eq!(value(&rig, other).value, 0.0);
+}
+
+/// A sweep of `rows` (pid, comm, RssAnon, cpu_pct) with a `/proc/stat` window of 1000 ticks:
+/// `user` ticks of user + nice + system, 20 irq, 10 softirq, the rest idle.
+fn cpu_sweep(t_ns: TimeNs, rows: &[(u32, &str, u64, f32)], user: u64) -> EngineMsg {
+    let mem: Vec<(u32, &str, u64)> = rows.iter().map(|&(p, c, r, _)| (p, c, r)).collect();
+    let mut sweep = mem_sweep(t_ns, &mem);
+    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut sweep {
+        for (r, &(_, _, _, pct)) in s.records.iter_mut().zip(rows) {
+            r.cpu_pct = pct;
+        }
+        let new = CpuTimes {
+            user,
+            irq: 20,
+            softirq: 10,
+            idle: 1000 - user - 30,
+            ..CpuTimes::default()
+        };
+        let window = CpuWindow::between(&CpuTimes::default(), &new).expect("a window");
+        s.cpu = Some(Box::new(SweepCpu {
+            window,
+            cgroups: Default::default(),
+        }));
+    }
+    sweep
+}
+
+fn cpu_group_sample(rig: &Rig, device: DeviceIdx) -> Sample {
+    rig.last_sample(SeriesId {
+        device,
+        metric: MetricId::CPU_GROUP,
+    })
+}
+
+#[test]
+fn cpu_group_top20_by_cpu() {
+    const MIB: u64 = 1 << 20;
+    // 25 programs. Memory ranks p24 first, CPU ranks p00 first.
+    fn rows(names: &[String], cpu_of: impl Fn(u32) -> f32) -> Vec<(u32, &str, u64, f32)> {
+        (0..25u32)
+            .map(|i| {
+                let name = names[i as usize].as_str();
+                (i + 1, name, u64::from(i + 1) * MIB, cpu_of(i))
+            })
+            .collect()
+    }
+    let names: Vec<String> = (0..25).map(|i| format!("p{i:02}")).collect();
+    let first = rows(&names, |i| (25 - i) as f32 * 0.1);
+    let mut rig = Rig::new();
+    rig.run(vec![cpu_sweep(SEC, &first, 500)])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    let cpu_keys: Vec<&str> = snap.system.cpu.groups.iter().map(|b| &*b.key).collect();
+    let mem_keys: Vec<&str> = snap.system.memory.groups.iter().map(|b| &*b.key).collect();
+    assert_eq!(cpu_keys.len(), 20 + 1 + 5);
+    assert_eq!(cpu_keys[0], "comm:p00");
+    assert_eq!(cpu_keys[19], "comm:p19");
+    assert_eq!(
+        cpu_keys[20..],
+        [
+            "other",
+            "cpu:kthreads",
+            "cpu:irq",
+            "cpu:softirq",
+            "cpu:steal",
+            "cpu:short"
+        ]
+    );
+    assert_eq!(mem_keys[0], "comm:p24");
+    assert_ne!(
+        cpu_keys[..20],
+        mem_keys[..20],
+        "the CPU top 20 is ranked apart"
+    );
+    let short = snap
+        .devices
+        .find(&DeviceIdentity::MemGroup {
+            key: "cpu:short".into(),
+        })
+        .expect("short-lived band in the catalog");
+    assert_eq!(&*short.persistent_key, "memgroup:cpu:short");
+    assert_eq!(&*short.display_name, "Short-lived processes");
+    // The bands sum to busy CPU: 50% + 2% + 1%.
+    let sum: f32 = snap
+        .system
+        .cpu
+        .groups
+        .iter()
+        .map(|b| cpu_group_sample(&rig, b.device).value)
+        .sum();
+    assert!((sum - 53.0).abs() < 1e-3, "{sum}");
+
+    // p00 drops to 0% and leaves the CPU top 20: its series gets one gap.
+    let p00 = snap.system.cpu.groups[0].device;
+    let second = rows(&names, |i| if i == 0 { 0.0 } else { (25 - i) as f32 * 0.1 });
+    rig.run(vec![cpu_sweep(2 * SEC, &second, 500)])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    assert!(!snap.system.cpu.groups.iter().any(|b| b.device == p00));
+    assert_eq!(&*snap.system.cpu.groups[19].key, "comm:p20");
+    let gap = cpu_group_sample(&rig, p00);
+    assert!(!gap.is_valid(), "a group outside the CPU top 20 is a gap");
+    assert_eq!(gap.t_ns, 2 * SEC);
+    rig.run(vec![cpu_sweep(3 * SEC, &second, 500)])
+        .expect("no invariant violation");
+    let series = rig
+        .latest()
+        .series
+        .get(SeriesId {
+            device: p00,
+            metric: MetricId::CPU_GROUP,
+        })
+        .map(|s| s.samples.len());
+    assert_eq!(series, Some(2), "one valid sample, then one gap");
+
+    // A sweep without a window gives every CPU band a gap and keeps the band list.
+    let list = Arc::clone(&rig.latest().system.cpu.groups);
+    let mut no_window = cpu_sweep(4 * SEC, &second, 500);
+    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut no_window {
+        s.cpu = None;
+    }
+    rig.run(vec![no_window]).expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.system.cpu.groups, list);
+    for band in snap.system.cpu.groups.iter() {
+        let s = cpu_group_sample(&rig, band.device);
+        assert!(!s.is_valid() && s.t_ns == 4 * SEC, "{} is a gap", band.key);
+    }
+
+    // A CPU worker sample keeps the reducer's list.
+    rig.run(vec![cpu_msg(5 * SEC, 50.0, true)])
+        .expect("no invariant violation");
+    assert_eq!(rig.latest().system.cpu.groups, list);
+}
+
+#[test]
+fn mem_group_devices_pruned() {
+    const MIB: u64 = 1 << 20;
+    // 19 groups high in memory with no CPU, 20 high in CPU with no memory, and one new group
+    // per sweep at the top of memory. So 20 + 20 groups, Other apps, Shared and kernel, the six
+    // kernel parts and the five CPU bands are published: 53 keys.
+    let names: Vec<String> = (0..1000).map(|n| format!("new{n}")).collect();
+    let mem: Vec<String> = (0..19).map(|i| format!("m{i:02}")).collect();
+    let cpu: Vec<String> = (0..20).map(|i| format!("c{i:02}")).collect();
+    let mut rig = Rig::new();
+    for batch in 0..20 {
+        let msgs: Vec<EngineMsg> = (0..50)
+            .map(|k| {
+                let n = batch * 50 + k;
+                let mut rows: Vec<(u32, &str, u64, f32)> = Vec::new();
+                rows.push((1, names[n].as_str(), 1000 * MIB, 0.0));
+                for (i, m) in mem.iter().enumerate() {
+                    rows.push((10 + i as u32, m.as_str(), 100 * MIB, 0.0));
+                }
+                for (i, c) in cpu.iter().enumerate() {
+                    rows.push((100 + i as u32, c.as_str(), 0, 1.0));
+                }
+                cpu_sweep((n as u64 + 1) * SEC, &rows, 500)
+            })
+            .collect();
+        rig.run(msgs).expect("no invariant violation");
+        let devices = rig.reducer().apply_state.mem_groups().devices.len();
+        assert_eq!(devices, 53, "batch {batch}");
+    }
+    // A group that comes back finds its catalog device again.
+    let snap = rig.latest();
+    let old = snap
+        .devices
+        .find(&DeviceIdentity::MemGroup {
+            key: "comm:new3".into(),
+        })
+        .expect("catalog keeps the device")
+        .idx;
+    let mut rows: Vec<(u32, &str, u64, f32)> = vec![(1, "new3", 1000 * MIB, 0.0)];
+    for (i, c) in cpu.iter().enumerate() {
+        rows.push((100 + i as u32, c.as_str(), 0, 1.0));
+    }
+    rig.run(vec![cpu_sweep(2000 * SEC, &rows, 500)])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.system.memory.groups[0].device, old);
 }

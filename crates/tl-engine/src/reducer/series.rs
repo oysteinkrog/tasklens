@@ -204,11 +204,11 @@ impl SeriesStore {
             // The stale run ends here; do not join the line across it.
             entry.stale = false;
             entry.stale_changes += 1;
-            // A late sweep of the memory group series is not a break. Every group is late at
-            // once, so a gap here would cut a column through all bands of the By app stack.
-            // The line joins across the late sweep; a suspend or restart still gaps through
-            // `mark_gap_all` and `mark_gap_source` (tasklens-36kya).
-            entry.gap_next |= id.metric != MetricId::MEM_GROUP;
+            // A late sweep of the memory or CPU group series is not a break. Every group is
+            // late at once, so a gap here would cut a column through all bands of the By app
+            // stack. The line joins across the late sweep; a suspend or restart still gaps
+            // through `mark_gap_all` and `mark_gap_source` (tasklens-36kya, D-042).
+            entry.gap_next |= id.metric != MetricId::MEM_GROUP && id.metric != MetricId::CPU_GROUP;
         }
         let mut s = Sample { t_ns, value, flags };
         if !s.is_valid() {

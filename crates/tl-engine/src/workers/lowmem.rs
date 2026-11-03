@@ -351,6 +351,7 @@ impl Source for LowMemSource {
                 psi_full_pct,
                 critical,
             })),
+            cpu: None,
         };
         (self, SourceUpdate::Processes(sweep))
     }
