@@ -731,6 +731,26 @@ impl SourceData {
         self.series_list().first().copied()
     }
 
+    /// A fan's Temperature while the fan has no paired sensor: its chart has no line but is
+    /// drawn, with "-" and "Choose a sensor" over the plot (UI-PRF-034).
+    pub fn awaits_sensor(&self) -> bool {
+        self.state.reading.availability == Availability::Available
+            && matches!(self.series_of, Some(MetricSeries::Paired(_)))
+            && self.state.series.is_empty()
+    }
+
+    /// The series a widget's chart is keyed on: the first series, or while [`Self::awaits_sensor`]
+    /// a stand-in on the fan's own device, so the empty chart is still drawn.
+    pub fn chart_series(&self) -> Option<SeriesId> {
+        self.series().or_else(|| {
+            let device = self.state.device.as_ref()?.idx;
+            self.awaits_sensor().then_some(SeriesId {
+                device,
+                metric: MetricId::SENSOR_TEMP,
+            })
+        })
+    }
+
     /// Every series a chart of the source draws, while the source is available: one for most
     /// metrics, two for a pair, three for `composition`, one per physical core for
     /// `core_clocks`. On the network aggregate it is the engine's total; the hidden kinds'
@@ -1138,6 +1158,11 @@ impl SourceData {
                     .series
                     .first()
                     .map_or(Metric::with(Validity::Missing), |&id| newest(snap, id));
+                // The sensor is paired but has no series yet: no sample so far, as 1.3.0 drew an
+                // empty chart then.
+                if value.validity == Validity::Unsupported {
+                    value = Metric::with(Validity::Missing);
+                }
             }
             _ => {}
         }

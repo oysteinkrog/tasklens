@@ -41,7 +41,7 @@ use tl_ui_settings::layout_boxes::{
 };
 use tl_ui_settings::layout_pages::{
     METRIC_CLOCK, METRIC_COMMIT_PCT, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED,
-    METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_PHYSICAL,
+    METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_PERCENT, METRIC_PHYSICAL, METRIC_SPEED,
 };
 
 use super::meta::Lines;
@@ -97,6 +97,17 @@ const KEY_MEM_SWAP_RANGE: &str = "perf-mem-range-swap";
 /// word are [`KEY_NET_RANGE`].
 const KEY_NET_DOWNLOAD: &str = "perf-net-legend-download";
 const KEY_NET_UPLOAD: &str = "perf-net-legend-upload";
+/// The Fan page charts' headings and legend (`sensors::speed_labels`,
+/// `sensors::temperature_labels` of 1.3.0).
+const KEY_FAN_SPEED: &str = "perf-fan-heading-speed";
+const KEY_FAN_TEMPERATURE: &str = "perf-fan-heading-temperature";
+const KEY_FAN_RPM: &str = "perf-fan-legend-rpm";
+const KEY_FAN_PWM: &str = "perf-fan-legend-pwm";
+/// The Battery page charts' headings and the Power chart's range word
+/// (`sensors::battery_labels` of 1.3.0).
+const KEY_BAT_POWER: &str = "perf-bat-heading-power";
+const KEY_BAT_PERCENTAGE: &str = "perf-bat-heading-percentage";
+const KEY_BAT_POWER_RANGE: &str = "perf-bat-range-power";
 
 /// What a page style Cell's chart shows besides the plot: the widget's name, which of the name
 /// and the value its forms keep, and whether the value is the sum of the chart's lines.
@@ -388,12 +399,13 @@ impl ChartLook {
                 (out, false)
             }
             Lines::RpmPwm => {
-                // RPM filled and PWM dashed (UI-PRF-034). The fan page bead gives PWM its own
-                // 0 to 100 axis.
+                // RPM filled and PWM dashed (UI-PRF-034). The PWM percent is drawn as that share
+                // of the RPM axis, so it has its own 0 to 100 axis.
                 let mut out: SmallVec<[ChartSeries; 4]> = smallvec![self.line(first, accent, true)];
                 if let Some(&pwm) = self.series.get(1) {
                     out.push(ChartSeries {
                         dashed: true,
+                        percent_of_axis: true,
                         ..self.line(pwm, accent, false)
                     });
                 }
@@ -444,6 +456,11 @@ impl ChartLook {
         let cpu = self.kind == DeviceKind::Cpu;
         let mem = self.kind == DeviceKind::Memory;
         let net = self.kind == DeviceKind::Net;
+        let fan = self.kind == DeviceKind::Fan;
+        let battery = self.kind == DeviceKind::Battery;
+        // A fan's Temperature chart with no paired sensor has no line: it writes no value and no
+        // axis text (the page shows "-" and "Choose a sensor" over the plot).
+        let no_sensor = fan && &*self.metric == METRIC_TEMP && self.series.is_empty();
         let heading = match &*self.metric {
             // The 1.3.0 CPU page's Overall chart: Utilization, Total and Kernel, no axis text.
             METRIC_CPU_TOTAL if cpu => {
@@ -550,6 +567,40 @@ impl ChartLook {
                 labels.show_axis_max = true;
                 word
             }
+            // The 1.3.0 Fan page charts (UI-PRF-034): Fan speed with its RPM and PWM legend, and
+            // Temperature.
+            METRIC_SPEED if fan => {
+                let word = tr(cx, KEY_FAN_SPEED);
+                labels.range_word = word.clone();
+                labels.legend = smallvec![
+                    (tr(cx, KEY_FAN_RPM), LegendStyle::Solid),
+                    (tr(cx, KEY_FAN_PWM), LegendStyle::Dashed),
+                ];
+                labels.show_axis_max = true;
+                word
+            }
+            METRIC_TEMP if fan => {
+                let word = tr(cx, KEY_FAN_TEMPERATURE);
+                labels.range_word = word.clone();
+                labels.legend = SmallVec::new();
+                labels.show_axis_max = !no_sensor;
+                word
+            }
+            // The 1.3.0 Battery page charts (UI-PRF-035): Power of a system battery with its
+            // "±N W" axis text, Percentage of any other device.
+            METRIC_POWER if battery => {
+                labels.range_word = tr(cx, KEY_BAT_POWER_RANGE);
+                labels.legend = SmallVec::new();
+                labels.show_axis_max = true;
+                tr(cx, KEY_BAT_POWER)
+            }
+            METRIC_PERCENT if battery => {
+                let word = tr(cx, KEY_BAT_PERCENTAGE);
+                labels.range_word = word.clone();
+                labels.legend = SmallVec::new();
+                labels.show_axis_max = false;
+                word
+            }
             _ => {
                 if labels.range_word.is_empty() {
                     labels.range_word = page.name.clone();
@@ -558,7 +609,7 @@ impl ChartLook {
             }
         };
         labels.heading = page.forms.contains(FormSet::LABEL).then_some(heading);
-        labels.value_align = if page.forms.contains(FormSet::VALUE) {
+        labels.value_align = if page.forms.contains(FormSet::VALUE) && !no_sensor {
             ValueAlign::Right
         } else {
             ValueAlign::Hidden

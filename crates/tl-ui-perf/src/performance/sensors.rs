@@ -11,14 +11,16 @@
 
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::component::v_flex;
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, FocusHandle,
-    Focusable, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     SharedString, StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
     relative,
 };
@@ -34,15 +36,25 @@ use tl_model::system::{FanControlMode, Metric, SensorKind, SensorReading};
 use tl_model::units;
 use tl_model::validity::Validity;
 
-use super::actions::{PerfRenameFan, PerfSetFanTempSensor};
+use super::actions::{
+    PerfRenameFan, PerfSetFanTempSensor, PerfWidgetEditStart, PerfWidgetResetPage,
+};
+use super::aggregate::{add_demand, page_layout, reset_page, start_page_edit, strings_version};
 #[cfg(test)]
 use super::core::sensors::fan_key_parts;
 pub use super::core::sensors::{SensorRef, default_sensor, sensor_device};
 use super::details::{Fallback, KeyValueModel};
+use super::page::details_draw;
 use super::page::{
     DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_history_request, page_range_ns,
     page_words,
 };
+use super::page_flow;
+use super::widget::container::WidgetContainer;
+use super::widget::details_widget::{DetailsResized, DetailsShown, DetailsView};
+use super::widget::edit::WidgetEditor;
+use super::widget::fixed_widget::FixedContent;
+use super::widget::source::SourceStore;
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
     visible_rows,
@@ -50,27 +62,24 @@ use super::{
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::host::HostContext;
 use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub, is_dead_reading};
+use tl_ui_base::i18n::Strings;
 use tl_ui_base::i18n::tr;
 use tl_ui_base::selector::TlSelector;
 use tl_ui_base::settings_global::{Section, TlSettings, set_fan_label, set_fan_temp};
-use tl_ui_base::text::style::{label_style, t_xs};
+use tl_ui_base::text::style::t_xs;
 use tl_ui_base::theme::palette::accent_color;
 use tl_ui_base::theme::{TlTheme, current, metrics};
-use tl_ui_chart::chart::view::{find_series, find_tiered};
+use tl_ui_chart::chart::view::find_series;
 use tl_ui_chart::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GapStyle, GridStyle, LegendStyle,
-    ValueAlign, ValueFormat, YScale,
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GapStyle, GridStyle, ValueAlign,
+    ValueFormat, YScale,
 };
 use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
 use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_settings::layout::FixedWidget;
+use tl_ui_settings::layout::METRIC_TEMP;
+use tl_ui_settings::layout_pages::{METRIC_SPEED, page_container};
 
-/// Debug selector of the Fan speed chart box.
-pub const SPEED_ID: &str = "perf-fan-speed";
-/// Debug selector of the Temperature chart box.
-pub const TEMPERATURE_ID: &str = "perf-fan-temperature";
-/// Debug selectors of the empty Temperature plot's two texts.
-pub const CHOOSE_SENSOR_ID: &str = "perf-fan-choose-sensor";
-pub const NO_VALUE_ID: &str = "perf-fan-no-value";
 /// Debug selector of the Battery chart box.
 pub const BATTERY_CHART_ID: &str = "perf-battery-chart";
 /// Debug selector of the Battery charge history chart box.
@@ -81,14 +90,6 @@ pub const BATTERY_DAY_LABEL_ID: &str = "perf-battery-day-label";
 const NS_PER_S: u64 = 1_000_000_000;
 /// Fill alpha of a type that has one colour (UI-PRF-005 table note).
 const FILL_ALPHA: f32 = 0.85;
-/// The fan colour name (UI-PRF-005: "Violet").
-const FAN_COLOR: &str = "violet";
-
-const KEY_SPEED: &str = "perf-fan-heading-speed";
-const KEY_TEMPERATURE: &str = "perf-fan-heading-temperature";
-const KEY_RPM: &str = "perf-fan-legend-rpm";
-const KEY_PWM: &str = "perf-fan-legend-pwm";
-const KEY_CHOOSE: &str = "perf-fan-choose-sensor";
 
 pub const ROW_SPEED: &str = "perf-fan-row-speed";
 pub const ROW_PWM: &str = "perf-fan-row-pwm";
@@ -212,60 +213,6 @@ fn choose_sensor(snap: &Snapshot, fan_key: &str, saved: Option<&str>) -> Option<
     }
 }
 
-/// `raw` (a PWM percent series) scaled into an axis of `axis_max`: every value becomes
-/// `pct / 100 × axis_max`. The version mixes in the axis, so a chart cache keyed on the version
-/// sees a new axis.
-pub fn pwm_scaled(raw: &SeriesView, axis_max: f32) -> SeriesView {
-    let samples: Vec<Sample> = raw
-        .samples
-        .iter()
-        .map(|s| Sample {
-            value: s.value / 100.0 * axis_max,
-            ..*s
-        })
-        .collect();
-    SeriesView {
-        id: raw.id,
-        version: raw
-            .version
-            .wrapping_mul(0x9E37_79B9)
-            .wrapping_add(u64::from(axis_max.to_bits())),
-        period_ns: raw.period_ns,
-        samples: samples.into(),
-    }
-}
-
-/// The page's words, translated once per strings version.
-#[derive(Clone, Debug, Default)]
-struct Words {
-    version: Option<Option<u64>>,
-    speed: SharedString,
-    temperature: SharedString,
-    rpm: SharedString,
-    pwm: SharedString,
-    choose: SharedString,
-}
-
-impl Words {
-    /// Translates every word when the strings changed since the last call. True when it did.
-    fn refresh(&mut self, cx: &App) -> bool {
-        let version = Some(
-            cx.try_global::<tl_ui_base::i18n::Strings>()
-                .map(|s| s.strings_version),
-        );
-        if self.version == version {
-            return false;
-        }
-        self.version = version;
-        self.speed = tr(cx, KEY_SPEED);
-        self.temperature = tr(cx, KEY_TEMPERATURE);
-        self.rpm = tr(cx, KEY_RPM);
-        self.pwm = tr(cx, KEY_PWM);
-        self.choose = tr(cx, KEY_CHOOSE);
-        true
-    }
-}
-
 /// The settings the page draws from.
 #[derive(Clone, Debug, PartialEq)]
 struct PageSettings {
@@ -319,47 +266,6 @@ fn series(device: DeviceIdx, metric: MetricId) -> SeriesId {
     SeriesId { device, metric }
 }
 
-fn fan_line(theme: &TlTheme) -> gpui_kit::Hsla {
-    accent_color(FAN_COLOR).unwrap_or(theme.graph.gpu_line)
-}
-
-/// The Fan speed chart: RPM filled, PWM dashed (UI-PRF-034). `fan_max` is the hardware maximum
-/// in RPM when the chip reports it.
-pub fn speed_spec(
-    device: DeviceIdx,
-    fan_max: Option<u32>,
-    s: &PageSettingsView,
-    theme: &TlTheme,
-) -> ChartSpec {
-    let line = fan_line(theme);
-    ChartSpec {
-        series: smallvec![
-            ChartSeries {
-                id: series(device, MetricId::FAN_RPM),
-                fill: Some(line.opacity(FILL_ALPHA)),
-                line,
-                ..ChartSeries::default()
-            },
-            ChartSeries {
-                id: series(device, MetricId::FAN_PWM),
-                fill: None,
-                line,
-                dashed: true,
-                ..ChartSeries::default()
-            },
-        ],
-        y: YScale::StickyUp {
-            hw_max: fan_max.filter(|&m| m > 0).map(|m| m as f32),
-        },
-        range_ns: s.range_ns,
-        smooth: s.smooth,
-        grid: s.grid.clone(),
-        background: ChartBg::Window,
-        hover: true,
-        ..ChartSpec::default()
-    }
-}
-
 /// The chart settings of one spec, copied out of [`PageSettings`].
 pub struct PageSettingsView {
     range_ns: u64,
@@ -374,59 +280,6 @@ impl PageSettingsView {
             smooth: s.smooth,
             grid: plot_grid(s),
         }
-    }
-}
-
-fn speed_labels(words: &Words) -> ChartLabels {
-    ChartLabels {
-        heading: Some(words.speed.clone()),
-        value_fmt: ValueFormat::Rpm,
-        value_align: ValueAlign::Right,
-        range_word: words.speed.clone(),
-        legend: smallvec![
-            (words.rpm.clone(), LegendStyle::Solid),
-            (words.pwm.clone(), LegendStyle::Dashed),
-        ],
-        show_axis_max: true,
-    }
-}
-
-/// The Temperature chart of `sensor`. Without a sensor the plot has no series.
-fn temperature_spec(sensor: Option<DeviceIdx>, s: &PageSettingsView, theme: &TlTheme) -> ChartSpec {
-    let line = fan_line(theme);
-    ChartSpec {
-        series: sensor
-            .map(|device| ChartSeries {
-                id: series(device, MetricId::SENSOR_TEMP),
-                fill: Some(line.opacity(FILL_ALPHA)),
-                line,
-                ..ChartSeries::default()
-            })
-            .into_iter()
-            .collect(),
-        y: YScale::StickyTemp,
-        range_ns: s.range_ns,
-        smooth: s.smooth,
-        grid: s.grid.clone(),
-        background: ChartBg::Window,
-        hover: true,
-        ..ChartSpec::default()
-    }
-}
-
-/// The Temperature labels. Without a sensor the chart's own value is hidden: the page draws `-`.
-fn temperature_labels(has_sensor: bool, words: &Words) -> ChartLabels {
-    ChartLabels {
-        heading: Some(words.temperature.clone()),
-        value_fmt: ValueFormat::Celsius,
-        value_align: if has_sensor {
-            ValueAlign::Right
-        } else {
-            ValueAlign::Hidden
-        },
-        range_word: words.temperature.clone(),
-        legend: SmallVec::new(),
-        show_axis_max: has_sensor,
     }
 }
 
@@ -476,14 +329,6 @@ fn reading(snap: &Snapshot, device: DeviceIdx) -> Option<&SensorReading> {
         .iter()
         .find(|(i, _)| *i == device)
         .map(|(_, r)| r)
-}
-
-/// The fan's maximum RPM in the snapshot.
-fn fan_max_of(snap: &Snapshot, device: DeviceIdx) -> Option<u32> {
-    reading(snap, device)
-        .filter(|r| r.kind == SensorKind::Fan)
-        .and_then(|r| r.fan_max_rpm)
-        .filter(|&m| m > 0)
 }
 
 /// What [`FanPage::update_details`] reads.
@@ -538,26 +383,26 @@ fn update_fan_details(model: &mut KeyValueModel, inp: &DetailInputs, cx: &App) -
     changed
 }
 
-/// The derived PWM series and what it was built from.
-#[derive(Default)]
-struct PwmDerived {
-    raw: Option<Arc<SeriesView>>,
-    axis_bits: u32,
-    view: Option<Arc<SeriesView>>,
-}
-
-/// The Fan device page.
+/// The Fan device page. Its body is one widget container (ADR-019 phase 3, `tasklens-hzire.9`):
+/// by default the Fan speed and Temperature charts and the Details widget, in the 1.3.0 places
+/// (`page_flow::sensors`). Edit Widgets changes them; the page keeps the header, the sensor
+/// choice for the Details rows, and the Details model, and hands the model's rows to its
+/// `DetailsView`.
+///
+/// Render contract: the page renders on a header change, a range change and a layout change,
+/// never because of a sample. A Details value change notifies only the `DetailsView`.
 pub struct FanPage {
     key: DeviceKey,
     row: DeviceRow,
-    speed: Entity<ChartView>,
-    temperature: Entity<ChartView>,
-    /// The temperature sensor of the Temperature chart; `None` shows "Choose a sensor".
+    /// The container id, `page.fan:...`.
+    container_id: SharedString,
+    details: KeyValueModel,
+    details_view: Entity<DetailsView>,
+    container: Entity<WidgetContainer>,
+    editor: Entity<WidgetEditor>,
+    /// The temperature sensor of the Temperature row; `None` when no sensor is paired.
     sensor: Option<SensorRef>,
     sensor_device: Option<DeviceIdx>,
-    fan_max: Option<u32>,
-    pwm: PwmDerived,
-    details: KeyValueModel,
     focus: FocusHandle,
     hub: Entity<SnapshotHub>,
     demand: Entity<DemandAggregator>,
@@ -569,12 +414,11 @@ pub struct FanPage {
     header: (SharedString, SharedString),
     settings: PageSettings,
     settings_versions: [u64; 4],
-    /// `UiMetrics.style_version` the chart colours were built for.
-    style_version: u64,
-    words: Words,
-    _subs: SmallVec<[Subscription; 3]>,
+    _subs: SmallVec<[Subscription; 8]>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub notify_count: Cell<u32>,
 }
 
 impl FanPage {
@@ -585,35 +429,63 @@ impl FanPage {
         demand: Entity<DemandAggregator>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let theme = current(cx).clone();
         let settings = PageSettings::read(&key, cx);
         let snap = Arc::clone(hub.read(cx).current());
-        let mut words = Words::default();
-        words.refresh(cx);
-
+        let container_id = SharedString::from(page_container(&key.0));
         let sensor = choose_sensor(&snap, &key.0, settings.temp.as_deref());
         let sensor_device = sensor.as_deref().and_then(|s| sensor_device(&snap, s));
-        let fan_max = fan_max_of(&snap, row.idx);
-        let view = PageSettingsView::of(&settings);
-        let spec = speed_spec(row.idx, fan_max, &view, &theme);
-        let labels = speed_labels(&words);
-        let speed = cx.new(|cx| {
-            ChartView::new(spec, labels, &hub, cx)
-                .with_newest_marks()
-                .with_device_history(&snap)
-        });
-        let spec = temperature_spec(sensor_device, &view, &theme);
-        let labels = temperature_labels(sensor_device.is_some(), &words);
-        let temperature = cx.new(|cx| {
-            ChartView::new(spec, labels, &hub, cx)
-                .with_newest_marks()
-                .with_device_history(&snap)
-        });
+
+        let mut details = fan_details_model();
+        details.refresh_strings(cx);
+        let details_view = {
+            let shown = DetailsShown::of(&details, strings_version(cx));
+            let draw = details_draw(cx.weak_entity());
+            let id = container_id.clone();
+            cx.new(|_| DetailsView::new(id, shown, draw))
+        };
+        let natural = details_view.read(cx).natural_height();
+        let content: FixedContent = {
+            let view: AnyView = details_view.clone().into();
+            Rc::new(move |kind: &FixedWidget, _: &mut App| {
+                matches!(kind, FixedWidget::Details).then(|| view.clone())
+            })
+        };
+        let container = {
+            let store = Rc::new(RefCell::new(SourceStore::for_page(&hub)));
+            let layout = page_layout(&container_id, cx);
+            let id = container_id.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| {
+                let mut c = WidgetContainer::new(id, layout, &hub, store, cx);
+                c.set_flow_placer(Some(page_flow::sensors::fan_flow(natural)), cx);
+                c.set_fixed_content(Some(content), cx);
+                c
+            })
+        };
+        let editor = {
+            let container = container.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| {
+                let mut e = WidgetEditor::new(container, &hub, cx);
+                e.set_page_parts(vec![FixedWidget::Details]);
+                e
+            })
+        };
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
-        subs.push(cx.observe_global::<tl_ui_base::theme::UiMetrics>(Self::sync_style));
+        subs.push(cx.observe_global::<Strings>(Self::sync_words));
+        // The Details grid got taller or shorter: the parts under it move.
+        subs.push(
+            cx.subscribe(&details_view, |this, _, _: &DetailsResized, cx| {
+                this.container.update(cx, |c, cx| {
+                    c.place_again(cx);
+                });
+            }),
+        );
+        // A layout change can change what the page asks for.
+        subs.push(cx.observe(&container, |this, _, cx| this.send_demand(cx)));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -622,13 +494,13 @@ impl FanPage {
         let mut this = Self {
             key,
             row,
-            speed,
-            temperature,
+            container_id,
+            details,
+            details_view,
+            container,
+            editor,
             sensor,
             sensor_device,
-            fan_max,
-            pwm: PwmDerived::default(),
-            details: fan_details_model(),
             focus: cx.focus_handle(),
             hub,
             demand,
@@ -638,47 +510,59 @@ impl FanPage {
             header: (SharedString::default(), SharedString::default()),
             settings,
             settings_versions: section_versions(cx),
-            style_version: metrics(cx).style_version,
-            words,
             _subs: subs,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            notify_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
         this
     }
 
-    pub fn speed(&self) -> &Entity<ChartView> {
-        &self.speed
+    /// The chart of the first placed widget of `metric` that draws one.
+    pub fn chart_of(&self, metric: &str, cx: &App) -> Option<Entity<ChartView>> {
+        let c = self.container.read(cx);
+        c.layout()
+            .widgets
+            .iter()
+            .filter(|w| w.content.metric_key().is_some_and(|k| k.as_str() == metric))
+            .find_map(|w| c.widget(w.id)?.read(cx).chart().cloned())
     }
 
-    pub fn temperature(&self) -> &Entity<ChartView> {
-        &self.temperature
+    /// The Fan speed chart, while the page shows it.
+    pub fn speed(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_SPEED, cx)
     }
 
-    /// The sensor of the Temperature chart; `None` while the page asks to choose one.
+    /// The Temperature chart, while the page shows it.
+    pub fn temperature(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_TEMP, cx)
+    }
+
+    /// The page's widget container.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
+    }
+
+    /// The editor around the container (Edit Widgets).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
+    }
+
+    /// The Details widget's view.
+    pub fn details_view(&self) -> &Entity<DetailsView> {
+        &self.details_view
+    }
+
+    /// The container id, `page.fan:...`.
+    pub fn container_id(&self) -> &SharedString {
+        &self.container_id
+    }
+
+    /// The sensor of the Temperature row; `None` while no sensor is paired.
     pub fn sensor(&self) -> Option<&str> {
         self.sensor.as_deref()
-    }
-
-    /// The Fan speed axis max in RPM from the hardware, when the chip reports it.
-    pub fn fan_max(&self) -> Option<u32> {
-        self.fan_max
-    }
-
-    /// The derived PWM series on the RPM axis, as last put in the Fan speed chart.
-    pub fn pwm_series(&self) -> Option<&Arc<SeriesView>> {
-        self.pwm.view.as_ref()
-    }
-
-    /// The text of the Temperature chart's value when it has no sensor: `-`.
-    pub fn temperature_value_text(&self) -> Option<&'static str> {
-        self.sensor.is_none().then_some(NO_VALUE)
-    }
-
-    /// The centred text of the empty Temperature plot: "Choose a sensor".
-    pub fn choose_sensor_text(&self) -> Option<&SharedString> {
-        self.sensor.is_none().then_some(&self.words.choose)
     }
 
     /// The page is the shown page (`set_active`).
@@ -686,23 +570,30 @@ impl FanPage {
         self.active
     }
 
-    /// This page's demand part while it is active: the sensors component, and the device metric
-    /// history at 1 h, 24 h and 7 d.
-    pub fn demand_part(&self) -> Demand {
-        Demand {
+    /// This page's demand part while it is active: the sensors component, the device metric
+    /// history at 1 h, 24 h and 7 d, and what the placed widgets read.
+    pub fn demand_part(&self, cx: &App) -> Demand {
+        let mut demand = Demand {
             any_surface_visible: true,
             sensors: true,
             device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
-        }
+        };
+        add_demand(&mut demand, &self.container.read(cx).demand_part());
+        demand
     }
 
     fn send_demand(&self, cx: &mut App) {
-        if !self.active {
-            return;
+        if self.active {
+            let (id, window, part) = (self.id, self.window, self.demand_part(cx));
+            self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
         }
-        let (id, window, part) = (self.id, self.window, self.demand_part());
-        self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
+    }
+
+    fn notify(&self, cx: &mut Context<Self>) {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
     }
 
     fn on_snapshot(
@@ -715,25 +606,13 @@ impl FanPage {
         self.apply_snapshot(&snap, ev.mask, cx);
     }
 
-    /// Brings the sensor choice, chart specs, derived PWM series, Details rows and header up to
-    /// date with the components in `mask`. Notifies only when something the page draws changed.
+    /// Brings the sensor choice, the Details rows and the header up to date with the components
+    /// in `mask`. Only a header change renders the page; a row change goes to the Details view.
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
-        let mut changed = false;
         let devices = mask.contains(ComponentMask::DEVICES);
         let system = mask.contains(ComponentMask::SYSTEM);
-
         if devices {
-            changed |= self.sync_sensor(snap, cx);
-        }
-        if system || devices {
-            let fan_max = fan_max_of(snap, self.row.idx);
-            if fan_max != self.fan_max {
-                self.fan_max = fan_max;
-                self.rebuild_speed(cx);
-            }
-        }
-        if system || devices || mask.contains(ComponentMask::SERIES) {
-            self.sync_pwm(snap, cx);
+            self.sync_sensor(snap);
         }
         if system || devices {
             let fan = reading(snap, self.row.idx);
@@ -754,19 +633,34 @@ impl FanPage {
                 temperature,
                 chip,
             };
-            changed |= update_fan_details(&mut self.details, &inputs, cx);
+            if update_fan_details(&mut self.details, &inputs, cx) {
+                self.sync_details(cx);
+            }
         }
-        if devices {
-            changed |= self.sync_header(snap, cx);
+        if devices && self.sync_header(snap, cx) {
+            self.notify(cx);
         }
-        if changed {
-            cx.notify();
+        // The fan went away: an edit ends as Cancel does.
+        if devices
+            && !snap
+                .devices
+                .entries
+                .iter()
+                .any(|e| e.idx == self.row.idx && e.present)
+        {
+            self.editor.update(cx, |e, cx| e.cancel(cx));
         }
     }
 
-    /// Reads the sensor choice: the saved one, else the default pairing. Rebuilds the Temperature
-    /// chart when it changed. True when it did.
-    fn sync_sensor(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
+    /// Hands the Details view what the grid shows; it notifies only when that changed.
+    fn sync_details(&mut self, cx: &mut Context<Self>) {
+        let shown = DetailsShown::of(&self.details, strings_version(cx));
+        self.details_view.update(cx, |v, cx| v.set_shown(shown, cx));
+    }
+
+    /// Reads the sensor choice: the saved one, else the default pairing. True when it changed.
+    /// The Temperature widget follows the same choice through its source.
+    fn sync_sensor(&mut self, snap: &Snapshot) -> bool {
         let sensor = choose_sensor(snap, &self.key.0, self.settings.temp.as_deref());
         let device = sensor.as_deref().and_then(|s| sensor_device(snap, s));
         if sensor == self.sensor && device == self.sensor_device {
@@ -774,7 +668,6 @@ impl FanPage {
         }
         self.sensor = sensor;
         self.sensor_device = device;
-        self.rebuild_temperature(cx);
         true
     }
 
@@ -790,91 +683,19 @@ impl FanPage {
         if header == self.header {
             return false;
         }
+        let word = header.0.clone();
+        self.editor.update(cx, |e, _| e.set_page_name(word));
         self.header = header;
         true
     }
 
-    /// Puts the derived PWM series in the Fan speed chart's second slot. The chart resolves the
-    /// raw percent series into that slot on its own snapshot event, which runs before this one,
-    /// so the page replaces it after each snapshot. The derived view is rebuilt only when the raw
-    /// series or the axis max changed.
-    fn sync_pwm(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
-        let range_ns = self.settings.range_ns;
-        let id = series(self.row.idx, MetricId::FAN_PWM);
-        let raw = find_tiered(&snap.series, id, range_ns).0.cloned();
-        let axis = self.axis_max(cx);
-        let same = match (&self.pwm.raw, &raw) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        } && self.pwm.axis_bits == axis.to_bits();
-        if !same {
-            self.pwm.view = raw.as_deref().map(|r| Arc::new(pwm_scaled(r, axis)));
-            self.pwm.raw = raw;
-            self.pwm.axis_bits = axis.to_bits();
-        }
-        let derived = self.pwm.view.clone();
-        self.speed.update(cx, |v, cx| {
-            if v.series.len() != 2 {
-                v.resolve(snap);
-            }
-            let current = &v.series[1];
-            let same = match (current, &derived) {
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                (None, None) => true,
-                _ => false,
-            };
-            if !same {
-                v.series[1] = derived;
-                cx.notify();
-            }
-        });
-    }
-
-    /// The Fan speed axis max in RPM the PWM series is scaled to: the hardware maximum, else the
-    /// chart's current ceiling, else 1.
-    fn axis_max(&self, cx: &App) -> f32 {
-        if let Some(m) = self.fan_max {
-            return m as f32;
-        }
-        let ceiling = self.speed.read(cx).scale_state.ceiling;
-        if ceiling.is_finite() && ceiling > 0.0 {
-            ceiling
-        } else {
-            1.0
-        }
-    }
-
-    fn rebuild_speed(&mut self, cx: &mut Context<Self>) {
-        let theme = current(cx).clone();
-        let view = PageSettingsView::of(&self.settings);
-        let spec = speed_spec(self.row.idx, self.fan_max, &view, &theme);
-        self.speed.update(cx, |v, cx| v.set_spec(spec, cx));
-        // The chart resolved the raw series for the new spec; the page puts its own back.
-        self.pwm.raw = None;
-        let snap = Arc::clone(self.hub.read(cx).current());
-        self.sync_pwm(&snap, cx);
-    }
-
-    fn rebuild_temperature(&mut self, cx: &mut Context<Self>) {
-        let theme = current(cx).clone();
-        let view = PageSettingsView::of(&self.settings);
-        let spec = temperature_spec(self.sensor_device, &view, &theme);
-        let labels = temperature_labels(self.sensor_device.is_some(), &self.words);
-        self.temperature.update(cx, |v, cx| {
-            v.set_spec(spec, cx);
-            v.set_labels(labels, cx);
-        });
-    }
-
-    /// Rebuilds every chart spec from the current settings and theme.
-    fn rebuild_all(&mut self, cx: &mut Context<Self>) {
-        self.rebuild_speed(cx);
-        self.rebuild_temperature(cx);
-    }
-
     /// Applies the page's settings when one of their sections changed.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        // A saved layout (Apply, Reset Page) shows when the page is not in Edit Widgets.
+        if !self.editor.read(cx).is_editing() {
+            let layout = page_layout(&self.container_id, cx);
+            self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+        }
         let versions = section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -888,77 +709,50 @@ impl FanPage {
         let label = new.label != self.settings.label;
         let range_moved = new.range_ns != self.settings.range_ns;
         self.settings = new;
-        self.rebuild_all(cx);
-        if range_moved {
-            self.send_demand(cx);
-        }
         let snap = Arc::clone(self.hub.read(cx).current());
-        if pairing {
-            self.sync_sensor(&snap, cx);
+        if pairing && self.sync_sensor(&snap) {
+            self.apply_snapshot(&snap, ComponentMask::SYSTEM, cx);
         }
         if label {
             self.sync_header(&snap, cx);
         }
-        cx.notify();
-    }
-
-    /// Rebuilds the chart colours after a theme or style change.
-    fn sync_style(&mut self, cx: &mut Context<Self>) {
-        let version = metrics(cx).style_version;
-        if version == self.style_version {
-            return;
+        if range_moved {
+            // The header switch shows the new range.
+            self.send_demand(cx);
         }
-        self.style_version = version;
-        self.rebuild_all(cx);
-        cx.notify();
+        if range_moved || label {
+            self.notify(cx);
+        }
     }
 
-    fn chart_box(
-        &self,
-        view: &Entity<ChartView>,
-        selector: &'static str,
-        m: &tl_ui_base::theme::UiMetrics,
-    ) -> gpui_kit::Div {
-        div()
-            .tl_selector(move || selector.into())
-            .w_full()
-            .h(px(GRAPH_H_STACKED * m.ui_scale))
-            .child(view.clone().cached(StyleRefinement::default().size_full()))
+    /// New strings: the Details words and the header.
+    fn sync_words(&mut self, cx: &mut Context<Self>) {
+        self.details.refresh_strings(cx);
+        let snap = Arc::clone(self.hub.read(cx).current());
+        self.apply_snapshot(&snap, ComponentMask::SYSTEM, cx);
+        self.sync_details(cx);
+        self.sync_header(&snap, cx);
+        self.notify(cx);
     }
 
-    /// The empty Temperature plot: the value `-` at the right of the heading row and the centred
-    /// text "Choose a sensor".
-    fn empty_overlay(&self, m: &tl_ui_base::theme::UiMetrics, theme: &TlTheme) -> AnyElement {
-        let mut value = div()
-            .tl_selector(|| NO_VALUE_ID.into())
-            .absolute()
-            .top(m.sp[3])
-            .right(m.sp[3])
-            .text_color(theme.text_secondary)
-            .child(SharedString::from(NO_VALUE));
-        *value.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
-        let mut choose = div()
-            .tl_selector(|| CHOOSE_SENSOR_ID.into())
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(theme.text_secondary)
-            .child(self.words.choose.clone());
-        *choose.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
-        // Insets are explicit: an absolute box without them sits at its static position, below
-        // the chart in the flow.
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .child(choose)
-            .child(value)
-            .into_any_element()
+    /// "Edit Widgets…" in the page menu.
+    fn on_edit_start(
+        &mut self,
+        _: &PerfWidgetEditStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        start_page_edit(&self.editor, &self.hub, window, cx);
+    }
+
+    /// "Reset Page" in the page menu (ADR-019 phase 3 "Reset").
+    fn on_reset_page(
+        &mut self,
+        _: &PerfWidgetResetPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        reset_page(&self.container_id, self.header.0.clone(), window, cx);
     }
 }
 
@@ -1110,21 +904,9 @@ impl DevicePage for FanPage {
         SmallVec::new()
     }
 
-    fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
-        let m = *metrics(cx);
-        let theme = current(cx).clone();
-        let mut temperature = self
-            .chart_box(&self.temperature, TEMPERATURE_ID, &m)
-            .relative();
-        if self.sensor.is_none() {
-            temperature = temperature.child(self.empty_overlay(&m, &theme));
-        }
-        v_flex()
-            .w_full()
-            .gap(m.sp[4])
-            .child(self.chart_box(&self.speed, SPEED_ID, &m))
-            .child(temperature)
-            .into_any_element()
+    fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {
+        // The charts are widgets of the container.
+        div().into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
@@ -1190,6 +972,10 @@ impl DevicePage for FanPage {
         SmallVec::new()
     }
 
+    fn widget_editor(&self) -> Option<&Entity<WidgetEditor>> {
+        Some(&self.editor)
+    }
+
     fn set_active(&mut self, active: bool, cx: &mut App) {
         if self.active == active {
             return;
@@ -1220,16 +1006,6 @@ impl Render for FanPage {
             self.window = Some(handle);
             self.send_demand(cx);
         }
-        self.details.refresh_strings(cx);
-        if self.words.refresh(cx) {
-            let labels = speed_labels(&self.words);
-            self.speed.update(cx, |v, cx| v.set_labels(labels, cx));
-            let labels = temperature_labels(self.sensor_device.is_some(), &self.words);
-            self.temperature
-                .update(cx, |v, cx| v.set_labels(labels, cx));
-            let snap = Arc::clone(self.hub.read(cx).current());
-            self.apply_snapshot(&snap, ComponentMask::ALL, cx);
-        }
         let m = *metrics(cx);
         let theme = current(cx).clone();
         div()
@@ -1237,6 +1013,8 @@ impl Render for FanPage {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_rename))
             .on_action(cx.listener(Self::on_set_sensor))
+            .on_action(cx.listener(Self::on_edit_start))
+            .on_action(cx.listener(Self::on_reset_page))
             .child(
                 DevicePageFrame {
                     page: self,

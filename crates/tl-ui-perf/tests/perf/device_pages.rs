@@ -483,7 +483,7 @@ mod shared_range {
                 ns(&disk.read(cx).active_chart(cx).expect("active chart")),
                 ns(&net.read(cx).throughput(cx).expect("throughput chart")),
                 ns(&gpu.read(cx).memory(cx).expect("memory chart")),
-                ns(fan.read(cx).speed()),
+                ns(&fan.read(cx).speed(cx).expect("speed chart")),
                 cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
                 gpu.read(cx).engines().read(cx).spec.range_ns / S,
                 ns(bat.read(cx).chart()),
@@ -948,8 +948,14 @@ fn build_page_fan_and_battery(cx: &mut TestAppContext) {
     let fan_page = fan.clone().downcast::<FanPage>().expect("a FanPage");
     r.vcx.update(|_, cx| {
         let page = fan_page.read(cx);
-        assert!(page.speed().read(cx).spec.hover);
-        assert!(page.temperature().read(cx).spec.hover);
+        assert!(page.speed(cx).expect("speed chart").read(cx).spec.hover);
+        assert!(
+            page.temperature(cx)
+                .expect("temperature chart")
+                .read(cx)
+                .spec
+                .hover
+        );
     });
     let header = r.vcx.update(|_, cx| header_of(&fan, cx));
     assert_eq!((header.0.as_ref(), header.1.as_ref()), ("Fan 1", "nct6797"));
@@ -3856,7 +3862,8 @@ mod fan_menu {
         r.vcx.update(|_, cx| {
             let p = page.read(cx);
             assert_eq!(p.sensor(), Some(sensor.as_str()));
-            let t = p.temperature().read(cx);
+            let t = p.temperature(cx).expect("temperature chart");
+            let t = t.read(cx);
             assert_eq!(t.spec.series.len(), 1);
             assert_eq!(t.spec.series[0].id.device, DeviceIdx(22));
         });
@@ -3890,10 +3897,23 @@ mod fan_menu {
                 None,
                 "seven fans on one chip: no default pairing"
             );
-            assert_eq!(
-                p.choose_sensor_text().map(|t| t.as_ref()),
-                Some("Choose a sensor")
-            );
         });
+        let id = r.vcx.update(|_, cx| {
+            let c = page.read(cx).container().read(cx);
+            c.layout()
+                .widgets
+                .iter()
+                .find(|w| w.content.metric_key().is_some_and(|k| k.as_str() == "temp"))
+                .map(|w| w.id)
+                .expect("the Temperature widget")
+        });
+        let container = r
+            .vcx
+            .update(|_, cx| page.read(cx).container_id().to_string());
+        let name: &'static str = Box::leak(
+            tl_ui_overview::widget::metric_widget::part_id(&container, id, "choose-sensor")
+                .into_boxed_str(),
+        );
+        assert!(r.vcx.debug_bounds(name).is_some(), "Choose a sensor shows");
     }
 }

@@ -78,7 +78,7 @@ use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::{Strings, tr};
 use tl_ui_base::selector::TlSelector;
 use tl_ui_base::settings_global::TlSettings;
-use tl_ui_base::text::style::{numeric_style, t_lg, t_sm, t_xs};
+use tl_ui_base::text::style::{label_style, numeric_style, t_lg, t_sm, t_xs};
 use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 use tl_ui_chart::chart::labels::LABEL_ROW;
 use tl_ui_chart::chart::{ChartBg, ChartSpec, ChartView, GridStyle, ValueFormat, YScale};
@@ -91,6 +91,10 @@ use tl_ui_perf_core::core::core_clocks::snapshot_line_set;
 const SEP: &str = " · ";
 
 const KEY_NOT_CONNECTED: &str = "perf-widget-not-connected";
+/// The centred text of a fan Temperature chart with no sensor (UI-PRF-034).
+const KEY_CHOOSE_SENSOR: &str = "perf-fan-choose-sensor";
+/// The value such a chart writes at the right of its heading.
+const NO_VALUE: &str = "-";
 const KEY_UNKNOWN: &str = "perf-widget-unknown";
 
 /// The width the first line keeps free in Edit Widgets, from the widget's left edge: the grip
@@ -249,6 +253,9 @@ struct Shown {
     series: Option<SeriesId>,
     /// The tooltip on the page chart's heading (`SourceData::tip`), while the name shows.
     tip: Option<SharedString>,
+    /// "Choose a sensor", while a fan's Temperature chart has no paired sensor
+    /// (`SourceData::awaits_sensor`).
+    choose: Option<SharedString>,
 }
 
 /// What the chart's spec and labels are built from: the metric's lines, the widget's options and
@@ -350,6 +357,7 @@ impl MetricWidget {
                 reason: SharedString::default(),
                 series: None,
                 tip: None,
+                choose: None,
             },
             chart: None,
             chart_key: None,
@@ -660,12 +668,14 @@ impl MetricWidget {
             reason,
             series: kept
                 .contains(FormSet::CHART)
-                .then(|| src.series())
+                .then(|| src.chart_series())
                 .flatten(),
             tip: kept
                 .contains(FormSet::LABEL)
                 .then(|| src.tip().cloned())
                 .flatten(),
+            choose: (self.page && kept.contains(FormSet::CHART) && src.awaits_sensor())
+                .then(|| tr(cx, KEY_CHOOSE_SENSOR)),
         }
     }
 
@@ -707,6 +717,7 @@ impl MetricWidget {
             // The host's chart: the widget builds none.
             series: None,
             tip: None,
+            choose: None,
         }
     }
 
@@ -1300,7 +1311,53 @@ impl MetricWidget {
         if forms.contains(FormSet::BAR) {
             el = el.child(self.meter(id, theme).flex_none().py(px(CELL_BAR_PAD * s)));
         }
-        el.child(self.chart_part(id).flex_1().min_h_0().w_full())
+        let mut chart = self.chart_part(id).flex_1().min_h_0().w_full();
+        if let Some(text) = &self.shown.choose {
+            chart = chart.child(self.choose_overlay(id, text.clone(), m, theme));
+        }
+        el.child(chart)
+    }
+
+    /// The empty plot of a fan Temperature chart with no paired sensor: the value `-` at the
+    /// right of the heading row and the centred text "Choose a sensor" (UI-PRF-034).
+    fn choose_overlay(
+        &self,
+        id: u32,
+        text: SharedString,
+        m: &UiMetrics,
+        theme: &TlTheme,
+    ) -> AnyElement {
+        let none = part_id(&self.container, id, "no-value");
+        let choose = part_id(&self.container, id, "choose-sensor");
+        let mut value = div()
+            .tl_selector(move || none)
+            .absolute()
+            .top(m.sp[3])
+            .right(m.sp[3])
+            .text_color(theme.text_secondary)
+            .child(SharedString::from(NO_VALUE));
+        *value.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
+        let mut centred = div()
+            .tl_selector(move || choose)
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(theme.text_secondary)
+            .child(text);
+        *centred.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
+        // Insets are explicit: an absolute box without them sits at its static position.
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .child(centred)
+            .child(value)
+            .into_any_element()
     }
 
     /// The Cell: header line, stats line, bar, then the chart filling the rest.

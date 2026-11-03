@@ -46,6 +46,7 @@ pub const PAGE_KINDS: &[DeviceKind] = &[
     DeviceKind::Disk,
     DeviceKind::Net,
     DeviceKind::AggregateGpu,
+    DeviceKind::Fan,
 ];
 
 /// Every device kind that has a page: CPU, Memory, GPU, disk, Aggregate storage, adapter,

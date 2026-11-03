@@ -19,7 +19,7 @@ use tl_model::validity::Validity;
 
 use super::element::ChartElement;
 use super::{
-    ChartCache, ChartLabels, ChartSpec, ChartState, geometry, hover, labels, lines, scale,
+    ChartCache, ChartLabels, ChartSpec, ChartState, YScale, geometry, hover, labels, lines, scale,
 };
 use tl_ui_base::hub::{HostClock, SnapshotChanged, SnapshotHub};
 
@@ -49,6 +49,9 @@ pub struct ChartView {
     pub(crate) text: labels::LabelCache,
     /// Resolved from the newest snapshot, one per `spec.series` entry.
     pub series: SmallVec<[Option<Arc<SeriesView>>; 2]>,
+    /// The scaled view of each `percent_of_axis` series: the raw view it came from, the axis
+    /// maximum (bits) and the result.
+    percent_cache: Vec<Option<(Arc<SeriesView>, u32, Arc<SeriesView>)>>,
     /// True when the range wants the 1 Hz tier but a series resolved to its fast view because
     /// the snapshot has no 1 Hz view for it (P1 engine). The chart then draws the last 60 s.
     pub tier_fallback: bool,
@@ -139,6 +142,7 @@ impl ChartView {
             scratch: geometry::Scratch::default(),
             built_right_edge_ns: 0,
             scale_state: scale::ScaleState::default(),
+            percent_cache: Vec::new(),
             axis_text: String::new(),
             text: labels::LabelCache::default(),
             series: SmallVec::new(),
@@ -315,6 +319,48 @@ impl ChartView {
     ///
     /// A series with `minus` resolves to a new view from the same source ([`derived_view`]).
     pub fn resolve(&mut self, snap: &Snapshot) {
+        self.resolve_raw(snap);
+        self.scale_percent_series();
+    }
+
+    /// Replaces each `percent_of_axis` series with its values scaled to the y axis ([`percent_scaled`]).
+    /// A series that did not change since the last call keeps its scaled view.
+    fn scale_percent_series(&mut self) {
+        if !self.spec.series.iter().any(|s| s.percent_of_axis) {
+            return;
+        }
+        let axis = match self.spec.y {
+            YScale::StickyUp { hw_max: Some(max) } if max > 0.0 => max,
+            _ => {
+                let c = self.scale_state.ceiling;
+                if c.is_finite() && c > 0.0 { c } else { 1.0 }
+            }
+        };
+        self.percent_cache.resize(self.series.len(), None);
+        for (i, spec) in self.spec.series.iter().enumerate() {
+            if !spec.percent_of_axis {
+                continue;
+            }
+            let Some(raw) = self.series.get(i).cloned().flatten() else {
+                self.percent_cache[i] = None;
+                continue;
+            };
+            let cached = self.percent_cache[i]
+                .as_ref()
+                .filter(|(r, bits, _)| Arc::ptr_eq(r, &raw) && *bits == axis.to_bits());
+            let scaled = match cached {
+                Some((_, _, scaled)) => Arc::clone(scaled),
+                None => {
+                    let scaled = Arc::new(percent_scaled(&raw, axis));
+                    self.percent_cache[i] = Some((raw, axis.to_bits(), Arc::clone(&scaled)));
+                    scaled
+                }
+            };
+            self.series[i] = Some(scaled);
+        }
+    }
+
+    fn resolve_raw(&mut self, snap: &Snapshot) {
         self.paused = self.paused_in(snap);
         let set = &*snap.series;
         let range_ns = self.spec.range_ns;
@@ -815,6 +861,29 @@ pub fn history_view(
         id,
         version: hist.header.version,
         period_ns: step,
+        samples: samples.into(),
+    }
+}
+
+/// `raw` (a percent series) scaled into an axis of `axis_max`: every value becomes
+/// `pct / 100 × axis_max`. The version mixes in the axis, so a cache keyed on the version sees a
+/// new axis (`ChartSeries::percent_of_axis`).
+pub fn percent_scaled(raw: &SeriesView, axis_max: f32) -> SeriesView {
+    let samples: Vec<Sample> = raw
+        .samples
+        .iter()
+        .map(|s| Sample {
+            value: s.value / 100.0 * axis_max,
+            ..*s
+        })
+        .collect();
+    SeriesView {
+        id: raw.id,
+        version: raw
+            .version
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add(u64::from(axis_max.to_bits())),
+        period_ns: raw.period_ns,
         samples: samples.into(),
     }
 }

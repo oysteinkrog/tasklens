@@ -1,5 +1,5 @@
-//! Fan page: sensor pairing, the two charts, the Details rows and demand (E25-027, UI-PRF-034;
-//! PERF-076, PERF-077).
+//! Fan page: sensor pairing, the two chart widgets, the Details rows and demand (E25-027,
+//! UI-PRF-034; PERF-076, PERF-077; `tasklens-hzire.9`).
 
 use std::sync::Arc;
 
@@ -22,11 +22,14 @@ use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_chart::chart::scale::{ScaleState, compute};
-use tl_ui_chart::chart::{LegendStyle, ValueFormat, YScale};
+use tl_ui_chart::chart::{ChartView, LegendStyle, ValueFormat, YScale};
 use tl_ui_kit::components::kv_grid;
+use tl_ui_overview::widget::metric_widget::{part_id, widget_id};
 use tl_ui_perf::performance::page::DevicePage as _;
-use tl_ui_perf::performance::sensors::{CHOOSE_SENSOR_ID, FanPage, NO_VALUE_ID, TEMPERATURE_ID};
+use tl_ui_perf::performance::sensors::FanPage;
 use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
+use tl_ui_settings::layout::METRIC_TEMP;
+use tl_ui_settings::layout_pages::METRIC_SPEED;
 use tl_ui_settings::settings::{
     AppearanceSettings, FanOverride, NetworkUnit, Settings, ThemeSettings, UiState,
 };
@@ -242,33 +245,71 @@ fn row(rows: &[(String, String)], label: &str) -> String {
         .unwrap_or_else(|| panic!("no row {label}: {rows:?}"))
 }
 
+/// The id of the page's widget on `metric`.
+fn widget_of(r: &mut Rig, metric: &str) -> u32 {
+    let page = r.page.clone();
+    r.vcx.update(|_, cx| {
+        let container = page.read(cx).container().clone();
+        container
+            .read(cx)
+            .layout()
+            .widgets
+            .iter()
+            .find(|w| w.content.metric_key().is_some_and(|k| k.as_str() == metric))
+            .map(|w| w.id)
+            .expect("a widget on the metric")
+    })
+}
+
+/// The chart of the page's widget on `metric`.
+fn chart_of(r: &mut Rig, metric: &str) -> Entity<ChartView> {
+    let id = widget_of(r, metric);
+    let page = r.page.clone();
+    r.vcx.update(|_, cx| {
+        let container = page.read(cx).container().clone();
+        container
+            .read(cx)
+            .widget(id)
+            .and_then(|w| w.read(cx).chart().cloned())
+            .expect("a chart widget")
+    })
+}
+
+fn container_id(r: &mut Rig) -> String {
+    let page = r.page.clone();
+    r.vcx
+        .update(|_, cx| page.read(cx).container_id().to_string())
+}
+
 #[gpui_kit::test]
 fn fan_choose_a_sensor_state(cx: &mut TestAppContext) {
-    let r = open(cx, 7, None, None);
+    let mut r = open(cx, 7, None, None);
+    let chart = chart_of(&mut r, METRIC_TEMP);
     r.vcx.update(|_, cx| {
-        let p = r.page.read(cx);
-        assert_eq!(p.sensor(), None);
-        assert_eq!(p.temperature_value_text(), Some("-"));
-        assert_eq!(
-            p.choose_sensor_text().map(|t| t.as_ref()),
-            Some("Choose a sensor")
-        );
-        let t = p.temperature().read(cx);
-        assert!(t.spec.series.is_empty(), "the plot is empty");
-        assert_eq!(t.labels.heading.as_deref(), Some("Temperature"));
-        assert_eq!(t.labels.value_fmt, ValueFormat::Celsius);
-        assert_eq!(t.spec.y, YScale::StickyTemp);
+        assert_eq!(r.page.read(cx).sensor(), None);
     });
+    let t = r.vcx.read_entity(&chart, |v, _| {
+        (v.spec.series.len(), v.labels.clone(), v.spec.y)
+    });
+    assert_eq!(t.0, 0, "the plot is empty");
+    assert_eq!(t.1.heading.as_deref(), Some("Temperature"));
+    assert_eq!(t.1.value_fmt, ValueFormat::Celsius);
+    assert_eq!(t.2, YScale::StickyTemp);
 }
 
 /// UI-PRF-034: without a sensor, "Choose a sensor" is centred in the Temperature plot and the
 /// value `-` sits in its heading row, both inside the plot.
 #[gpui_kit::test]
 fn fan_choose_a_sensor_inside_temperature_plot(cx: &mut TestAppContext) {
-    let r = open(cx, 7, None, None);
-    let plot = r.vcx.debug_bounds(TEMPERATURE_ID).expect("plot drawn");
-    let choose = r.vcx.debug_bounds(CHOOSE_SENSOR_ID).expect("prompt drawn");
-    let dash = r.vcx.debug_bounds(NO_VALUE_ID).expect("value drawn");
+    let mut r = open(cx, 7, None, None);
+    let (page, id) = (container_id(&mut r), widget_of(&mut r, METRIC_TEMP));
+    let bounds = |r: &mut Rig, name: String| {
+        let name: &'static str = Box::leak(name.into_boxed_str());
+        r.vcx.debug_bounds(name).expect(name)
+    };
+    let plot = bounds(&mut r, widget_id(&page, id));
+    let choose = bounds(&mut r, part_id(&page, id, "choose-sensor"));
+    let dash = bounds(&mut r, part_id(&page, id, "no-value"));
     assert!(plot.contains(&choose.center()), "{choose:?} in {plot:?}");
     let (dx, dy) = (
         choose.center().x - plot.center().x,
@@ -283,39 +324,43 @@ fn fan_choose_a_sensor_inside_temperature_plot(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn fan_default_pairing_single_fan_chip(cx: &mut TestAppContext) {
-    let r = open(cx, 1, None, None);
+    let mut r = open(cx, 1, None, None);
+    let (page, id) = (container_id(&mut r), widget_of(&mut r, METRIC_TEMP));
     r.vcx.update(|_, cx| {
-        let p = r.page.read(cx);
-        assert_eq!(p.sensor(), Some("nct6797::temp1"));
-        assert_eq!(p.temperature_value_text(), None);
-        assert!(p.choose_sensor_text().is_none());
-        let t = p.temperature().read(cx);
-        assert_eq!(t.spec.series.len(), 1);
-        assert_eq!(
-            t.spec.series[0].id,
-            SeriesId {
-                device: TEMP1,
-                metric: MetricId::SENSOR_TEMP
-            }
-        );
+        assert_eq!(r.page.read(cx).sensor(), Some("nct6797::temp1"));
     });
+    let name: &'static str = Box::leak(part_id(&page, id, "choose-sensor").into_boxed_str());
+    assert!(
+        r.vcx.debug_bounds(name).is_none(),
+        "no prompt with a sensor"
+    );
+    let chart = chart_of(&mut r, METRIC_TEMP);
+    let series = r.vcx.read_entity(&chart, |v, _| v.spec.series.clone());
+    assert_eq!(series.len(), 1);
+    assert_eq!(
+        series[0].id,
+        SeriesId {
+            device: TEMP1,
+            metric: MetricId::SENSOR_TEMP
+        }
+    );
 }
 
 #[gpui_kit::test]
 fn fan_saved_sensor_wins(cx: &mut TestAppContext) {
-    let r = open(cx, 3, Some("nct6797::temp3"), None);
+    let mut r = open(cx, 3, Some("nct6797::temp3"), None);
     r.vcx.update(|_, cx| {
-        let p = r.page.read(cx);
-        assert_eq!(p.sensor(), Some("nct6797::temp3"));
-        let t = p.temperature().read(cx);
-        assert_eq!(t.spec.series[0].id.device, DeviceIdx(22));
+        assert_eq!(r.page.read(cx).sensor(), Some("nct6797::temp3"));
     });
+    let chart = chart_of(&mut r, METRIC_TEMP);
+    let device = r.vcx.read_entity(&chart, |v, _| v.spec.series[0].id.device);
+    assert_eq!(device, DeviceIdx(22));
 }
 
 #[gpui_kit::test]
 fn fan_axis_max_from_fan_max(cx: &mut TestAppContext) {
-    let r = open(cx, 1, None, Some(1800));
-    let chart = r.vcx.update(|_, cx| r.page.read(cx).speed().clone());
+    let mut r = open(cx, 1, None, Some(1800));
+    let chart = chart_of(&mut r, METRIC_SPEED);
     let (y, labels, series) = r.vcx.read_entity(&chart, |v, _| {
         (v.spec.y, v.labels.clone(), v.spec.series.clone())
     });
@@ -358,7 +403,7 @@ fn fan_axis_max_from_fan_max(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn fan_pwm_series_on_rpm_axis(cx: &mut TestAppContext) {
-    let r = open(cx, 1, None, Some(1800));
+    let mut r = open(cx, 1, None, Some(1800));
     r.engine.publish_with(|s| {
         let view = |metric, value: f32| {
             Arc::new(SeriesView {
@@ -381,16 +426,11 @@ fn fan_pwm_series_on_rpm_axis(cx: &mut TestAppContext) {
         ]);
     });
     draw(r.vcx);
-    r.vcx.update(|_, cx| {
-        let p = r.page.read(cx);
-        let derived = p.pwm_series().expect("derived series");
-        assert_eq!(derived.samples.last().map(|s| s.value), Some(900.0));
-        let chart = p.speed().read(cx);
+    let chart = chart_of(&mut r, METRIC_SPEED);
+    r.vcx.read_entity(&chart, |chart, _| {
+        // 50% of the 1800 RPM axis.
         let slot = chart.resolved()[1].as_ref().expect("second slot");
-        assert!(
-            Arc::ptr_eq(slot, derived),
-            "the chart draws the derived series"
-        );
+        assert_eq!(slot.samples.last().map(|s| s.value), Some(900.0));
         assert_eq!(
             chart.resolved()[0]
                 .as_ref()

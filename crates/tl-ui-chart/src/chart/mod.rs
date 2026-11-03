@@ -102,6 +102,10 @@ pub struct ChartSeries {
     /// clamped at 0, at `id`'s sample times ([`view::derived_view`]). A series that is absent or
     /// has no valid sample in a period slot counts as 0 there. Only for `id`, not `process`.
     pub minus: Arc<[SeriesId]>,
+    /// The series holds percent values (0..100) that the chart draws on its y axis as that
+    /// share of the axis maximum: the fan's PWM beside its RPM (UI-PRF-034). The axis maximum
+    /// is the scale's `hw_max` when it has one, else the ceiling the chart drew last, else 1.
+    pub percent_of_axis: bool,
 }
 
 /// How a gap between two runs of samples is drawn.
@@ -130,6 +134,7 @@ impl Default for ChartSeries {
             gap_style: GapStyle::Break,
             mean_ns: 0,
             minus: Arc::from([]),
+            percent_of_axis: false,
         }
     }
 }
