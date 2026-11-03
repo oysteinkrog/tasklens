@@ -90,6 +90,8 @@ pub enum CpuGraphMode {
     AllCoresStacked,
     /// The total chart beside the core board (crw.104).
     Board,
+    /// The CPU-by-app stacked chart (UI-PRF-062, D-042).
+    Apps,
 }
 
 /// `performance.cpu_board_sort` (crw.104): the order of the CPU page's core board.
@@ -176,6 +178,42 @@ impl Default for MemoryByAppSettings {
             colors: Vec::new(),
         }
     }
+}
+
+/// `[performance.cpu_by_app]` (UI-PRF-062, D-042). Same limits as [`MemoryByAppSettings`]: it
+/// reuses [`MEMORY_BY_APP_TOP_N`], [`MEMORY_BY_APP_COLORS_MAX`] and [`MEMORY_BY_APP_SLOTS`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CpuByAppSettings {
+    /// Groups drawn as their own band, in [`MEMORY_BY_APP_TOP_N`].
+    pub top_n: u8,
+    /// The CPU chart's own colour picks, the group shown least recently first. At most
+    /// [`MEMORY_BY_APP_COLORS_MAX`] entries.
+    pub colors: Vec<GroupColor>,
+}
+
+impl Default for CpuByAppSettings {
+    fn default() -> Self {
+        Self {
+            top_n: MEMORY_BY_APP_TOP_N.1,
+            colors: Vec::new(),
+        }
+    }
+}
+
+/// Reads `performance.cpu_graph_mode`; an unknown name or a value of the wrong type loads as
+/// the default, `per_core`, instead of failing the whole `[performance]` section.
+fn lenient_cpu_graph_mode<'de, D>(d: D) -> Result<CpuGraphMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Loose::<CpuGraphMode>::deserialize(d).map_or_else(
+        |_| CpuGraphMode::default(),
+        |v| match v {
+            Loose::Value(m) => m,
+            Loose::Bad(_) => CpuGraphMode::default(),
+        },
+    ))
 }
 
 /// One colour pick: a memory group key and its slot in `GraphPalette.groups`.
@@ -460,6 +498,7 @@ impl Default for PropertiesSettings {
 pub struct PerformanceSettings {
     /// One of `GRAPH_RANGES_S`.
     pub graph_range_s: u16,
+    #[serde(deserialize_with = "lenient_cpu_graph_mode")]
     pub cpu_graph_mode: CpuGraphMode,
     /// The order of the core board (crw.104).
     pub cpu_board_sort: CoreSort,
@@ -507,6 +546,8 @@ pub struct PerformanceSettings {
     pub memory_view: MemoryView,
     /// `[performance.memory_by_app]`: the memory-by-app chart (UI-PRF-060).
     pub memory_by_app: MemoryByAppSettings,
+    /// `[performance.cpu_by_app]`: the CPU-by-app chart (UI-PRF-062).
+    pub cpu_by_app: CpuByAppSettings,
     /// `[performance.overview]`: the Overview page layout (UI-PRF-018, D-023). `None` is the
     /// default layout. A value of the wrong type anywhere in it is dropped by [`Settings::clamp`]
     /// with the part it is in, so it never resets the rest of `[performance]`.
@@ -906,6 +947,19 @@ impl Unreadable for OverviewLayoutSetting {
             grid: vec![OverviewGridSetting::unreadable()],
             rows: Vec::new(),
         }
+    }
+}
+
+/// Drops colour picks with an empty key or a slot outside the palette, then the oldest picks
+/// past [`MEMORY_BY_APP_COLORS_MAX`]. Pushes `key` to `c` when it changed anything.
+fn clamp_group_colors(colors: &mut Vec<GroupColor>, key: &'static str, c: &mut Vec<&'static str>) {
+    let before = colors.len();
+    colors.retain(|g| !g.key.is_empty() && g.slot < MEMORY_BY_APP_SLOTS);
+    if colors.len() > MEMORY_BY_APP_COLORS_MAX {
+        colors.drain(..colors.len() - MEMORY_BY_APP_COLORS_MAX);
+    }
+    if colors.len() != before {
+        c.push(key);
     }
 }
 
@@ -1320,6 +1374,7 @@ impl Default for PerformanceSettings {
             overview_top_processes: false,
             memory_view: MemoryView::default(),
             memory_by_app: MemoryByAppSettings::default(),
+            cpu_by_app: CpuByAppSettings::default(),
             overview: None,
             layouts: LayoutsSetting::default(),
         }
@@ -2175,15 +2230,22 @@ impl Settings {
             "performance.memory_by_app.top_n",
             c,
         );
-        let colors = &mut self.performance.memory_by_app.colors;
-        let before = colors.len();
-        colors.retain(|g| !g.key.is_empty() && g.slot < MEMORY_BY_APP_SLOTS);
-        if colors.len() > MEMORY_BY_APP_COLORS_MAX {
-            colors.drain(..colors.len() - MEMORY_BY_APP_COLORS_MAX);
-        }
-        if colors.len() != before {
-            c.push("performance.memory_by_app.colors");
-        }
+        clamp_group_colors(
+            &mut self.performance.memory_by_app.colors,
+            "performance.memory_by_app.colors",
+            c,
+        );
+        clamp_key(
+            &mut self.performance.cpu_by_app.top_n,
+            (min, max, 1),
+            "performance.cpu_by_app.top_n",
+            c,
+        );
+        clamp_group_colors(
+            &mut self.performance.cpu_by_app.colors,
+            "performance.cpu_by_app.colors",
+            c,
+        );
         self.performance.migrate_overview(c);
         // ADR-019: read the layouts, then convert the Overview boxes' old keys once. Runs after
         // the overview, so conversion reads its validated grid entry. Phase 3: the CPU and
@@ -2491,6 +2553,7 @@ mod tests {
         assert_name(CpuGraphMode::AllCoresOverlaid, "all_cores_overlaid");
         assert_name(CpuGraphMode::AllCoresStacked, "all_cores_stacked");
         assert_name(CpuGraphMode::Board, "board");
+        assert_name(CpuGraphMode::Apps, "apps");
         assert_name(CoreSort::Number, "number");
         assert_name(CoreSort::Load, "load");
         assert_name(CpuSecondaryGraph::None, "none");
@@ -2782,6 +2845,55 @@ mod tests {
         let text = toml::to_string(&s).unwrap();
         assert!(text.contains("memory_view = \"apps\""), "{text}");
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+    }
+
+    /// D-042: `top_n` stays in 3..=20 and `colors` keeps the newest 64 valid picks.
+    #[test]
+    fn cpu_by_app_settings_clamp() {
+        let mut s = Settings::default();
+        assert_eq!(s.performance.cpu_by_app.top_n, 10);
+        s.performance.cpu_by_app.top_n = 2;
+        s.performance.cpu_by_app.colors = (0..70)
+            .map(|i| GroupColor {
+                key: format!("exe:p{i}"),
+                slot: (i % 12) as u8,
+            })
+            .collect();
+        let changed = s.clamp();
+        assert_eq!(s.performance.cpu_by_app.top_n, 3);
+        let colors = &s.performance.cpu_by_app.colors;
+        assert_eq!(colors.len(), 64);
+        assert_eq!(colors[0].key, "exe:p6");
+        assert_eq!(colors[63].key, "exe:p69");
+        assert!(changed.contains(&"performance.cpu_by_app.top_n"));
+        assert!(changed.contains(&"performance.cpu_by_app.colors"));
+        // The memory picks are separate.
+        assert!(s.performance.memory_by_app.colors.is_empty());
+        s.performance.cpu_by_app.top_n = 25;
+        s.clamp();
+        assert_eq!(s.performance.cpu_by_app.top_n, 20);
+
+        let text = toml::to_string(&s).unwrap();
+        assert!(text.contains("[performance.cpu_by_app]"), "{text}");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+    }
+
+    /// D-042: `apps` round-trips; an unknown mode loads as `per_core`.
+    #[test]
+    fn cpu_graph_mode_apps_round_trip() {
+        let mut s = Settings::default();
+        s.performance.cpu_graph_mode = CpuGraphMode::Apps;
+        let text = toml::to_string(&s).unwrap();
+        assert!(text.contains("cpu_graph_mode = \"apps\""), "{text}");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+
+        for v in ["\"cores_by_app\"", "3"] {
+            let (s, _) = load_toml(&format!(
+                "[performance]\ncpu_graph_mode = {v}\ngraph_range_s = 300\n"
+            ));
+            assert_eq!(s.performance.cpu_graph_mode, CpuGraphMode::PerCore, "{v}");
+            assert_eq!(s.performance.graph_range_s, 300, "{v}");
+        }
     }
 
     /// crw.104: the board mode and its sort are written and read back.

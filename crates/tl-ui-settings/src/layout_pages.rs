@@ -236,6 +236,7 @@ pub fn cpu_preset(mode: CpuGraphMode) -> &'static str {
         CpuGraphMode::AllCoresOverlaid => PRESET_ALL_CORES_OVERLAID,
         CpuGraphMode::AllCoresStacked => PRESET_ALL_CORES_STACKED,
         CpuGraphMode::Board => PRESET_BOARD,
+        CpuGraphMode::Apps => PRESET_APPS,
     }
 }
 
@@ -691,6 +692,8 @@ mod tests {
                         "cpu total [chart,value,label]".into(),
                         "fixed cpu_core_board".into(),
                     ],
+                    // Not in the loop above: its widgets come with tasklens-qkvs0.7.
+                    Apps => unreachable!(),
                 };
                 let cvl = |k: &str| format!("cpu {k} [chart,value,label]");
                 match graph {

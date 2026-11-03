@@ -171,6 +171,8 @@ pub const fn mode_key(mode: CpuGraphMode) -> &'static str {
         CpuGraphMode::AllCoresOverlaid => KEY_OVERLAID,
         CpuGraphMode::AllCoresStacked => KEY_STACKED,
         CpuGraphMode::Board => KEY_BOARD,
+        // Stand-in until tasklens-qkvs0.7 adds the "By app" mode item and name.
+        CpuGraphMode::Apps => KEY_PER_CORE,
     }
 }
 
@@ -182,6 +184,8 @@ const fn mode_index(mode: CpuGraphMode) -> usize {
         CpuGraphMode::AllCoresOverlaid => 2,
         CpuGraphMode::AllCoresStacked => 3,
         CpuGraphMode::Board => 4,
+        // Stand-in until tasklens-qkvs0.7 adds the "By app" mode item.
+        CpuGraphMode::Apps => 1,
     }
 }
 

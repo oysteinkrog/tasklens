@@ -354,7 +354,7 @@ macro_rules! setting_keys {
 
         impl SettingKey {
             /// Every key in table (a) order.
-            pub const ALL: [SettingKey; 91] = [$(SettingKey::$key,)*];
+            pub const ALL: [SettingKey; 92] = [$(SettingKey::$key,)*];
 
             /// The dotted name, for example `"motion.animations"`. `Fans` is `"fans"`.
             pub fn as_str(self) -> &'static str {
@@ -441,6 +441,7 @@ setting_keys! {
     PerformanceOverviewRange => "performance.overview_range", Performance, Str;
     PerformanceTimelineClick => "performance.timeline_click", Performance, Str;
     PerformanceMemoryByAppTopN => "performance.memory_by_app.top_n", Performance, Int;
+    PerformanceCpuByAppTopN => "performance.cpu_by_app.top_n", Performance, Int;
     Fans => "fans", Fans, Map;
     GraphsMinigraphCpu => "graphs.minigraph_cpu", Graphs, Bool;
     GraphsMinigraphMemory => "graphs.minigraph_memory", Graphs, Bool;
@@ -558,6 +559,7 @@ fn assign(s: &mut Settings, key: SettingKey, value: &SettingValue) -> Result<(),
             K::ProcessesIntervalMs => int(&mut s.processes.interval_ms, *v),
             K::PerformanceGraphRangeS => int(&mut s.performance.graph_range_s, *v),
             K::PerformanceMemoryByAppTopN => int(&mut s.performance.memory_by_app.top_n, *v),
+            K::PerformanceCpuByAppTopN => int(&mut s.performance.cpu_by_app.top_n, *v),
             K::HistoryRetentionH => int(&mut s.history.retention_h, *v),
             K::HistoryMaxDiskMb => int(&mut s.history.max_disk_mb, *v),
             _ => Err("kind mismatch"),
