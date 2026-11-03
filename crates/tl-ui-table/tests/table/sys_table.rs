@@ -6,13 +6,13 @@ use gpui_kit::{
     App, Background, Context, Hsla, IntoElement, ParentElement, Render, Styled, TestAppContext,
     VisualTestContext, Window, div, px,
 };
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::sys_status::{
+use tl_ui_base::i18n::init_strings;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_table::table::sys_status::{
     ConnStateClass, DotStyle, LabelTone, STALE_DOT_ALPHA, StatusLook, SysStatus, cell_colors,
     conn_state_tone, status_cell, status_label, status_look, tone_color,
 };
-use tl_ui::theme::{TlTheme, UiMetrics, current, metrics};
-use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 fn setup(cx: &mut App) {
     gpui_kit::init(cx);
@@ -20,7 +20,7 @@ fn setup(cx: &mut App) {
         active: "Default Dark".to_owned(),
         ..ThemeSettings::default()
     };
-    tl_ui::theme::store::init(cx, &theme, &AppearanceSettings::default(), Vec::new());
+    tl_ui_base::theme::store::init(cx, &theme, &AppearanceSettings::default(), Vec::new());
     init_strings(cx, "en-US");
 }
 
@@ -234,8 +234,8 @@ fn conn_state_tones() {
 
 mod words {
     use gpui_kit::TestAppContext;
-    use tl_ui::i18n::{set_test_catalogue, tr_calls};
-    use tl_ui::pages::sys_status::{SysStatus, status_label};
+    use tl_ui_base::i18n::{set_test_catalogue, tr_calls};
+    use tl_ui_table::table::sys_status::{SysStatus, status_label};
 
     const MARKERS: &str = "sys-sys003-running = [Running]\nsys-sys003-failed = [Failed]\n";
 
@@ -276,11 +276,11 @@ mod query_and_demand {
     use tl_model::health::SourceId;
     use tl_model::table::{StartupColumn, SysColumnId, SysSortSpec, SysTable, SysTableQuery};
     use tl_model::validity::Validity;
-    use tl_ui::app::EngineGlobal;
-    use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator};
-    use tl_ui::host::HostContext;
-    use tl_ui::hub::SnapshotHub;
-    use tl_ui::pages::sys_table::{SysPageState, SysQuery};
+    use tl_ui_base::app_env::EngineGlobal;
+    use tl_ui_base::demand::{DEMAND_COALESCE, DemandAggregator};
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::hub::SnapshotHub;
+    use tl_ui_table::table::sys_table::{SysPageState, SysQuery};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn query() -> SysQuery {
@@ -469,8 +469,8 @@ mod body_states {
     use tl_model::health::{SourceHealth, SourceId, SourceState};
     use tl_model::table::{SysNodeId, SysRow};
     use tl_model::validity::Validity;
-    use tl_ui::actions::{ClearFilter, RefreshCurrentTab};
-    use tl_ui::pages::sys_table::{
+    use tl_ui_kit::actions::{ClearFilter, RefreshCurrentTab};
+    use tl_ui_table::table::sys_table::{
         SysBody, SysBodyInput, SysEmptyButton, SysPageState, render_empty, skeleton_rows, sys_body,
         sys_empty_content,
     };
@@ -798,8 +798,8 @@ mod action_texts {
     use std::sync::Arc;
 
     use tl_model::actions::ActionError;
-    use tl_ui::action_tracker::message;
-    use tl_ui::pages::sys_table::failure_text;
+    use tl_ui_base::action_tracker::message;
+    use tl_ui_table::table::sys_table::failure_text;
 
     const PREFIX: &str = "Failed to start service";
 
@@ -872,9 +872,9 @@ mod sys_actions {
     use tl_model::client::EngineClient;
     use tl_model::command::Command;
     use tl_model::table::{Manager, UnitRef};
-    use tl_ui::action_tracker::{ActionTracker, PushedToast, ToastTexts};
-    use tl_ui::components::toast::{self, ToastKey, ToastKind, ToastQueue};
-    use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
+    use tl_ui_base::action_tracker::{ActionTracker, PushedToast, ToastTexts};
+    use tl_ui_kit::components::toast::{self, ToastKey, ToastKind, ToastQueue};
+    use tl_ui_table::table::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host;
@@ -1037,8 +1037,8 @@ mod sys_actions {
 
     fn choose(r: &mut Rig, selector: &'static str) {
         use gpui_kit::{AnyWindowHandle, Modifiers};
-        use tl_ui::components::dialog::TlDialogView;
-        use tl_ui::components::window_frame::TlSecondaryWindow;
+        use tl_ui_kit::components::dialog::TlDialogView;
+        use tl_ui_kit::components::window_frame::TlSecondaryWindow;
         let found: Option<AnyWindowHandle> = r.vcx.update(|_, cx| {
             cx.windows().into_iter().find(|w| {
                 w.downcast::<Root>()
@@ -1329,8 +1329,8 @@ mod copy {
     };
     use smallvec::SmallVec;
     use tl_model::ids::ColumnId;
-    use tl_ui::components::toast::{self, ToastQueue};
-    use tl_ui::pages::sys_copy::{
+    use tl_ui_kit::components::toast::{self, ToastQueue};
+    use tl_ui_table::table::sys_copy::{
         CopyTexts, SysCopySource, copied_toast_text, copy_cell, copy_row, copy_rows_as_table,
     };
 
@@ -1534,30 +1534,30 @@ mod frame {
         VisualTestContext, Window, WindowBounds, WindowOptions, div, point, px, size,
     };
     use smallvec::SmallVec;
-    use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::health::SourceId;
     use tl_model::snapshot::{ComponentHeader, ComponentMask, Snapshot, StartupSnapshot};
     use tl_model::table::{StartupColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec};
     use tl_model::validity::Validity;
-    use tl_ui::actions::ClearFilter;
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::menu::TlMenu;
-    use tl_ui::host::HostContext;
-    use tl_ui::hub::{GlobalHub, SnapshotChanged};
-    use tl_ui::pages::sys_table::{SysBody, SysDelegate, SysTableFrame, loading_status_text};
-    use tl_ui::table::actions::TABLE_CONTEXT;
-    use tl_ui::table::cells::CellOut;
-    use tl_ui::table::columns::{
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::hub::{GlobalHub, SnapshotChanged};
+    use tl_ui_base::shell::CHIP_H;
+    use tl_ui_base::shell::{GlobalShellEvents, PauseChanged, ShellEvents};
+    use tl_ui_kit::actions::ClearFilter;
+    use tl_ui_kit::components::menu::TlMenu;
+    use tl_ui_pagehost::PageHost;
+    use tl_ui_settings::settings::Settings;
+    use tl_ui_table::table::actions::TABLE_CONTEXT;
+    use tl_ui_table::table::actions::bind_keys_table;
+    use tl_ui_table::table::cells::CellOut;
+    use tl_ui_table::table::columns::{
         Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
     };
-    use tl_ui::table::tree_table::{
+    use tl_ui_table::table::sys_table::{SysBody, SysDelegate, SysTableFrame, loading_status_text};
+    use tl_ui_table::table::tree_table::{
         HEADER_H_ONE, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
         TreeTableDelegate,
     };
-    use tl_ui::window::main::{GlobalShellEvents, PauseChanged};
-    use tl_ui::window::status::CHIP_H;
-    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const NAME: SysColumnId = SysColumnId::Startup(StartupColumn::Name);
@@ -1801,20 +1801,21 @@ mod frame {
 
     fn rig(cx: &mut TestAppContext) -> Rig {
         let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
+        // `TasklensUi::init` installs more than the page host: the key bindings, the toast
+        // queues and the shell event bus.
+        let host = PageHost::install(cx, Arc::clone(&engine), Settings::default());
         cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
+            tl_ui_kit::actions::bind_keys_global(cx);
+            bind_keys_table(cx);
+            tl_ui_kit::actions::register_global_handlers(cx);
+            tl_ui_kit::components::toast::init(cx);
+            tl_ui_base::action_tracker::install(
+                Arc::clone(&host.client),
+                Some(host.hub.clone()),
+                cx,
+            );
+            let events = cx.new(|_| ShellEvents);
+            cx.set_global(GlobalShellEvents(events));
             cx.set_reduce_motion(true);
         });
         let options = WindowOptions {

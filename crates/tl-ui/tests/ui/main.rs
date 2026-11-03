@@ -42,6 +42,5 @@ mod shield;
 mod smart_window;
 mod startup_shell;
 mod status_bar;
-mod sys_table;
 mod theme;
 mod tray_bridge;
