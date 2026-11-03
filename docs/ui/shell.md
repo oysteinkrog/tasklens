@@ -1023,11 +1023,11 @@ x=0, bottom=0
 | Tray | Always show tray icon | switch | `tray.always_show` | P3 |
 | Login | Start at login | switch | `startup.start_at_login` | P2 |
 | Login | Start minimized | switch, indented 16, disabled unless Start at login is on; rewrites the autostart entry through `AppEnv.set_autostart(true, minimized)` (R-236) | `startup.start_minimized` | P2 |
-| Login | Open with Ctrl+Esc | switch, no settings key; reads and writes kglobalaccel through `AppEnv.global_shortcut` (APP-051, R-171); disabled with "Not available" when it is `None`; hidden outside KDE | (none) | P4 |
+| Login | Open with Meta+Esc | switch, no settings key; reads and writes kglobalaccel through `AppEnv.global_shortcut` (APP-051, R-171); disabled with "Not available" when it is `None`; hidden outside KDE | (none) | P4 |
 | Network | Auto-fetch Public IP on launch | switch | `network.auto_fetch_public_ip` | P2 |
 | Memory | Open rescue window on critical memory pressure (tooltip "systemd-oomd may end processes before the rescue window opens.", plus " The watcher runs with normal OOM priority." when `state.lowmem.oom_score_adjust` is 0; an install or remove failure reverts the switch and sends the desktop notification "Could not set up the rescue window"; R-152) | switch | `lowmem.enabled` | P3 |
 
-- "Open with Ctrl+Esc" on failure to stick (U-16 fallback) shows the description "Log out and back in to apply" [S R-080].
+- "Open with Meta+Esc" on failure to stick (U-16 fallback) shows the description "Log out and back in to apply" [S R-080].
 
 ### UI-SHL-070 Settings page: Privileges
 

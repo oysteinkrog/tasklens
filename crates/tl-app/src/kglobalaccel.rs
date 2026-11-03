@@ -157,8 +157,9 @@ fn tasklens_bound(conn: &zbus::blocking::Connection) -> Result<bool, KgaError> {
 }
 
 /// The 4-string action id: component, action, component friendly name, action friendly name.
-fn action_id(component: &str, friendly: &str) -> [String; 4] {
-    [
+/// A `Vec`, so it goes over D-Bus as `as`; an array would be the struct `(ssss)`.
+fn action_id(component: &str, friendly: &str) -> Vec<String> {
+    vec![
         component.to_owned(),
         LAUNCH.to_owned(),
         friendly.to_owned(),
@@ -316,6 +317,24 @@ mod tests {
     fn meta_esc_key_code() {
         assert_eq!(META_ESC, 285_212_672);
         assert_eq!(key_seq(META_ESC), (vec![285_212_672, 0, 0, 0],));
+    }
+
+    #[test]
+    fn dbus_signatures_match_kglobalaccel() {
+        use zbus::zvariant::DynamicType;
+
+        // kf6_org.kde.KGlobalAccel.xml: shortcutKeys(as), setShortcutKeys(as, a(ai), u),
+        // setForeignShortcutKeys(as, a(ai)).
+        let id = action_id(TL_COMPONENT, "tasklens");
+        assert_eq!((&id,).signature().to_string(), "(as)");
+        let keys = vec![key_seq(META_ESC)];
+        assert_eq!(
+            (&id, keys.clone(), SET_PRESENT | NO_AUTOLOADING)
+                .signature()
+                .to_string(),
+            "(asa(ai)u)"
+        );
+        assert_eq!((&id, keys).signature().to_string(), "(asa(ai))");
     }
 
     #[test]

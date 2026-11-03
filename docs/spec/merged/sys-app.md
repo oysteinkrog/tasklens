@@ -1045,7 +1045,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - Pages: General, Appearance, Motion, Units, Processes, Performance, Graphs, Services, Startup and window, Privileges, Advanced.
   - Every key of `settings.toml` in table (a) appears exactly once, with the same label as its menu item where one exists. `state.toml` keys do not appear.
   - Privileges page: the two privilege keys and an "Additional setup…" button (R-028).
-  - Startup and window page: also "Open with Ctrl+Esc" (APP-051), which reads and writes kglobalaccel and has no settings key (inferred).
+  - Startup and window page: also "Open with Meta+Esc" (APP-051), which reads and writes kglobalaccel and has no settings key (inferred).
   - Advanced page: "Import from TaskSlinger…" (APP-034).
   - Changes apply live, except `appearance.decorations` and `rendering.gpu`, which need a restart.
   - TaskSlinger's quick menus are kept; this window adds the settings that have no menu item, mostly from Mission Center.
@@ -1897,15 +1897,15 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Phase: P4 (recorded)
 - Privilege: none
 
-### APP-051 Open tasklens with Ctrl+Esc (KDE)
+### APP-051 Open tasklens with Meta+Esc (KDE)
 - Was: APP-051
 - Source: TS "Set as default Task Manager" (IFEO), Installer option
-- Behaviour: Settings window > Startup and window > "Open with Ctrl+Esc". When on, KDE's Ctrl+Esc opens tasklens instead of Plasma System Monitor. When off, the KDE default comes back. The check state is read from kglobalaccel; there is no settings key.
-- Linux data/mechanism: kglobalaccel D-Bus `org.kde.kglobalaccel /kglobalaccel`. Register `io.github.oysteinkrog.Tasklens.desktop` `_launch` = Ctrl+Esc, and set `org.kde.plasma-systemmonitor.desktop` `_launch` to none, using `setForeignShortcutKeys`.
+- Behaviour: Settings window > Startup and window > "Open with Meta+Esc". When on, Meta+Esc opens tasklens instead of Plasma System Monitor (Plasma 6 binds System Monitor to Meta+Esc). When off, System Monitor gets its default keys back. The check state is read from kglobalaccel; there is no settings key.
+- Linux data/mechanism: kglobalaccel D-Bus `org.kde.kglobalaccel /kglobalaccel`. Set `org.kde.plasma-systemmonitor.desktop` `_launch` to none with `setForeignShortcutKeys`, then `doRegister` `io.github.oysteinkrog.Tasklens.desktop` `_launch` and set it to Meta+Esc with `setShortcutKeys` (`SetPresent | NoAutoloading`). Off sets the tasklens key to none and System Monitor to its `defaultShortcutKeys`.
 - Verdict: ADAPT
 - Phase: P4
 - Privilege: none
-- Verify U-16: whether `setForeignShortcutKeys` sticks for a `.desktop` launch component that is not running. The bead tests it on Plasma 6. If it does not stick, tasklens writes `~/.config/kglobalshortcutsrc` `[services][io.github.oysteinkrog.Tasklens.desktop] _launch=Ctrl+Esc` and asks the user to log out and back in (R-080).
+- U-16 (verified on Plasma 6.8.2): `setForeignShortcutKeys` alone does not stick for a `.desktop` launch component that is not loaded; `doRegister` plus `setShortcutKeys` with `SetPresent` does, at once. If the change still does not read back, tasklens writes `~/.config/kglobalshortcutsrc` `[services][io.github.oysteinkrog.Tasklens.desktop] _launch=Meta+Esc` (or removes that line when off) and asks the user to log out and back in (R-080).
 
 ### APP-052 Command-line arguments
 - Was: APP-052
@@ -2117,7 +2117,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 | APP-048 | Start at login | ADAPT | P2 |
 | APP-049 | Privilege settings (unlock at launch, passwordless) | ADAPT | P3 (unlock at launch), P4 (passwordless) |
 | APP-050 | Updater, installer and related items | DROP | P4 (recorded) |
-| APP-051 | Open tasklens with Ctrl+Esc (KDE) | ADAPT | P4 |
+| APP-051 | Open tasklens with Meta+Esc (KDE) | ADAPT | P4 |
 | APP-052 | Command-line arguments | ADAPT | P1 (`--tab`, `--select-pid`, `--version`, `--help`, `--bench`), P2 (`--start-minimized`), P3 (`--low-memory`, `--watch-memory`, `--force-full-memory-mode`), P4 (`--app-id`, `--debug`) |
 | APP-053 | About window | ADAPT | P2 |
 | APP-054 | Logging | ADAPT | P1 |
@@ -2241,7 +2241,7 @@ Nothing. The open items of this merge were settled in `docs/RECONCILIATION.md`:
 | O-3 Corner radius | R-077 | APP-040 |
 | O-4 About window title | R-078 | APP-045, APP-053 |
 | O-5 `TS1.` share code encoding | R-079 (verify U-17) | APP-038 |
-| O-6 kglobalaccel Ctrl+Esc | R-080 (verify U-16) | APP-051 |
+| O-6 kglobalaccel Meta+Esc | R-080 (verify U-16) | APP-051 |
 | O-7 Number formats and locale | R-081 | APP-043 |
 | O-8 Startup Apps live refresh | R-082 | SYS-019 |
 | O-9 Strings written in this merge | R-083 | APP-001, APP-030, APP-037, APP-039, APP-045 |

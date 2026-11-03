@@ -219,7 +219,7 @@ Usage: tasklens [OPTIONS]
 | Ctrl+Shift+M | Performance mini window |
 | Ctrl+? | All shortcuts |
 | Ctrl+Q | Quit, even with the tray on |
-| Ctrl+Esc | Open tasklens from anywhere (KDE global shortcut, turned on in Settings) |
+| Meta+Esc | Open tasklens from anywhere (KDE global shortcut, turned on in Settings) |
 
 ## Configuration
 

@@ -1505,14 +1505,14 @@ Mission Center's "connections" request turned out to list network interfaces, no
 - Phase: P4 (recorded)
 - Privilege: none
 
-### APP-051 Open tasklens with Ctrl+Esc (KDE)
+### APP-051 Open tasklens with Meta+Esc (KDE)
 - Source: TS "Set as default Task Manager" (IFEO), Installer option
-- Behaviour: Settings > Startup and window > "Open with Ctrl+Esc". When on, KDE's Ctrl+Esc opens tasklens instead of Plasma System Monitor. When off, the KDE default comes back.
-- Linux data/mechanism: kglobalaccel D-Bus `org.kde.kglobalaccel /kglobalaccel`. Register `io.github.oysteinkrog.Tasklens.desktop` `_launch` = Ctrl+Esc, and set `org.kde.plasma-systemmonitor.desktop` `_launch` to none, using `setForeignShortcutKeys`.
+- Behaviour: Settings > Startup and window > "Open with Meta+Esc". When on, Meta+Esc opens tasklens instead of Plasma System Monitor (Plasma 6 binds System Monitor to Meta+Esc). When off, System Monitor gets its default keys back.
+- Linux data/mechanism: kglobalaccel D-Bus `org.kde.kglobalaccel /kglobalaccel`. Set `org.kde.plasma-systemmonitor.desktop` `_launch` to none with `setForeignShortcutKeys`, then `doRegister` `io.github.oysteinkrog.Tasklens.desktop` `_launch` and set it to Meta+Esc with `setShortcutKeys` (`SetPresent | NoAutoloading`).
 - Verdict: ADAPT
 - Phase: P4
 - Privilege: none
-- Open question: whether `setForeignShortcutKeys` sticks for a `.desktop` launch component that is not running. Recommended answer: test on Plasma 6. If it does not stick, write `~/.config/kglobalshortcutsrc` `[services][io.github.oysteinkrog.Tasklens.desktop] _launch=Ctrl+Esc` and ask the user to log out and back in.
+- Answered (U-16, Plasma 6.8.2): `setForeignShortcutKeys` alone does not stick for a `.desktop` launch component that is not loaded; `doRegister` plus `setShortcutKeys` with `SetPresent` does. If the change does not read back, write `~/.config/kglobalshortcutsrc` `[services][io.github.oysteinkrog.Tasklens.desktop] _launch=Meta+Esc` and ask the user to log out and back in.
 
 ### APP-052 Command-line arguments
 - Source: TS 7 and cross-check C.5 | MC `--app-id`/`-a` | PLAN `--bench`
@@ -1712,7 +1712,7 @@ Mission Center's "connections" request turned out to list network interfaces, no
 | APP-048 | Start at login | ADAPT | P2 |
 | APP-049 | Privilege settings | ADAPT | P3 / P4 |
 | APP-050 | Updater, installer and related items | DROP | P4 |
-| APP-051 | Open with Ctrl+Esc (KDE) | ADAPT | P4 |
+| APP-051 | Open with Meta+Esc (KDE) | ADAPT | P4 |
 | APP-052 | Command-line arguments | ADAPT | P1-P4 |
 | APP-053 | About dialog | ADAPT | P2 |
 | APP-054 | Logging | ADAPT | P1 |

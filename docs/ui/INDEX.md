@@ -435,7 +435,7 @@ named show its effects) or "dropped" (the merged spec's verdict).
 | APP-048 | Start at login | ADAPT | P2 | UI-SHL-002, UI-SHL-040, UI-SHL-069, UI-SHL-110 |
 | APP-049 | Privilege settings (unlock at launch, passwordless) | ADAPT | P3 (unlock at launch), P4 (passwordless) | UI-SHL-011, UI-SHL-040, UI-SHL-070, UI-SHL-091 |
 | APP-050 | Updater, installer and related items | DROP | P4 (recorded) | dropped: no updater or installer (UI-SHL-040) |
-| APP-051 | Open tasklens with Ctrl+Esc (KDE) | ADAPT | P4 | UI-SHL-069 |
+| APP-051 | Open tasklens with Meta+Esc (KDE) | ADAPT | P4 | UI-SHL-069 |
 | APP-052 | Command-line arguments | ADAPT | P1 (`--tab`, `--select-pid`, `--version`, `--help`, `--bench`), P2 (`--start-minimized`), P3 (`--low-memory`, `--watch-memory`, `--force-full-memory-mode`), P4 (`--app-id`, `--debug`) | UI-SHL-110, UI-SHL-112 |
 | APP-053 | About window | ADAPT | P2 | UI-SHL-092 |
 | APP-054 | Logging | ADAPT | P1 | UI-SHL-092, UI-SHL-093 |
