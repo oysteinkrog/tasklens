@@ -60,7 +60,7 @@ use tl_ui_settings::layout_boxes::{
 use tl_ui_settings::layout_pages::{
     METRIC_CLOCK, METRIC_COMMIT_PCT, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED, METRIC_DIRTY,
     METRIC_FAN, METRIC_FREQ_MAX, METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_PHYSICAL,
-    METRIC_VRAM_SHARED,
+    METRIC_RESPONSE, METRIC_TOTAL_READ, METRIC_TOTAL_WRITTEN, METRIC_VRAM_SHARED,
 };
 
 use super::grid::{self, InnerGrid, SlotDevice};
@@ -991,6 +991,45 @@ fn memory_page_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
     groups
 }
 
+/// The metrics phase 3 adds on a disk, after the box's, in the order of the ADR-019 phase 3 key
+/// table, with their name keys.
+const DISK_PAGE_METRICS: [(&str, &str); 3] = [
+    (METRIC_RESPONSE, "perf-widget-metric-response"),
+    (METRIC_TOTAL_READ, "perf-widget-metric-total-read"),
+    (METRIC_TOTAL_WRITTEN, "perf-widget-metric-total-written"),
+];
+
+/// The sources of the Disk page of `key` (ADR-019 phase 3 "Source lists"): the Disk box's list,
+/// with the phase 3 keys the disk reports after the box's metrics of that disk.
+fn disk_page_source_groups(key: &str, snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
+    let mut groups = disk_source_groups(snap, cx);
+    let Some(entry) = snap.devices.entries.iter().filter(|e| e.present).find(|e| {
+        *e.persistent_key == *key
+            || DeviceKey::from_identity(&e.identity).is_some_and(|k| *k.0 == *key)
+    }) else {
+        return groups;
+    };
+    for group in groups.iter_mut().filter(|g| *g.key == *key) {
+        for (metric_key, name_key) in DISK_PAGE_METRICS {
+            let metric = MetricKey::new(metric_key);
+            let (value, _) = box_reading(DeviceKind::Disk, &metric, snap, entry.idx, None);
+            if value.validity == Validity::Unsupported {
+                continue;
+            }
+            group.items.push(SourceItem {
+                offered: MetricMeta::of(DeviceKind::Disk, &metric).map_or(FormSet::empty(), |m| {
+                    m.offered_forms(Some((snap, entry.idx)))
+                }),
+                metric,
+                label: tr(cx, name_key),
+                engine: false,
+                device: None,
+            });
+        }
+    }
+    groups
+}
+
 /// The sources of the device page `container` on `snap` (ADR-019 phase 3 "Source lists"): the
 /// metrics of the page's own device, from the box lists. Only the CPU and GPU pages offer a
 /// group: the CPU page "All cores >" (`tasklens-hzire.5`), the GPU page "All engines"
@@ -1000,7 +1039,8 @@ pub fn page_source_groups(container: &str, snap: &Snapshot, cx: &App) -> Vec<Sou
         return Vec::new();
     };
     let groups = match DeviceKind::of_key(key) {
-        DeviceKind::Disk | DeviceKind::Disks => disk_source_groups(snap, cx),
+        DeviceKind::Disk => disk_page_source_groups(key, snap, cx),
+        DeviceKind::Disks => disk_source_groups(snap, cx),
         DeviceKind::Gpu => return gpu_page_source_groups(key, snap, cx),
         DeviceKind::Cpu => return cpu_page_source_groups(snap, cx),
         DeviceKind::Memory => return memory_page_source_groups(snap, cx),
