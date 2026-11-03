@@ -9,9 +9,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EntityId, Focusable as _, IntoElement, Modifiers,
-    ParentElement as _, Pixels, Render, StyleRefinement, Styled as _, Subscription, TestAppContext,
-    VisualTestContext, Window, div, px, size,
+    App, AppContext as _, Context, Entity, EntityId, Focusable as _, Global, IntoElement,
+    Modifiers, ParentElement as _, Pixels, Render, StyleRefinement, Styled as _, Subscription,
+    TestAppContext, VisualTestContext, Window, div, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
@@ -26,6 +26,7 @@ use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::shell::{ProcessJump, ShellApi, ShellState};
 use tl_ui_chart::chart::ChartView;
 use tl_ui_kit::components::kv_grid;
 use tl_ui_overview::overview::cpu_box::{
@@ -1019,12 +1020,57 @@ fn overview_cpu_by_app_edit_add_remove_apply(cx: &mut TestAppContext) {
     assert!(!r.sweep(), "no sweep once removed");
 }
 
-/// UI-PRF-062 "Interaction": a click on a group's legend row in the box opens that group (the
-/// `processes::` legend click tests follow it into the Processes tab); "Other apps" opens
-/// nothing.
+/// The Processes jumps the recording shell got, in call order.
+#[derive(Default)]
+struct Jumps(Vec<ProcessJump>);
+
+impl Global for Jumps {}
+
+/// Installs a `ShellApi` that records each Processes jump in [`Jumps`] and drops every other
+/// call, and marks the rig's window as the main view so `ShellState::main_view_open` is true.
+fn record_jumps(r: &mut Rig) {
+    let host = r._host.downgrade();
+    r.vcx.update(|_, cx| {
+        cx.set_global(Jumps::default());
+        cx.set_global(ShellApi {
+            toast: |_, _, _, _, _| {},
+            main_toasts: |_| None,
+            select_tab: |_, _, _| {},
+            page: |_, _| None,
+            filter_text: |_, _| None,
+            set_group_chip: |_, _| {},
+            note_restricted: |_, _| false,
+            public_ip_fetch: |_, _, _| {},
+            process_jump: |_, cx, jump| cx.default_global::<Jumps>().0.push(jump),
+            disk_eject: |_, _| {},
+        });
+        cx.default_global::<ShellState>().main_view = Some(host.into());
+    });
+}
+
+/// The group key and name of each memory group jump so far.
+fn group_jumps(r: &mut Rig) -> Vec<(String, String)> {
+    r.vcx.update(|_, cx| {
+        cx.global::<Jumps>()
+            .0
+            .iter()
+            .map(|j| match j {
+                ProcessJump::MemGroup { key, name } => (key.to_string(), name.to_string()),
+                other => panic!("not a group jump: {other:?}"),
+            })
+            .collect()
+    })
+}
+
+/// UI-PRF-062 "Interaction": a click on a group's legend row in the box opens the Processes
+/// tab filtered to that group. The shell gets one `ProcessJump::MemGroup` with the group's key
+/// and name, which `ProcessesPage::open_mem_group` turns into the group filter and the
+/// "Group: <name>" chip (the tl-ui `processes::` legend click tests run that part on the real
+/// main window). "Other apps" and the system bands open nothing.
 #[gpui_kit::test]
 fn overview_cpu_by_app_legend_click(cx: &mut TestAppContext) {
     let mut r = open(cx, 4, 1200., 900.);
+    record_jumps(&mut r);
     r.set_mode("apps");
     r.publish_cpu_groups(&[20., 10., 5.]);
     let id = apps_of(&r.flow()).expect("the cpu_by_app widget");
@@ -1034,20 +1080,40 @@ fn overview_cpu_by_app_legend_click(cx: &mut TestAppContext) {
         r.vcx
             .update(|_, cx| chart.read(cx).last_open.clone().map(|(k, _)| k))
     };
+    let click = |r: &mut Rig, row: usize| {
+        let row = r.bounds_of(format!("{LEGEND_ID}-{row}"));
+        assert!(widget.contains(&row.center()), "{row:?} in {widget:?}");
+        r.vcx.simulate_click(row.center(), Modifiers::none());
+        draw(r.vcx);
+    };
     // Rows: Other apps, p2, p1, p0, then the system bands under the divider.
-    let row = r.bounds_of(format!("{LEGEND_ID}-0"));
-    r.vcx.simulate_click(row.center(), Modifiers::none());
-    draw(r.vcx);
+    click(&mut r, 0);
     assert_eq!(opened(&mut r), None, "Other apps opens nothing");
-    let row = r.bounds_of(format!("{LEGEND_ID}-1"));
-    assert!(widget.contains(&row.center()), "{row:?} in {widget:?}");
-    r.vcx.simulate_click(row.center(), Modifiers::none());
-    draw(r.vcx);
+    click(&mut r, 4);
+    assert_eq!(opened(&mut r), None, "a system band opens nothing");
+    assert_eq!(
+        group_jumps(&mut r),
+        [],
+        "no jump for Other apps or a system band"
+    );
+
+    click(&mut r, 1);
     assert_eq!(opened(&mut r).as_deref(), Some("exe:p2"));
-    let row = r.bounds_of(format!("{LEGEND_ID}-3"));
-    r.vcx.simulate_click(row.center(), Modifiers::none());
-    draw(r.vcx);
+    assert_eq!(
+        group_jumps(&mut r),
+        [("exe:p2".to_string(), "p2".to_string())],
+        "Processes opens filtered to p2"
+    );
+    click(&mut r, 3);
     assert_eq!(opened(&mut r).as_deref(), Some("exe:p0"));
+    assert_eq!(
+        group_jumps(&mut r),
+        [
+            ("exe:p2".to_string(), "p2".to_string()),
+            ("exe:p0".to_string(), "p0".to_string())
+        ],
+        "one jump per click, filtered to the clicked group"
+    );
 }
 
 /// Counts the widget, chart and by-app entities made, and the watched ones dropped.
