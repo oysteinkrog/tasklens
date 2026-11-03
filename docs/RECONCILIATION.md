@@ -2090,6 +2090,14 @@ overview_range = "1m"          # 1m | 5m | 1h | 24h | 7d; the Overview ignores g
 overview_row_unit_px = 40      # 24..=80, snap grid row height in logical px (UI-PRF-056, P2)
 timeline_click = "pause"       # pause | preview | history; history only while history.enabled (UI-PRF-057, P2)
 
+[performance.memory_by_app]     # UI-PRF-060 (D-036)
+top_n = 10                     # 3..=20
+colors = []                    # { key = "<group key>", slot = 0..=11 }, at most 64, least recently shown first
+
+[performance.cpu_by_app]        # UI-PRF-062 (D-042)
+top_n = 10                     # 3..=20, separate from memory_by_app
+colors = []                    # as memory_by_app; the CPU chart's own picks
+
 [[performance.layouts]]         # P2, ADR-019 (D-041): one entry per widget container; none by default
 container = "overview.gpu"     # overview.cpu | overview.memory | overview.gpu | overview.disk | overview.net | overview.processes | overview.timeline;
 #   page.<persistent device key> for a device page (phase 3): page.cpu, page.memory, page.gpu:<id>, page.disk:<id>, page.net:<id>,

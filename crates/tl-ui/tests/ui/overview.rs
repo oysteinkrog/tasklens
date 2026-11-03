@@ -525,8 +525,8 @@ mod wired {
             let entries = layout_entries(r);
             r.vcx.simulate_keystrokes("escape");
             draw(r.vcx);
-            // The four mode radios come first.
-            entries[4..].to_vec()
+            // The five mode radios come first.
+            entries[5..].to_vec()
         };
         // The Arrange submenu closes the list, after a separator.
         let arrange = || (MenuEntryKind::Submenu, "Arrange".to_owned(), None, false);
@@ -628,6 +628,7 @@ mod wired {
                 ("Chart".to_owned(), false),
                 ("Cores".to_owned(), false),
                 ("Core charts".to_owned(), false),
+                ("By app".to_owned(), false),
                 // The default snapshot reads as RAPL readable.
                 (String::new(), false),
                 ("Show power draw".to_owned(), false),
@@ -713,6 +714,7 @@ mod wired {
                 ("Chart".to_owned(), false),
                 ("Cores".to_owned(), false),
                 ("Core charts".to_owned(), false),
+                ("By app".to_owned(), false),
                 // The default snapshot reads as RAPL readable.
                 (String::new(), false),
                 ("Show power draw".to_owned(), false),

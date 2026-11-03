@@ -221,6 +221,15 @@ pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
         1,
         SharedString::default(),
     );
+    // UI-PRF-062: the bands of the CPU "By app" chart.
+    page.number(
+        memory.clone(),
+        SettingKey::PerformanceCpuByAppTopN,
+        tr(cx, "shell-settings-perf-cpu-groups"),
+        i64::from(min)..=i64::from(max),
+        1,
+        SharedString::default(),
+    );
 
     let optional = CheckSection {
         heading: SharedString::default(),

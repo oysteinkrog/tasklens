@@ -3609,6 +3609,7 @@ shell-settings-perf-timeline-click = Timeline click
 shell-settings-perf-memory-composition = Show memory composition
 shell-settings-perf-swap = Show swap usage
 shell-settings-perf-memory-groups = Memory groups shown in By app
+shell-settings-perf-cpu-groups = CPU by app groups shown
 shell-settings-perf-gpu-optional = Optional GPU graphs
 shell-settings-perf-gpu-power = Power
 shell-settings-perf-gpu-clocks = Clocks
