@@ -201,19 +201,26 @@ impl Default for CpuByAppSettings {
     }
 }
 
+thread_local! {
+    /// Set when `performance.cpu_graph_mode` held an unknown name or a wrong type. The next
+    /// `Settings::clamp` on this thread reports the key and clears the flag.
+    static CPU_GRAPH_MODE_BAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Reads `performance.cpu_graph_mode`; an unknown name or a value of the wrong type loads as
-/// the default, `per_core`, instead of failing the whole `[performance]` section.
+/// the default, `per_core`, instead of failing the whole `[performance]` section. It also
+/// raises `CPU_GRAPH_MODE_BAD`, so `clamp` reports the key for one warn line.
 fn lenient_cpu_graph_mode<'de, D>(d: D) -> Result<CpuGraphMode, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(Loose::<CpuGraphMode>::deserialize(d).map_or_else(
-        |_| CpuGraphMode::default(),
-        |v| match v {
-            Loose::Value(m) => m,
-            Loose::Bad(_) => CpuGraphMode::default(),
-        },
-    ))
+    Ok(match Loose::<CpuGraphMode>::deserialize(d) {
+        Ok(Loose::Value(m)) => m,
+        _ => {
+            CPU_GRAPH_MODE_BAD.with(|f| f.set(true));
+            CpuGraphMode::default()
+        }
+    })
 }
 
 /// One colour pick: a memory group key and its slot in `GraphPalette.groups`.
@@ -2154,6 +2161,9 @@ impl Settings {
     pub fn clamp(&mut self) -> Vec<&'static str> {
         let mut changed = Vec::new();
         let c = &mut changed;
+        if CPU_GRAPH_MODE_BAD.with(|f| f.replace(false)) {
+            c.push("performance.cpu_graph_mode");
+        }
         let a = &mut self.appearance;
         clamp_key(
             &mut a.ui_scale_pct,
@@ -2888,9 +2898,10 @@ mod tests {
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
 
         for v in ["\"cores_by_app\"", "3"] {
-            let (s, _) = load_toml(&format!(
+            let (s, changed) = load_toml(&format!(
                 "[performance]\ncpu_graph_mode = {v}\ngraph_range_s = 300\n"
             ));
+            assert!(changed.contains(&"performance.cpu_graph_mode"), "{v}");
             assert_eq!(s.performance.cpu_graph_mode, CpuGraphMode::PerCore, "{v}");
             assert_eq!(s.performance.graph_range_s, 300, "{v}");
         }
