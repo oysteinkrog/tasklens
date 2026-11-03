@@ -35,9 +35,13 @@
 //!
 //! [`AppsChart`] serves a metric kind, [`AppsMetric`] (UI-PRF-062 "Build"). The kind picks the
 //! metric id, the fixed bands and their colours, the value format, the Y scale and the settings
-//! section. Ranking, colour picks, legend, hover, stacking and history reads are shared. This
-//! file fills in the Memory kind; the Cpu kind's bands, words and settings come with
-//! tasklens-qkvs0.8, and nothing makes a Cpu chart before that.
+//! section. Ranking, colour picks, legend, hover, stacking and history reads are shared.
+//!
+//! The Cpu kind (UI-PRF-062, D-042) stacks `CPU_GROUP` in percent of all CPUs on 0..100: the top
+//! N groups, "Other apps", then the five system bands ([`CPU_BANDS`]). The top of the stack is
+//! busy CPU. A group whose mean over the range is below [`CPU_RANK_FLOOR`] is not ranked and
+//! counts in "Other apps". A group with no CPU colour pick takes the slot of its memory pick
+//! when that slot is free ([`pick_colors_seeded`]); the chart never writes the memory picks.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -58,8 +62,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::system::{MemGroupBand, WineGroupInfo};
 use tl_model::units;
 use tl_ui_settings::settings::{
-    GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS, MEMORY_BY_APP_TOP_N,
-    PerformanceSettings,
+    GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS, PerformanceSettings,
 };
 use tracing::warn;
 
@@ -69,7 +72,7 @@ use super::timeline::{self, OverviewPause};
 use tl_ui_base::hub::{ComponentMask, HostClock, SnapshotChanged, SnapshotHub};
 use tl_ui_base::i18n::{Strings, tr};
 use tl_ui_base::selector::TlSelector;
-use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::settings_global::{Section, SettingKey, SettingValue, TlSettings};
 use tl_ui_base::shell::{ProcessJump, ShellApi, ShellState};
 use tl_ui_base::template::Template;
 use tl_ui_base::text::style::{numeric_style, t_sm};
@@ -107,6 +110,28 @@ pub const KERNEL_PARTS: [(&str, f32, bool); 6] = [
     ("k:filecache", 0.50, true),
 ];
 
+/// The five system bands of CPU by app, bottom first (UI-PRF-062 "System bands"): key, fill
+/// alpha against `cpu_fill`, and whether the value is worked out rather than read. Only
+/// "Short-lived processes" is worked out.
+pub const CPU_BANDS: [(&str, f32, bool); 5] = [
+    ("cpu:kthreads", 0.25, false),
+    ("cpu:irq", 0.30, false),
+    ("cpu:softirq", 0.35, false),
+    ("cpu:steal", 0.40, false),
+    ("cpu:short", 0.45, true),
+];
+/// The Fluent keys of the names of [`CPU_BANDS`], in the same order.
+const CPU_BAND_KEYS: [&str; 5] = [
+    "perf-cpu-apps-kthreads",
+    "perf-cpu-apps-irq",
+    "perf-cpu-apps-softirq",
+    "perf-cpu-apps-steal",
+    "perf-cpu-apps-short",
+];
+/// A CPU group whose mean over the visible range is below this many percent is not ranked; it
+/// counts in "Other apps" (UI-PRF-062 "Top N").
+pub const CPU_RANK_FLOOR: f64 = 0.05;
+
 /// What an [`AppsChart`] shows (UI-PRF-062 "Build"). Everything that differs between the
 /// kinds is here; the chart code is shared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,9 +139,8 @@ pub enum AppsMetric {
     /// Memory by app (UI-PRF-060): series `MEM_GROUP` in bytes, 0..MemTotal, the six parts of
     /// "Shared and kernel" as fixed bands, `performance.memory_by_app`.
     Memory,
-    /// CPU by app (UI-PRF-062): series `CPU_GROUP` in percent of all CPUs, 0..100. Its fixed
-    /// bands, words and settings section come with tasklens-qkvs0.8; until then it has no fixed
-    /// bands, the default top N and no saved colour picks.
+    /// CPU by app (UI-PRF-062): series `CPU_GROUP` in percent of all CPUs, 0..100, the five
+    /// system bands of [`CPU_BANDS`] as fixed bands, `performance.cpu_by_app`.
     Cpu,
 }
 
@@ -143,7 +167,25 @@ impl AppsMetric {
     pub fn fixed_bands(self) -> &'static [(&'static str, f32, bool)] {
         match self {
             Self::Memory => &KERNEL_PARTS,
-            Self::Cpu => &[],
+            Self::Cpu => &CPU_BANDS,
+        }
+    }
+
+    /// The Fluent keys of the fixed band names, in [`fixed_bands`](Self::fixed_bands) order.
+    /// Empty when the bands take their names from the device catalog (Memory).
+    fn fixed_name_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Memory => &[],
+            Self::Cpu => &CPU_BAND_KEYS,
+        }
+    }
+
+    /// The smallest mean over the visible range that a group is ranked with; below it the
+    /// group counts in "Other apps". Memory ranks every group with data.
+    fn rank_floor(self) -> f64 {
+        match self {
+            Self::Memory => 0.,
+            Self::Cpu => CPU_RANK_FLOOR,
         }
     }
 
@@ -221,16 +263,15 @@ impl AppsMetric {
     }
 
     /// The page chart's value: In use from the memory totals (a sum of the bands would show
-    /// "-" while a ranked group has no sample at the newest time).
-    fn value_text(self, snap: &Snapshot) -> Option<SharedString> {
+    /// "-" while a ranked group has no sample at the newest time), or busy CPU, the top of the
+    /// stack at the newest sample (`stack_top`).
+    fn value_text(self, snap: &Snapshot, stack_top: f64) -> Option<SharedString> {
+        let mut text = String::new();
         match self {
-            Self::Memory => {
-                let mut text = String::new();
-                units::bytes(&mut text, snap.system.memory.used);
-                Some(SharedString::from(text))
-            }
-            Self::Cpu => None,
+            Self::Memory => units::bytes(&mut text, snap.system.memory.used),
+            Self::Cpu => units::percent(&mut text, stack_top.max(0.) as f32),
         }
+        Some(SharedString::from(text))
     }
 
     /// The Fluent keys of the page chart's heading and range word.
@@ -244,30 +285,59 @@ impl AppsMetric {
         }
     }
 
+    /// The Fluent keys of the tooltip's share line and of the estimate line of a worked-out
+    /// fixed band.
+    fn tooltip_keys(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Memory => ("perf-mem-apps-share", "perf-mem-apps-estimate"),
+            Self::Cpu => ("perf-cpu-apps-share", "perf-cpu-apps-estimate"),
+        }
+    }
+
     /// Groups drawn as their own band, from the kind's settings section.
     fn top_n(self, s: &PerformanceSettings) -> usize {
         match self {
             Self::Memory => usize::from(s.memory_by_app.top_n),
-            Self::Cpu => usize::from(MEMORY_BY_APP_TOP_N.1),
+            Self::Cpu => usize::from(s.cpu_by_app.top_n),
         }
+    }
+
+    /// Sets the kind's `top_n` setting (the "Groups shown" items: 5, 10, 15 and 20).
+    pub fn set_top_n(self, count: u8, cx: &mut App) {
+        let key = match self {
+            Self::Memory => SettingKey::PerformanceMemoryByAppTopN,
+            Self::Cpu => SettingKey::PerformanceCpuByAppTopN,
+        };
+        TlSettings::set(cx, key, SettingValue::Int(i64::from(count)));
     }
 
     /// The saved colour picks of the kind's settings section.
     fn picks(self, s: &PerformanceSettings) -> Vec<GroupColor> {
         match self {
             Self::Memory => s.memory_by_app.colors.clone(),
-            Self::Cpu => Vec::new(),
+            Self::Cpu => s.cpu_by_app.colors.clone(),
         }
     }
 
-    /// Saves the colour picks to the kind's settings section.
-    fn save_picks(self, picks: Vec<GroupColor>, cx: &mut App) {
+    /// The picks a group with no pick of its own takes its slot from when that slot is free:
+    /// for Cpu the memory picks, read only (UI-PRF-062 "Colours"). Memory has none.
+    fn seed_picks(self, s: &PerformanceSettings) -> &[GroupColor] {
         match self {
-            Self::Memory => {
-                TlSettings::update(cx, |d| d.settings.performance.memory_by_app.colors = picks);
-            }
-            Self::Cpu => {}
+            Self::Memory => &[],
+            Self::Cpu => &s.memory_by_app.colors,
         }
+    }
+
+    /// Saves the colour picks to the kind's settings section. The CPU chart never writes the
+    /// memory picks.
+    fn save_picks(self, picks: Vec<GroupColor>, cx: &mut App) {
+        TlSettings::update(cx, |d| {
+            let p = &mut d.settings.performance;
+            match self {
+                Self::Memory => p.memory_by_app.colors = picks,
+                Self::Cpu => p.cpu_by_app.colors = picks,
+            }
+        });
     }
 }
 
@@ -399,6 +469,18 @@ fn key_hash(key: &str) -> u64 {
 /// keys then move to the end of `picks` (most recently shown last; saved keys keep their order
 /// among themselves, so rank never decides it), and the oldest picks past 64 are dropped.
 pub fn pick_colors(picks: &mut Vec<GroupColor>, shown: &[Arc<str>]) -> (Vec<u8>, bool) {
+    pick_colors_seeded(picks, &[], shown)
+}
+
+/// [`pick_colors`] with `seed`, the picks of another chart, read only (UI-PRF-062: the memory
+/// picks for CPU by app). After the saved picks, a shown key with no saved pick takes the slot
+/// of its pick in `seed` when that slot is still free, most recent seed pick first. Every other
+/// key follows the [`pick_colors`] rules. A key that took a seeded slot is saved in `picks`.
+pub fn pick_colors_seeded(
+    picks: &mut Vec<GroupColor>,
+    seed: &[GroupColor],
+    shown: &[Arc<str>],
+) -> (Vec<u8>, bool) {
     let n = usize::from(MEMORY_BY_APP_SLOTS);
     let mut slots: Vec<Option<u8>> = vec![None; shown.len()];
     let mut used = vec![false; n];
@@ -406,6 +488,17 @@ pub fn pick_colors(picks: &mut Vec<GroupColor>, shown: &[Arc<str>]) -> (Vec<u8>,
         let s = usize::from(p.slot) % n;
         if let Some(i) = shown.iter().position(|k| **k == p.key)
             && !used[s]
+        {
+            slots[i] = Some(s as u8);
+            used[s] = true;
+        }
+    }
+    for p in seed.iter().rev() {
+        let s = usize::from(p.slot) % n;
+        if let Some(i) = shown.iter().position(|k| **k == p.key)
+            && slots[i].is_none()
+            && !used[s]
+            && !picks.iter().any(|q| q.key == p.key)
         {
             slots[i] = Some(s as u8);
             used[s] = true;
@@ -610,8 +703,11 @@ pub struct AppsWords {
     pub groups_shown: SharedString,
     /// The name of [`BandKind::Shared`] while the parts are published.
     pub shared_older: SharedString,
-    /// The tooltip line of the parts that are worked out.
+    /// The tooltip line of the fixed bands that are worked out.
     pub estimate: SharedString,
+    /// The names of the fixed bands in [`AppsMetric::fixed_bands`] order; empty when they take
+    /// the device catalog's names (Memory).
+    pub fixed_names: SmallVec<[SharedString; 6]>,
     pub wine_images: Option<Template>,
     pub wine_prefix: Option<Template>,
 }
@@ -624,12 +720,13 @@ impl AppsWords {
         }
         *version = v;
         let (heading, range) = metric.word_keys();
+        let (share, estimate) = metric.tooltip_keys();
         *self = AppsWords {
             heading: tr(cx, heading),
             range: tr(cx, range),
             more: Some(Template::new(cx, "perf-mem-apps-more", &["count"])),
             count: Some(Template::new(cx, "perf-mem-apps-count", &["count"])),
-            share: Some(Template::new(cx, "perf-mem-apps-share", &["share"])),
+            share: Some(Template::new(cx, share, &["share"])),
             processes: Some(Template::counted(
                 cx,
                 "perf-mem-apps-processes",
@@ -638,7 +735,12 @@ impl AppsWords {
             )),
             groups_shown: tr(cx, "perf-mem-apps-groups-shown"),
             shared_older: tr(cx, "perf-mem-apps-shared-older"),
-            estimate: tr(cx, "perf-mem-apps-estimate"),
+            estimate: tr(cx, estimate),
+            fixed_names: metric
+                .fixed_name_keys()
+                .iter()
+                .map(|key| tr(cx, key))
+                .collect(),
             wine_images: Some(Template::new(cx, "perf-mem-apps-wine-images", &["names"])),
             wine_prefix: Some(Template::new(cx, "perf-mem-apps-wine-prefix", &["path"])),
         };
@@ -1183,22 +1285,33 @@ impl AppsChart {
                 }
             }
         }
+        // A group below the kind's floor is not ranked; its samples fold into "Other apps", so
+        // the stack still sums to the total.
+        let floor = metric.rank_floor();
+        let (means, small): (Vec<_>, Vec<_>) = means.into_iter().partition(|m| m.1 >= floor);
         self.ranker.rank(&means, newest.unwrap_or(0), force);
         let kernel_on = self.kernel_bands_on(newest);
 
         let (top, rest) = split_top(self.ranker.order(), self.settings.top_n);
+        let mut rest = rest.to_vec();
+        rest.extend(
+            small
+                .into_iter()
+                .map(|m| m.0)
+                .filter(|k| !self.ranker.order().contains(k)),
+        );
         let total = metric.total(snap);
         // A fixed band whose device arrives or moves needs new bands too, even with no group
         // ranked.
         let structure_changed = top != self.top.as_slice()
-            || rest != self.rest.as_slice()
+            || rest != self.rest
             || total != self.total
             || (self.other, self.aggregate, &self.parts) != (fixed.0, fixed.1, &fixed.2)
             || kernel_on != self.kernel_on
             || force;
         if structure_changed {
             self.top = top.to_vec();
-            self.rest = rest.to_vec();
+            self.rest = rest;
             self.total = total;
             self.kernel_on = kernel_on;
             self.build_bands(cx);
@@ -1212,7 +1325,7 @@ impl AppsChart {
             // The box frame shows the value.
             return;
         }
-        let text = metric.value_text(snap);
+        let text = metric.value_text(snap, self.bands.iter().map(|b| b.value).sum());
         self.chart.update(cx, |v, cx| v.set_value_text(text, cx));
     }
 
@@ -1221,8 +1334,10 @@ impl AppsChart {
     fn build_bands(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
         let metric = self.metric;
-        let mut picks = metric.picks(&TlSettings::settings(cx).performance);
-        let (slots, changed) = pick_colors(&mut picks, &self.top);
+        let performance = &TlSettings::settings(cx).performance;
+        let mut picks = metric.picks(performance);
+        let (slots, changed) =
+            pick_colors_seeded(&mut picks, metric.seed_picks(performance), &self.top);
         if changed {
             metric.save_picks(picks, cx);
         }
@@ -1307,9 +1422,15 @@ impl AppsChart {
             let Some(device) = part.filter(|_| self.kernel_on[i + 1]) else {
                 continue;
             };
+            let name = self
+                .words
+                .fixed_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| name_of(key, Some(device)));
             bands.push(Band {
                 key: Arc::from(key),
-                name: name_of(key, Some(device)),
+                name,
                 kind: BandKind::Kernel(i as u8),
                 color: Hsla {
                     a: fill.a * alpha,
@@ -1398,6 +1519,12 @@ impl AppsChart {
         None
     }
 
+    /// The top of the stack at `t`: the sum of every band's value there. For Cpu it is busy
+    /// CPU, for Memory In use.
+    pub fn stack_top(&self, t: u64) -> f64 {
+        self.bands.iter().map(|b| self.band_value(b, t)).sum()
+    }
+
     /// The value of `band` at `t`: the sum of its series, or for [`BandKind::Shared`] the part
     /// of the aggregate (`memgroup:shared`) the fixed bands do not cover.
     fn band_value(&self, band: &Band, t: u64) -> f64 {
@@ -1468,8 +1595,16 @@ impl AppsChart {
         }
         self.strings_version = version;
         let shared = self.shared_name(cx);
-        for band in self.bands.iter_mut().filter(|b| b.kind == BandKind::Shared) {
-            band.name = shared.clone();
+        for band in self.bands.iter_mut() {
+            match band.kind {
+                BandKind::Shared => band.name = shared.clone(),
+                BandKind::Kernel(i) => {
+                    if let Some(name) = self.words.fixed_names.get(usize::from(i)) {
+                        band.name = name.clone();
+                    }
+                }
+                BandKind::Group(_) | BandKind::Other => {}
+            }
         }
         let labels = Self::labels_of(self.metric, self.place, &self.words);
         self.chart.update(cx, |v, cx| v.set_labels(labels, cx));
@@ -1608,7 +1743,7 @@ impl AppsChart {
         // Performance page and its children.
         window.defer(cx, move |window, cx| {
             if !ShellState::main_view_open(cx) {
-                warn!(target: "tasklens::ui", "no main window for the memory legend click");
+                warn!(target: "tasklens::ui", "no main window for the by app legend click");
                 return;
             }
             ShellApi::process_jump(window, cx, ProcessJump::MemGroup { key, name });
