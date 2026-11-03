@@ -4013,6 +4013,8 @@ mod page {
             ("Chart", false),
             ("Cores", false),
             ("Core charts", false),
+            // CPU by app (UI-PRF-062).
+            ("By app", false),
             // The default snapshot reads as RAPL readable: a separator and the power item.
             ("", false),
             ("Show power draw", false),
