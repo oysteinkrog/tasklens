@@ -2469,6 +2469,7 @@ fn cgroup_cpu_baselines_pruned() {
 
         // Sweep 4: firefox comes back with no baseline, so no delta; session-2 +600 000 us
         // from the value after the drop (6%).
+        fs::create_dir(root.proc_path("4201")).expect("create 4201");
         overlay(
             &fixture_dir("process-edge").join("proc/4201"),
             &root.proc_path("4201"),
