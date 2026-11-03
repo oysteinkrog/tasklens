@@ -3719,7 +3719,7 @@ mod sweep {
     use tl_ui_base::i18n::init_strings;
     use tl_ui_base::settings_global::TlSettings;
     use tl_ui_overview::overview::cpu_box::{
-        CORE_CHARTS_ID, CPU_CHART_ID, CpuBox, POWER_STRIP_ID, core_chart_id,
+        CORE_CHARTS_ID, CPU_APPS_ID, CPU_CHART_ID, CpuBox, POWER_STRIP_ID, core_chart_id,
     };
     use tl_ui_overview::overview::disk_box::{self, DiskBox};
     use tl_ui_overview::overview::fit::{
@@ -4075,7 +4075,11 @@ mod sweep {
                 ]);
             }
             BoxKind::Cpu => {
-                ids.extend([CPU_CHART_ID.to_owned(), POWER_STRIP_ID.to_owned()]);
+                ids.extend([
+                    CPU_CHART_ID.to_owned(),
+                    CPU_APPS_ID.to_owned(),
+                    POWER_STRIP_ID.to_owned(),
+                ]);
                 for i in 0..usize::from(CPUS) {
                     ids.extend([core_spark_id(i), core_chart_id(i)]);
                 }
