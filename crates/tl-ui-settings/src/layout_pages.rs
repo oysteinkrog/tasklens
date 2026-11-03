@@ -35,8 +35,14 @@ pub const PAGE_GRID_COLS: u16 = 12;
 
 /// The device kinds whose pages this build shows as widget containers. Each page bead adds its
 /// kind (`tasklens-hzire.3` to `.9`). `tasklens-hzire.3` adds Aggregate storage,
-/// `tasklens-hzire.4` the GPU pages and `tasklens-hzire.5` the CPU page.
-pub const PAGE_KINDS: &[DeviceKind] = &[DeviceKind::Disks, DeviceKind::Gpu, DeviceKind::Cpu];
+/// `tasklens-hzire.4` the GPU pages, `tasklens-hzire.5` the CPU page and `tasklens-hzire.6`
+/// the Memory page.
+pub const PAGE_KINDS: &[DeviceKind] = &[
+    DeviceKind::Disks,
+    DeviceKind::Gpu,
+    DeviceKind::Cpu,
+    DeviceKind::Memory,
+];
 
 /// Every device kind that has a page: CPU, Memory, GPU, disk, Aggregate storage, adapter,
 /// fan, battery and Aggregate graphics.
