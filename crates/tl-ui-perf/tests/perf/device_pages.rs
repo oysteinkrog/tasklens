@@ -60,6 +60,7 @@ use tl_ui_perf::performance::net::{
     NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
 };
 use tl_ui_perf::performance::page::{DevicePage, PlaceholderPage, build_page};
+use tl_ui_perf::performance::page_flow::memory::BLOCKS;
 use tl_ui_perf::performance::sensors::{BatteryPage, FanPage, local_midnights};
 use tl_ui_perf::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformancePage, PerformanceSettingsView, sidebar_order,
@@ -71,6 +72,12 @@ const GPU: &str = "gpu:pci:0000:2d:00.0";
 const DISKS: [&str; 4] = ["disk:sda", "disk:sdb", "disk:sdc", "disk:sdd"];
 
 fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> DeviceEntry {
+    // The Memory page's chart widgets resolve their device by its persistent key.
+    let key = if identity == DeviceIdentity::Memory {
+        "memory"
+    } else {
+        ""
+    };
     DeviceEntry {
         idx: DeviceIdx(idx),
         identity,
@@ -78,7 +85,7 @@ fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> Devic
         display_name: Arc::from("device"),
         present: true,
         parent: None,
-        persistent_key: Arc::from(""),
+        persistent_key: Arc::from(key),
         net_kind,
         hot_c: None,
     }
@@ -313,7 +320,8 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
     r.vcx.update(|_, cx| {
         let page = memory.read(cx);
         assert_eq!(page.header().0.as_ref(), "Memory");
-        for chart in [page.physical(), page.commit(), page.swap()] {
+        for chart in [page.physical(cx), page.commit(cx)] {
+            let chart = chart.expect("a memory chart widget");
             assert!(!chart.read(cx).spec.series.is_empty());
             assert!(chart.read(cx).spec.hover, "memory chart takes hover");
         }
@@ -468,7 +476,7 @@ mod shared_range {
             [
                 // The default CPU page shows the per-core grid, not the Overall chart.
                 cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
-                ns(memory.read(cx).physical()),
+                ns(&memory.read(cx).physical(cx).expect("physical chart")),
                 ns(disk.read(cx).active_chart()),
                 ns(net.read(cx).throughput()),
                 ns(&gpu.read(cx).memory(cx).expect("memory chart")),
@@ -1312,8 +1320,8 @@ fn zram_failed_mm_stat_is_unavailable() {
     assert_eq!(value_of(z, ROW_ZRAM_SIZE), "8.00 GiB");
 }
 
-/// `MemoryPage::blocks` returns no block while no zram device exists and zswap is off, and one
-/// block once a zram device appears.
+/// The Memory page shows no block while no zram device exists and zswap is off, and one block
+/// once a zram device appears.
 #[gpui_kit::test]
 fn compressed_blocks_follow_visibility(cx: &mut TestAppContext) {
     let mut r = open(cx);
@@ -1321,11 +1329,7 @@ fn compressed_blocks_follow_visibility(cx: &mut TestAppContext) {
     let memory = view_of(&mut r, "memory")
         .downcast::<MemoryPage>()
         .expect("a MemoryPage");
-    let blocks = |r: &mut Rig| {
-        let memory = memory.clone();
-        r.vcx
-            .update(|window, cx| memory.update(cx, |page, cx| page.blocks(window, cx).len()))
-    };
+    let blocks = |r: &mut Rig| shown_blocks(r, &memory);
 
     r.engine.publish_with(|s| {
         let system = Arc::make_mut(&mut s.system);
@@ -1483,10 +1487,20 @@ fn publish_swaps(r: &mut Rig, swaps: Vec<SwapDevice>, validity: Validity) {
     draw(r.vcx);
 }
 
-fn swap_blocks(r: &mut Rig, memory: &Entity<MemoryPage>) -> usize {
+/// How many of the Memory page's blocks have something to show (ADR-019 phase 3: each block
+/// is a fixed widget that takes no space while 1.3.0 hides it).
+fn shown_blocks(r: &mut Rig, memory: &Entity<MemoryPage>) -> usize {
     let memory = memory.clone();
-    r.vcx
-        .update(|window, cx| memory.update(cx, |page, cx| page.blocks(window, cx).len()))
+    r.vcx.update(|_, cx| {
+        BLOCKS
+            .iter()
+            .filter(|k| memory.read(cx).block_shown(k))
+            .count()
+    })
+}
+
+fn swap_blocks(r: &mut Rig, memory: &Entity<MemoryPage>) -> usize {
+    shown_blocks(r, memory)
 }
 
 /// Two swap entries give one block with five columns at their widths, the heading, and a zram
@@ -2501,9 +2515,7 @@ fn memory_page(r: &mut Rig) -> Entity<MemoryPage> {
 }
 
 fn module_blocks(r: &mut Rig, memory: &Entity<MemoryPage>) -> usize {
-    let memory = memory.clone();
-    r.vcx
-        .update(|window, cx| memory.update(cx, |page, cx| page.blocks(window, cx).len()))
+    shown_blocks(r, memory)
 }
 
 #[gpui_kit::test]

@@ -49,8 +49,7 @@ use tl_model::system::{MemoryTotals, ZramTotals};
 use tl_model::units;
 use tl_model::validity::Validity;
 use tl_ui_settings::layout::{
-    ContainerLayout, FixedWidget, FormSet, WidgetContent, WidgetOptions, WidgetSetting,
-    container_layout,
+    ContainerLayout, FixedWidget, WidgetContent, WidgetOptions, WidgetSetting, container_layout,
 };
 use tl_ui_settings::layout_boxes::METRIC_MEM_SWAP;
 use tl_ui_settings::layout_pages::{
@@ -1548,7 +1547,7 @@ fn preset_widget(
     convert_memory_page(&perf, container)
         .widgets
         .into_iter()
-        .find(|w| pick(w))
+        .find(pick)
 }
 
 /// Inserts `w` into `layout` at `at` with a new id.
@@ -2422,16 +2421,22 @@ impl MemoryPage {
         self.sync_settings(cx);
     }
 
-    /// The Usage / By app switch: with a flow layout the page takes the view's preset and its
-    /// first part; a page without an entry gets one. With a grid layout it asks "Replace your
-    /// widgets?" first, then saves the view's flow layout with the built-in default's widgets.
-    /// `memory_view` is not written.
-    pub fn set_view(&mut self, view: MemoryView, window: &mut Window, cx: &mut Context<Self>) {
+    /// Shows `view` (Usage or By app) with a flow layout: the page takes the view's preset and
+    /// its first part; a page without an entry gets one. Nothing with a grid layout, where the
+    /// switch asks first ([`Self::pick_view`]). `memory_view` is not written.
+    pub fn set_view(&mut self, view: MemoryView, cx: &mut Context<Self>) {
+        self.edit_flow(|l| set_memory_preset(l, view), cx);
+    }
+
+    /// The Usage / By app switch: [`Self::set_view`] with a flow layout. With a grid layout it
+    /// asks "Replace your widgets?" first, then saves the view's flow layout with the built-in
+    /// default's widgets.
+    fn pick_view(&mut self, view: MemoryView, window: &mut Window, cx: &mut Context<Self>) {
         if !cx.has_global::<TlSettings>() {
             return;
         }
         if self.view.is_some() {
-            self.edit_flow(|l| set_memory_preset(l, view), cx);
+            self.set_view(view, cx);
             return;
         }
         let container = self.container_id.to_string();
@@ -2530,7 +2535,7 @@ impl MemoryPage {
                     .size(TlButtonSize::Sm)
                     .label(label)
                     .on_click(move |_, window, cx| {
-                        weak.update(cx, |page, cx| page.set_view(view, window, cx))
+                        weak.update(cx, |page, cx| page.pick_view(view, window, cx))
                             .ok();
                     }),
                 ),

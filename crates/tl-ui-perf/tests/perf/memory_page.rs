@@ -1,12 +1,13 @@
 //! Memory page: charts, the Swap chart rules, the menu checks and the demand (E25, UI-PRF-026;
-//! PERF-018, PERF-026, PERF-041).
+//! PERF-018, PERF-026, PERF-041). The page is a widget container (ADR-019 phase 3,
+//! `tasklens-hzire.6`): the charts are the widgets of its flow layout.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render,
-    StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    AppContext as _, Bounds, Context, Entity, Focusable as _, IntoElement, ParentElement as _,
+    Pixels, Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div,
+    px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::demand::Demand;
@@ -23,11 +24,12 @@ use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_chart::chart::scale::{ScaleState, compute};
-use tl_ui_chart::chart::{ChartState, ValueFormat, YScale, format_value};
+use tl_ui_chart::chart::{ChartState, ChartView, ValueFormat, YScale, format_value};
 use tl_ui_kit::components::kv_grid;
 use tl_ui_overview::overview::mem_box::{APPS_MODE, MemBox};
+use tl_ui_overview::widget::metric_widget::widget_id;
 use tl_ui_perf::performance::actions::PerfToggleMemorySwapGraph;
-use tl_ui_perf::performance::memory::{COMMIT_ID, MemoryPage, PHYSICAL_ID, SWAP_ID};
+use tl_ui_perf::performance::memory::MemoryPage;
 use tl_ui_perf::performance::page::DevicePage as _;
 use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
@@ -36,6 +38,8 @@ use tl_ui_testkit::fake_engine::FakeEngine;
 const GIB: u64 = 1 << 30;
 /// The Memory device in the fake catalog.
 const MEM: DeviceIdx = DeviceIdx(1);
+/// The Memory page's container.
+const PAGE: &str = "page.memory";
 
 /// The page, and in [`open_with_box`] an Overview Memory box (its width and height) left of it.
 struct Host {
@@ -64,7 +68,13 @@ impl Render for Host {
     }
 }
 
+/// A catalog entry; the persistent key is the one widget sources resolve by.
 fn entry(idx: u16, identity: DeviceIdentity) -> DeviceEntry {
+    let key = match identity {
+        DeviceIdentity::CpuPackage => "cpu",
+        DeviceIdentity::Memory => "memory",
+        _ => "",
+    };
     DeviceEntry {
         idx: DeviceIdx(idx),
         identity,
@@ -72,7 +82,7 @@ fn entry(idx: u16, identity: DeviceIdentity) -> DeviceEntry {
         display_name: Arc::from("device"),
         present: true,
         parent: None,
-        persistent_key: Arc::from(""),
+        persistent_key: Arc::from(key),
         net_kind: None,
         hot_c: None,
     }
@@ -107,8 +117,28 @@ struct Rig<'a> {
     vcx: &'a mut VisualTestContext,
 }
 
+impl Rig<'_> {
+    /// The drawn box of the page's widget of `metric`, `None` while it takes no space.
+    fn metric_bounds(&mut self, metric: &str) -> Option<Bounds<Pixels>> {
+        let page = self.page.clone();
+        let id = self
+            .vcx
+            .update(|_, cx| page.read(cx).widget_of(metric, cx))?;
+        let id: &'static str = Box::leak(widget_id(PAGE, id).into_boxed_str());
+        self.vcx.debug_bounds(id)
+    }
+
+    /// The chart of the page's widget of `metric`.
+    fn chart(&mut self, metric: &str) -> Entity<ChartView> {
+        let page = self.page.clone();
+        self.vcx
+            .update(|_, cx| page.read(cx).chart_of(metric, cx))
+            .unwrap_or_else(|| panic!("the {metric} chart"))
+    }
+}
+
 fn draw(cx: &mut VisualTestContext) {
-    for _ in 0..2 {
+    for _ in 0..3 {
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.simulate_next_frame(cx);
@@ -117,7 +147,8 @@ fn draw(cx: &mut VisualTestContext) {
     }
 }
 
-/// A Memory page over `sys` in a 1000 px wide window, with `settings`, its root focused.
+/// A Memory page over `sys` in a 1000 px wide window, with `settings` loaded as the load does
+/// it (`Settings::clamp` converts the page's old keys), its root focused.
 fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig<'_> {
     open_in(cx, settings, sys, false)
 }
@@ -130,10 +161,11 @@ fn open_with_box(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapsho
 
 fn open_in(
     cx: &mut TestAppContext,
-    settings: Settings,
+    mut settings: Settings,
     sys: SystemSnapshot,
     with_box: bool,
 ) -> Rig<'_> {
+    settings.clamp();
     let engine = FakeEngine::new();
     engine.publish_with(|s| {
         s.devices = Arc::new(DeviceCatalog {
@@ -192,6 +224,8 @@ fn open_in(
     vcx.simulate_scale_factor_change(1.0);
     if with_box {
         vcx.simulate_resize(size(px(1800.), px(2000.)));
+    } else {
+        vcx.simulate_resize(size(px(1000.), px(2000.)));
     }
     let driver = vcx.update(|window, cx| {
         let driver = cx.new(AnimationDriver::new);
@@ -244,35 +278,33 @@ fn with_swap(on: bool) -> Settings {
 
 #[gpui_kit::test]
 fn memory_swap_graph_hidden_without_swap(cx: &mut TestAppContext) {
-    let r = open(cx, with_swap(true), system(64 * GIB, 80 * GIB, 0));
-    assert!(r.vcx.debug_bounds(PHYSICAL_ID).is_some());
-    assert!(r.vcx.debug_bounds(COMMIT_ID).is_some());
-    assert!(r.vcx.debug_bounds(SWAP_ID).is_none(), "no swap, no chart");
-    let physical = r.vcx.debug_bounds(PHYSICAL_ID).expect("physical");
-    let commit = r.vcx.debug_bounds(COMMIT_ID).expect("commit");
+    let mut r = open(cx, with_swap(true), system(64 * GIB, 80 * GIB, 0));
+    let physical = r.metric_bounds("physical").expect("physical");
+    let commit = r.metric_bounds("commit_pct").expect("commit");
+    assert!(r.metric_bounds("swap").is_none(), "no swap, no chart");
     assert_eq!(physical.size.height, px(150.));
     assert_eq!(commit.top() - physical.bottom(), px(8.), "sp4 apart");
 }
 
+/// "Show swap usage" adds the Swap chart to the page's entry; `memory_swap_graph` stays.
 #[gpui_kit::test]
 fn memory_swap_toggle_follows_setting(cx: &mut TestAppContext) {
-    let r = open(cx, with_swap(false), system(64 * GIB, 80 * GIB, 32 * GIB));
-    assert!(r.vcx.debug_bounds(SWAP_ID).is_none(), "setting off");
+    let mut r = open(cx, with_swap(false), system(64 * GIB, 80 * GIB, 32 * GIB));
+    assert!(r.metric_bounds("swap").is_none(), "setting off");
 
     r.vcx.dispatch_action(PerfToggleMemorySwapGraph);
     draw(r.vcx);
-    r.vcx.executor().advance_clock(Duration::from_millis(250));
-    draw(r.vcx);
-    let swap = r.vcx.debug_bounds(SWAP_ID).expect("swap chart shown");
+    let swap = r.metric_bounds("swap").expect("swap chart shown");
     assert_eq!(swap.size.height, px(150.));
     let page = r.page.clone();
     let (setting, shown) = r.vcx.update(|_, cx| {
         (
             TlSettings::settings(cx).performance.memory_swap_graph,
-            page.read(cx).show_swap(),
+            page.read(cx).show_swap(cx),
         )
     });
-    assert!(setting && shown);
+    assert!(shown);
+    assert!(!setting, "the old key is not written");
 }
 
 #[gpui_kit::test]
@@ -284,16 +316,17 @@ fn memory_menu_checks_follow_settings(cx: &mut TestAppContext) {
         system(64 * GIB, 80 * GIB, 32 * GIB),
     );
     let page = r.page.clone();
-    let before = r.vcx.update(|_, cx| page.read(cx).show_composition());
+    let before = r.vcx.update(|_, cx| page.read(cx).show_composition(cx));
+    assert!(before, "the bar is in the default");
     r.vcx.dispatch_action(PerfToggleMemoryComposition);
     draw(r.vcx);
     let (after, setting) = r.vcx.update(|_, cx| {
         (
-            page.read(cx).show_composition(),
+            page.read(cx).show_composition(cx),
             TlSettings::settings(cx).performance.memory_composition,
         )
     });
-    assert_eq!((after, setting), (!before, !before));
+    assert_eq!((after, setting), (!before, before), "the old key stays");
     let words = r.vcx.update(|_, cx| {
         let w = page.read(cx).words();
         (w.menu_composition.to_string(), w.menu_swap.to_string())
@@ -310,8 +343,8 @@ fn memory_menu_checks_follow_settings(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn commit_axis_text_above_100(cx: &mut TestAppContext) {
     let limit = 80 * GIB;
-    let r = open(cx, Settings::default(), system(64 * GIB, limit, 0));
-    let chart = r.vcx.update(|_, cx| r.page.read(cx).commit().clone());
+    let mut r = open(cx, Settings::default(), system(64 * GIB, limit, 0));
+    let chart = r.chart("commit_pct");
     let peak = limit as f32 * 1.12;
     chart.update(r.vcx, |v, cx| {
         v.set_series_for_test(
@@ -359,8 +392,8 @@ fn commit_axis_text_above_100(cx: &mut TestAppContext) {
 fn memory_physical_value_and_scale(cx: &mut TestAppContext) {
     let total = (63.16 * GIB as f64) as u64;
     let used = 34.68 * GIB as f32;
-    let r = open(cx, Settings::default(), system(total, 80 * GIB, 0));
-    let chart = r.vcx.update(|_, cx| r.page.read(cx).physical().clone());
+    let mut r = open(cx, Settings::default(), system(total, 80 * GIB, 0));
+    let chart = r.chart("physical");
     chart.update(r.vcx, |v, cx| {
         v.set_series_for_test(
             [Some(series(MetricId::MEM_USED, used, used)), None].into(),
@@ -387,6 +420,7 @@ fn memory_physical_value_and_scale(cx: &mut TestAppContext) {
         ]
     );
     assert_eq!(labels.heading.as_deref(), Some("Physical memory"));
+    assert_eq!(labels.range_word.as_ref(), "Memory usage");
     let legend: Vec<&str> = labels.legend.iter().map(|(t, _)| t.as_ref()).collect();
     assert_eq!(legend, ["Used", "Committed"], "no legend entry for dirty");
     let (value, _) = value.expect("newest value");
@@ -419,7 +453,7 @@ fn memory_demand_only_when_active(cx: &mut TestAppContext) {
     let d = merged(r.vcx);
     assert!(d.any_surface_visible);
     assert!(d.memory);
-    assert!(!d.disks && !d.nets && !d.gpus && !d.cpu_fast);
+    assert!(!d.disks && !d.nets && !d.gpus && !d.cpu_fast && !d.process_top);
 
     r.vcx
         .update(|_, cx| page.update(cx, |p, cx| p.set_active(false, cx)));
@@ -432,45 +466,36 @@ fn memory_demand_only_when_active(cx: &mut TestAppContext) {
     );
 }
 
+/// "Show swap usage" off takes the chart away in the next frame: phase 3 drops the 1.3.0 height
+/// animation.
 #[gpui_kit::test]
-fn memory_chart_hide_instant_under_reduce_motion(cx: &mut TestAppContext) {
-    let mut settings = with_swap(true);
-    settings.motion.animations = false;
-    let r = open(cx, settings, system(64 * GIB, 80 * GIB, 32 * GIB));
-    assert!(r.vcx.update(|_, cx| cx.reduce_motion()));
-    assert!(r.vcx.debug_bounds(SWAP_ID).is_some());
+fn memory_chart_hide_instant(cx: &mut TestAppContext) {
+    let mut r = open(cx, with_swap(true), system(64 * GIB, 80 * GIB, 32 * GIB));
+    assert!(r.metric_bounds("swap").is_some());
 
     r.vcx.dispatch_action(PerfToggleMemorySwapGraph);
-    let page = r.page.clone();
-    assert!(
-        !r.vcx.update(|_, cx| page.read(cx).swap_animating()),
-        "no animation"
-    );
     // One frame, no clock advance: the chart is gone.
+    r.vcx.run_until_parked();
     r.vcx.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(r.vcx.debug_bounds(SWAP_ID).is_none());
+    assert!(r.metric_bounds("swap").is_none());
 }
 
 #[gpui_kit::test]
 fn memory_totals_change_rebuilds_specs(cx: &mut TestAppContext) {
-    let r = open(cx, with_swap(true), system(64 * GIB, 80 * GIB, 0));
-    assert!(r.vcx.debug_bounds(SWAP_ID).is_none());
-    let page = r.page.clone();
-    // A new SwapTotal arrives with the next system snapshot.
-    let (physical, swap) = r.vcx.update(|_, cx| {
-        let p = page.read(cx);
-        (p.physical().clone(), p.swap().clone())
-    });
+    let mut r = open(cx, with_swap(true), system(64 * GIB, 80 * GIB, 0));
+    assert!(r.metric_bounds("swap").is_none());
+    let physical = r.chart("physical");
     let builds = r.vcx.read_entity(&physical, |v, _| v.spec.clone());
+    // A new SwapTotal arrives with the next system snapshot.
     let mut sys = system(64 * GIB, 80 * GIB, 16 * GIB);
     sys.header.version = 2;
     r.engine.publish_with(move |s| s.system = Arc::new(sys));
     draw(r.vcx);
-    r.vcx.executor().advance_clock(Duration::from_millis(250));
-    draw(r.vcx);
-    assert!(r.vcx.debug_bounds(SWAP_ID).is_some(), "swap appeared");
+    assert!(r.metric_bounds("swap").is_some(), "swap appeared");
+    let swap = r.chart("swap");
     let y = r.vcx.read_entity(&swap, |v, _| v.spec.y);
     assert_eq!(y, YScale::FixedTotal((16 * GIB) as f32));
+    assert_eq!(r.chart("physical"), physical, "the same chart entity");
     let same = r.vcx.read_entity(&physical, |v, _| v.spec.clone());
     assert_eq!(
         same, builds,
@@ -630,10 +655,7 @@ mod composition {
         let mut sys = system(64 * GIB, 80 * GIB, 0);
         sys.memory.free = 20 * GIB;
         let r = open(cx, Settings::default(), sys);
-        let bar = r
-            .vcx
-            .update(|_, cx| r.page.read(cx).bar().cloned())
-            .expect("bar shown by default");
+        let bar = r.vcx.update(|_, cx| r.page.read(cx).bar().clone());
         r.vcx.read_entity(&bar, |b, _| {
             let c = b.state.composition.expect("valid memory");
             assert_eq!(c.in_use, 32 * GIB);
@@ -643,17 +665,18 @@ mod composition {
         assert!(r.vcx.debug_bounds(BAR_ID).is_some(), "bar drawn");
     }
 
-    /// The box around the bar holds the caption and the bar, so what follows it (the Details
-    /// heading) cannot be drawn over the bar.
+    /// The bar's part holds the caption and the bar, so what follows it (the Details heading)
+    /// cannot be drawn over the bar.
     #[gpui_kit::test]
     fn composition_box_encloses_caption_and_bar(cx: &mut TestAppContext) {
         let mut sys = system(64 * GIB, 80 * GIB, 0);
         sys.memory.free = 20 * GIB;
         let r = open(cx, Settings::default(), sys);
-        let wrap = r
-            .vcx
-            .debug_bounds(tl_ui_perf::performance::memory::BAR_WRAP_ID)
-            .expect("bar box");
+        let id = tl_ui_perf::performance::memory_views::part_id(
+            super::PAGE,
+            tl_ui_perf::performance::memory_views::PART_BAR,
+        );
+        let wrap = r.vcx.debug_bounds(id.leak()).expect("bar box");
         let bar = r.vcx.debug_bounds(BAR_ID).expect("bar");
         assert!(
             bar.bottom() <= wrap.bottom(),
@@ -1059,7 +1082,7 @@ mod by_app {
     fn band_kinds(r: &mut Rig<'_>) -> Vec<BandKind> {
         let apps = r
             .vcx
-            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .update(|_, cx| r.page.read(cx).apps())
             .expect("the By app chart");
         r.vcx
             .read_entity(&apps, |a, _| a.bands().iter().map(|b| b.kind).collect())
@@ -1070,12 +1093,12 @@ mod by_app {
         let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
         publish_groups(&mut r, 25);
         assert!(r.vcx.debug_bounds(APPS_ID).is_some());
-        assert!(r.vcx.debug_bounds(PHYSICAL_ID).is_none());
+        assert!(r.metric_bounds("physical").is_none());
         assert!(r.vcx.debug_bounds(VIEW_SWITCH_ID).is_some());
         // The By app view asks for the process sweep that sums the groups.
         assert!(
             r.vcx
-                .update(|_, cx| r.page.read(cx).demand_part().process_top)
+                .update(|_, cx| r.page.read(cx).demand_part(cx).process_top)
         );
         for n in [3u8, 10, 20] {
             r.vcx.update(|_, cx| {
@@ -1097,10 +1120,7 @@ mod by_app {
             assert_eq!(kinds[usize::from(n) + 1], BandKind::Shared);
         }
         // The largest group is the bottom band, and its colour pick is saved.
-        let apps = r
-            .vcx
-            .update(|_, cx| r.page.read(cx).apps().cloned())
-            .unwrap();
+        let apps = r.vcx.update(|_, cx| r.page.read(cx).apps()).unwrap();
         let bottom = r.vcx.read_entity(&apps, |a, _| a.bands()[0].key.clone());
         assert_eq!(&*bottom, "exe:p0");
         let saved = r.vcx.update(|_, cx| {
@@ -1117,15 +1137,19 @@ mod by_app {
         r.page
             .update(r.vcx, |p, cx| p.set_view(MemoryView::Usage, cx));
         draw(r.vcx);
-        assert!(r.vcx.debug_bounds(PHYSICAL_ID).is_some());
+        assert!(r.metric_bounds("physical").is_some());
         assert!(r.vcx.debug_bounds(APPS_ID).is_none());
-        let view = r
-            .vcx
-            .update(|_, cx| TlSettings::settings(cx).performance.memory_view);
-        assert_eq!(view, MemoryView::Usage);
+        let (old_key, view) = r.vcx.update(|_, cx| {
+            (
+                TlSettings::settings(cx).performance.memory_view,
+                r.page.read(cx).view(),
+            )
+        });
+        assert_eq!(view, Some(MemoryView::Usage));
+        assert_eq!(old_key, MemoryView::Apps, "the old key is not written");
         assert!(
             !r.vcx
-                .update(|_, cx| r.page.read(cx).demand_part().process_top)
+                .update(|_, cx| r.page.read(cx).demand_part(cx).process_top)
         );
     }
 
@@ -1299,7 +1323,7 @@ mod by_app {
         publish_groups(&mut r, 5);
         let apps = r
             .vcx
-            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .update(|_, cx| r.page.read(cx).apps())
             .expect("the By app chart");
         // 5 bands; rows Other, p2, p1, p0, then Shared under the divider. Row 1 is band 2 (p2).
         let row = r
@@ -1358,7 +1382,7 @@ mod by_app {
         });
         let apps = r
             .vcx
-            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .update(|_, cx| r.page.read(cx).apps())
             .expect("the By app chart");
         let (band, row) = r.vcx.update(|_, cx| {
             let bands = apps.read(cx).bands();
@@ -1423,7 +1447,7 @@ mod by_app {
         publish_groups(&mut r, 5);
         let apps = r
             .vcx
-            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .update(|_, cx| r.page.read(cx).apps())
             .expect("the By app chart");
         let click = |r: &mut Rig<'_>, row: usize| {
             let at = r
@@ -1464,7 +1488,7 @@ mod by_app {
     fn charts(r: &mut Rig<'_>) -> Vec<Entity<MemoryAppsChart>> {
         let (page, mem_box) = (r.page.clone(), r.mem_box.clone());
         r.vcx.update(|_, cx| {
-            let mut out: Vec<_> = page.read(cx).apps().cloned().into_iter().collect();
+            let mut out: Vec<_> = page.read(cx).apps().into_iter().collect();
             out.extend(mem_box.and_then(|b| b.read(cx).apps().cloned()));
             out
         })
@@ -2013,7 +2037,7 @@ mod by_app {
         publish_parts(&mut r, [8., 0., 8., 8., 8., 8.], 0);
         let apps = r
             .vcx
-            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .update(|_, cx| r.page.read(cx).apps())
             .expect("the By app chart");
         let bands = r.vcx.read_entity(&apps, |a, _| a.bands().to_vec());
         let keys: Vec<&str> = bands.iter().map(|b| &*b.key).collect();
