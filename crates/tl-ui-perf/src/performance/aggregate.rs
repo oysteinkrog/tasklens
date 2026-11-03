@@ -9,8 +9,8 @@
 //!
 //! The page's words are `en-US.ftl` keys, translated once per strings version.
 //!
-//! The Aggregate storage page is the first page whose body is a widget container (ADR-019
-//! phase 3, `tasklens-hzire.3`); the Aggregate graphics page follows in `tasklens-hzire.9`.
+//! Both pages have a widget container as their body (ADR-019 phase 3, `tasklens-hzire.3` and
+//! `tasklens-hzire.9`).
 
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
@@ -18,16 +18,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::component::v_flex;
 use gpui_kit::{
-    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, Div, Entity, EntityId,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StyleRefinement, Styled as _, Subscription, Window, div, px,
+    SharedString, Styled as _, Subscription, Window, div,
 };
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceEntry, DeviceIdentity};
-use tl_model::ids::{DeviceIdx, MetricId};
+use tl_model::ids::DeviceIdx;
 use tl_model::snapshot::{InvField, Snapshot};
 use tl_model::system::Metric;
 use tl_model::units;
@@ -42,8 +41,8 @@ use super::details::{Fallback, KeyValueModel};
 use super::disk::{self, KIND_KEYS, PageSettings, kind_key, section_versions};
 use super::gpu;
 use super::page::{
-    DevicePage, DevicePageFrame, GRAPH_H_STACKED, PerfSidebar, details_draw, header_text,
-    page_history_request, page_words,
+    DevicePage, DevicePageFrame, PerfSidebar, details_draw, header_text, page_history_request,
+    page_words,
 };
 use super::page_flow::{column_flow, default_part};
 use super::widget::container::WidgetContainer;
@@ -55,29 +54,16 @@ use super::widget::source::SourceStore;
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use tl_ui_base::i18n::{Strings, tr};
-use tl_ui_base::selector::TlSelector;
+use tl_ui_base::i18n::Strings;
 use tl_ui_base::settings_global::TlSettings;
-use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
-use tl_ui_chart::chart::{ChartLabels, ChartSeries, ChartView, ValueAlign, ValueFormat, YScale};
+use tl_ui_base::theme::{current, metrics};
 use tl_ui_kit::components::menu::TlMenu;
-
-/// Debug selectors of the chart boxes.
-pub const DISK_ACTIVE_ID: &str = "perf-agg-disk-active";
-pub const DISK_TRANSFER_ID: &str = "perf-agg-disk-transfer";
-pub const GPU_UTILIZATION_ID: &str = "perf-agg-gpu-utilization";
-pub const GPU_MEMORY_ID: &str = "perf-agg-gpu-memory";
 
 pub const ROW_DISKS: &str = "perf-agg-row-disks";
 pub const ROW_ADAPTERS: &str = "perf-agg-row-adapters";
 pub const ROW_TYPE: &str = "perf-agg-row-type";
 
-const KEY_UTILIZATION: &str = "perf-agg-heading-utilization";
 const KEY_MULTIPLE: &str = "perf-card-multiple";
-const KEY_MEMORY: &str = "perf-gpu-heading-memory";
-const KEY_MEMORY_USAGE: &str = "perf-gpu-range-memory";
-const KEY_DEDICATED: &str = "perf-gpu-legend-dedicated";
-const KEY_SHARED: &str = "perf-gpu-legend-shared";
 
 /// The Details rows of the Aggregate storage page, in grid order.
 pub const DISK_ROWS: [&str; 10] = [
@@ -365,16 +351,6 @@ fn header_of(
 ) -> Option<(SharedString, SharedString)> {
     let entry = snap.devices.entries.iter().find(|e| e.idx == idx)?;
     Some(header_text(page_words(cx), kind, 0, entry, snap))
-}
-
-/// `chart` in a full-width box of `height`.
-fn chart_box(id: &'static str, chart: &Entity<ChartView>, height: f32) -> Div {
-    div()
-        .tl_selector(move || id.into())
-        .flex_none()
-        .w_full()
-        .h(px(height))
-        .child(chart.clone().cached(StyleRefinement::default().size_full()))
 }
 
 fn copy_header(header: &(SharedString, SharedString), details: &KeyValueModel, out: &mut String) {
@@ -863,101 +839,36 @@ impl Render for AggregateDiskPage {
 
 // ---- Aggregate graphics page ----
 
-/// The words of the Aggregate graphics charts.
-#[derive(Clone, Debug, Default)]
-struct GpuWords {
-    /// `None` before the first refresh; then the strings version, `None` without strings.
-    version: Option<Option<u64>>,
-    utilization: SharedString,
-    /// The Memory chart's words, in the GPU page's type.
-    memory: gpu::Words,
-}
-
-impl GpuWords {
-    /// Translates every word when the strings changed since the last call. True when it did.
-    fn refresh(&mut self, cx: &App) -> bool {
-        let version = Some(cx.try_global::<Strings>().map(|s| s.strings_version));
-        if self.version == version {
-            return false;
-        }
-        self.version = version;
-        self.utilization = tr(cx, KEY_UTILIZATION);
-        self.memory.memory = tr(cx, KEY_MEMORY);
-        self.memory.memory_usage = tr(cx, KEY_MEMORY_USAGE);
-        self.memory.dedicated = tr(cx, KEY_DEDICATED);
-        self.memory.shared = tr(cx, KEY_SHARED);
-        true
-    }
-}
-
-/// Utilization of the busiest adapter with fill, 0..100.
-fn utilization_spec(
-    device: DeviceIdx,
-    s: &PageSettings,
-    theme: &TlTheme,
-) -> tl_ui_chart::chart::ChartSpec {
-    let series = smallvec![ChartSeries {
-        id: tl_model::ids::SeriesId {
-            device,
-            metric: MetricId::GPU_UTIL,
-        },
-        fill: Some(theme.graph.gpu_fill),
-        line: theme.graph.gpu_line,
-        ..ChartSeries::default()
-    }];
-    let y = YScale::Fixed {
-        min: 0.0,
-        max: 100.0,
-    };
-    disk::spec(series, y, s)
-}
-
-/// The summed VRAM chart over the shared range.
-fn aggregate_memory_spec(
-    device: DeviceIdx,
-    total: u64,
-    s: &PageSettings,
-    theme: &TlTheme,
-) -> tl_ui_chart::chart::ChartSpec {
-    let mut spec = gpu::memory_spec(device, false, total, theme);
-    spec.range_ns = s.range_ns();
-    spec
-}
-
-fn utilization_labels(w: &GpuWords) -> ChartLabels {
-    ChartLabels {
-        heading: Some(w.utilization.clone()),
-        value_fmt: ValueFormat::Percent,
-        value_align: ValueAlign::Right,
-        range_word: w.utilization.clone(),
-        legend: SmallVec::new(),
-        show_axis_max: false,
-    }
-}
-
-/// The Aggregate graphics page.
+/// The Aggregate graphics page. Its body is one widget container (ADR-019 phase 3,
+/// `tasklens-hzire.9`): by default the Utilization and Memory charts and the Details widget, in
+/// the 1.3.0 places (`page_flow::column_flow`). Edit Widgets changes them; the page keeps the
+/// header and the Details model, and hands the model's rows to its `DetailsView`.
+///
+/// Render contract: the page renders on a header change, a range change and a layout change,
+/// never because of a sample. A Details value change notifies only the `DetailsView`.
 pub struct AggregateGpuPage {
     key: DeviceKey,
     row: DeviceRow,
-    utilization: Entity<ChartView>,
-    memory: Entity<ChartView>,
-    /// The summed VRAM the Memory chart is scaled to.
-    memory_total: u64,
+    /// The container id, `page.aggregate:gpu`.
+    container_id: SharedString,
     details: KeyValueModel,
+    details_view: Entity<DetailsView>,
+    container: Entity<WidgetContainer>,
+    editor: Entity<WidgetEditor>,
     header: (SharedString, SharedString),
     settings: PageSettings,
     settings_versions: [u64; 3],
-    style_version: u64,
-    words: GpuWords,
     hub: Entity<SnapshotHub>,
     demand: Entity<DemandAggregator>,
     id: EntityId,
     is_active: bool,
     window: Option<AnyWindowHandle>,
     focus: FocusHandle,
-    _subs: SmallVec<[Subscription; 4]>,
+    _subs: SmallVec<[Subscription; 8]>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub notify_count: Cell<u32>,
 }
 
 impl AggregateGpuPage {
@@ -968,40 +879,65 @@ impl AggregateGpuPage {
         demand: Entity<DemandAggregator>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let theme = current(cx).clone();
         let settings = PageSettings::read(cx);
         let snap = Arc::clone(hub.read(cx).current());
-        let mut words = GpuWords::default();
-        words.refresh(cx);
+        let container_id = SharedString::from(page_container(&key.0));
 
-        let idx = row.idx;
-        let memory_total = gpu_memory_total(&snap);
-        let utilization = {
-            let (spec, labels) = (
-                utilization_spec(idx, &settings, &theme),
-                utilization_labels(&words),
-            );
-            cx.new(|cx| {
-                ChartView::new(spec, labels, &hub, cx)
-                    .with_newest_marks()
-                    .with_device_history(&snap)
+        let mut details = gpu_model();
+        details.refresh_strings(cx);
+        update_gpu_rows(&mut details, &snap);
+        let details_view = {
+            let shown = DetailsShown::of(&details, strings_version(cx));
+            let draw = details_draw(cx.weak_entity());
+            let id = container_id.clone();
+            cx.new(|_| DetailsView::new(id, shown, draw))
+        };
+        let natural = details_view.read(cx).natural_height();
+        let content: FixedContent = {
+            let view: AnyView = details_view.clone().into();
+            Rc::new(move |kind: &FixedWidget, _: &mut App| {
+                matches!(kind, FixedWidget::Details).then(|| view.clone())
             })
         };
-        let memory = {
-            let spec = aggregate_memory_spec(idx, memory_total, &settings, &theme);
-            let labels = gpu::memory_labels(false, &words.memory);
-            cx.new(|cx| {
-                ChartView::new(spec, labels, &hub, cx)
-                    .with_newest_marks()
-                    .with_device_history(&snap)
+        let container = {
+            let store = Rc::new(RefCell::new(SourceStore::for_page(&hub)));
+            let layout = page_layout(&container_id, cx);
+            let id = container_id.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| {
+                let mut c = WidgetContainer::new(id, layout, &hub, store, cx);
+                let place = column_flow(Rc::new(move |w: &WidgetSetting| {
+                    Some(default_part(w, &natural))
+                }));
+                c.set_flow_placer(Some(place), cx);
+                c.set_fixed_content(Some(content), cx);
+                c
+            })
+        };
+        let editor = {
+            let container = container.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| {
+                let mut e = WidgetEditor::new(container, &hub, cx);
+                e.set_page_parts(vec![FixedWidget::Details]);
+                e
             })
         };
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
-        subs.push(cx.observe_global::<UiMetrics>(Self::sync_style));
         subs.push(cx.observe_global::<Strings>(Self::sync_words));
+        // The Details grid got taller or shorter: the parts under it move.
+        subs.push(
+            cx.subscribe(&details_view, |this, _, _: &DetailsResized, cx| {
+                this.container.update(cx, |c, cx| {
+                    c.place_again(cx);
+                });
+            }),
+        );
+        // A layout change can change what the page asks for.
+        subs.push(cx.observe(&container, |this, _, cx| this.send_demand(cx)));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -1010,15 +946,14 @@ impl AggregateGpuPage {
         let mut this = Self {
             key,
             row,
-            utilization,
-            memory,
-            memory_total,
-            details: gpu_model(),
+            container_id,
+            details,
+            details_view,
+            container,
+            editor,
             header: (SharedString::default(), SharedString::default()),
             settings,
             settings_versions: section_versions(cx),
-            style_version: metrics(cx).style_version,
-            words,
             hub,
             demand,
             id,
@@ -1028,17 +963,31 @@ impl AggregateGpuPage {
             _subs: subs,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            notify_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
         this
     }
 
-    pub fn utilization_chart(&self) -> &Entity<ChartView> {
-        &self.utilization
+    /// The page's widget container.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
     }
 
-    pub fn memory_chart(&self) -> &Entity<ChartView> {
-        &self.memory
+    /// The editor around the container (Edit Widgets).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
+    }
+
+    /// The Details widget's view.
+    pub fn details_view(&self) -> &Entity<DetailsView> {
+        &self.details_view
+    }
+
+    /// The container id, `page.aggregate:gpu`.
+    pub fn container_id(&self) -> &SharedString {
+        &self.container_id
     }
 
     /// The page is the shown page (`set_active`).
@@ -1047,21 +996,31 @@ impl AggregateGpuPage {
     }
 
     /// This page's demand part while it is active: the GPU component, the inventory for the
-    /// adapters' VRAM sizes, and the device metric history at 1 h, 24 h and 7 d.
-    pub fn demand_part(&self) -> Demand {
-        Demand {
+    /// adapters' VRAM sizes, the device metric history at 1 h, 24 h and 7 d, and what the placed
+    /// widgets read.
+    pub fn demand_part(&self, cx: &App) -> Demand {
+        let mut demand = Demand {
             any_surface_visible: true,
             gpus: true,
             inventory: true,
             device_history_range: page_history_request(self.settings.range_ns()),
             ..Demand::default()
-        }
+        };
+        add_demand(&mut demand, &self.container.read(cx).demand_part());
+        demand
     }
 
     fn send_demand(&self, cx: &mut App) {
         if self.is_active {
-            send_demand(&self.demand, self.id, self.window, self.demand_part(), cx);
+            let part = self.demand_part(cx);
+            send_demand(&self.demand, self.id, self.window, part, cx);
         }
+    }
+
+    fn notify(&self, cx: &mut Context<Self>) {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
     }
 
     fn on_snapshot(
@@ -1074,44 +1033,62 @@ impl AggregateGpuPage {
         self.apply_snapshot(&snap, ev.mask, cx);
     }
 
-    /// Brings the header, the rows and the Memory scale up to date with the components in
-    /// `mask`. Notifies only when something the page draws changed.
+    /// Brings the header and the Details rows up to date with the components in `mask`. Only a
+    /// header change renders the page; a row change goes to the Details view. The Memory
+    /// chart's scale (the summed VRAM) is the widget's own.
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
-        let mut changed = false;
         if mask.intersects(
             ComponentMask::SYSTEM
                 | ComponentMask::INVENTORY
                 | ComponentMask::DEVICES
                 | ComponentMask::HEALTH,
-        ) {
-            changed |= update_gpu_rows(&mut self.details, snap);
-            let total = gpu_memory_total(snap);
-            if total != self.memory_total {
-                self.memory_total = total;
-                self.rebuild_memory(cx);
-            }
+        ) && update_gpu_rows(&mut self.details, snap)
+        {
+            self.sync_details(cx);
         }
-        if mask.intersects(ComponentMask::DEVICES.union(ComponentMask::INVENTORY)) {
-            changed |= self.sync_header(snap, cx);
+        if mask.intersects(ComponentMask::DEVICES.union(ComponentMask::INVENTORY))
+            && self.sync_header(snap, cx)
+        {
+            self.notify(cx);
         }
-        if changed {
-            cx.notify();
+        // The aggregate went away: an edit ends as Cancel does.
+        if mask.contains(ComponentMask::DEVICES)
+            && !snap
+                .devices
+                .entries
+                .iter()
+                .any(|e| e.idx == self.row.idx && e.present)
+        {
+            self.editor.update(cx, |e, cx| e.cancel(cx));
         }
     }
 
+    /// Hands the Details view what the grid shows; it notifies only when that changed.
+    fn sync_details(&mut self, cx: &mut Context<Self>) {
+        let shown = DetailsShown::of(&self.details, strings_version(cx));
+        self.details_view.update(cx, |v, cx| v.set_shown(shown, cx));
+    }
+
     /// The header from the catalog. True when it changed.
-    fn sync_header(&mut self, snap: &Snapshot, cx: &mut App) -> bool {
+    fn sync_header(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
         let Some(header) = header_of(DeviceKind::AggregateGpu, self.row.idx, snap, cx) else {
             return false;
         };
         if header == self.header {
             return false;
         }
+        let word = header.0.clone();
+        self.editor.update(cx, |e, _| e.set_page_name(word));
         self.header = header;
         true
     }
 
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        // A saved layout (Apply, Reset Page) shows when the page is not in Edit Widgets.
+        if !self.editor.read(cx).is_editing() {
+            let layout = page_layout(&self.container_id, cx);
+            self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+        }
         let versions = section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -1121,52 +1098,41 @@ impl AggregateGpuPage {
         if new != self.settings {
             let range_moved = new.range_ns() != self.settings.range_ns();
             self.settings = new;
-            self.rebuild_specs(cx);
             if range_moved {
                 // The header switch shows the new range.
                 self.send_demand(cx);
-                cx.notify();
+                self.notify(cx);
             }
         }
     }
 
-    fn rebuild_memory(&self, cx: &mut App) {
-        let theme = current(cx).clone();
-        let spec = aggregate_memory_spec(self.row.idx, self.memory_total, &self.settings, &theme);
-        self.memory.update(cx, |v, cx| v.set_spec(spec, cx));
-    }
-
-    fn rebuild_specs(&self, cx: &mut App) {
-        let theme = current(cx).clone();
-        let spec = utilization_spec(self.row.idx, &self.settings, &theme);
-        self.utilization.update(cx, |v, cx| v.set_spec(spec, cx));
-        self.rebuild_memory(cx);
-    }
-
-    /// A new theme: the charts take the new colours.
-    fn sync_style(&mut self, cx: &mut Context<Self>) {
-        let version = metrics(cx).style_version;
-        if version == self.style_version {
-            return;
-        }
-        self.style_version = version;
-        self.rebuild_specs(cx);
-        cx.notify();
-    }
-
-    /// New strings: the chart labels and the header.
+    /// New strings: the Details words and the header.
     fn sync_words(&mut self, cx: &mut Context<Self>) {
-        if !self.words.refresh(cx) {
-            return;
-        }
-        let utilization = utilization_labels(&self.words);
-        let memory = gpu::memory_labels(false, &self.words.memory);
-        self.utilization
-            .update(cx, |v, cx| v.set_labels(utilization, cx));
-        self.memory.update(cx, |v, cx| v.set_labels(memory, cx));
+        self.details.refresh_strings(cx);
+        self.sync_details(cx);
         let snap = Arc::clone(self.hub.read(cx).current());
         self.sync_header(&snap, cx);
-        cx.notify();
+        self.notify(cx);
+    }
+
+    /// "Edit Widgets…" in the page menu.
+    fn on_edit_start(
+        &mut self,
+        _: &PerfWidgetEditStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        start_page_edit(&self.editor, &self.hub, window, cx);
+    }
+
+    /// "Reset Page" in the page menu (ADR-019 phase 3 "Reset").
+    fn on_reset_page(
+        &mut self,
+        _: &PerfWidgetResetPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        reset_page(&self.container_id, self.header.0.clone(), window, cx);
     }
 }
 
@@ -1187,15 +1153,9 @@ impl DevicePage for AggregateGpuPage {
         SmallVec::new()
     }
 
-    fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
-        let m = *metrics(cx);
-        let h = GRAPH_H_STACKED * m.ui_scale;
-        v_flex()
-            .w_full()
-            .gap(m.sp[4])
-            .child(chart_box(GPU_UTILIZATION_ID, &self.utilization, h))
-            .child(chart_box(GPU_MEMORY_ID, &self.memory, h))
-            .into_any_element()
+    fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {
+        // The charts are widgets of the container.
+        div().into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
@@ -1216,6 +1176,10 @@ impl DevicePage for AggregateGpuPage {
 
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
         SmallVec::new()
+    }
+
+    fn widget_editor(&self) -> Option<&Entity<WidgetEditor>> {
+        Some(&self.editor)
     }
 
     fn set_active(&mut self, active: bool, cx: &mut App) {
@@ -1242,21 +1206,26 @@ impl Render for AggregateGpuPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
+        // The demand part carries the window, so it drops out while the window is hidden.
         let handle = window.window_handle();
         if self.window != Some(handle) {
             self.window = Some(handle);
             self.send_demand(cx);
         }
-        self.details.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        div().size_full().track_focus(&self.focus).child(
-            DevicePageFrame {
-                page: self,
-                m: &m,
-                theme: &theme,
-            }
-            .render(window, cx),
-        )
+        div()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_edit_start))
+            .on_action(cx.listener(Self::on_reset_page))
+            .child(
+                DevicePageFrame {
+                    page: self,
+                    m: &m,
+                    theme: &theme,
+                }
+                .render(window, cx),
+            )
     }
 }

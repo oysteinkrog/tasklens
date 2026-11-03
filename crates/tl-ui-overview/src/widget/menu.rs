@@ -59,15 +59,16 @@ use tl_ui_settings::layout_boxes::{
 };
 use tl_ui_settings::layout_pages::{
     METRIC_CLOCK, METRIC_COMMIT_PCT, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED, METRIC_DIRTY,
-    METRIC_FAN, METRIC_FREQ_MAX, METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_PHYSICAL,
-    METRIC_RESPONSE, METRIC_SIGNAL, METRIC_TOTAL_READ, METRIC_TOTAL_RX, METRIC_TOTAL_TX,
-    METRIC_TOTAL_WRITTEN, METRIC_VRAM_SHARED,
+    METRIC_FAN, METRIC_FREQ_MAX, METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_PERCENT,
+    METRIC_PHYSICAL, METRIC_PWM, METRIC_RESPONSE, METRIC_RPM, METRIC_SIGNAL, METRIC_SPEED,
+    METRIC_TOTAL_READ, METRIC_TOTAL_RX, METRIC_TOTAL_TX, METRIC_TOTAL_WRITTEN, METRIC_UTIL,
+    METRIC_VRAM_SHARED,
 };
 
 use super::grid::{self, InnerGrid, SlotDevice};
 use super::members::{Members, members};
 use super::meta::MetricMeta;
-use super::source::{box_reading, reading};
+use super::source::{box_metric_name_key, box_reading, reading};
 use crate::overview::layout::Arrange;
 use tl_ui_base::i18n::{tr, tr_args};
 use tl_ui_base::settings_global::TlSettings;
@@ -1079,6 +1080,51 @@ fn net_page_source_groups(key: &str, snap: &Snapshot, cx: &App) -> Vec<SourceGro
     }]
 }
 
+/// The sources of the page of a device that has no box (a fan, a battery, Aggregate graphics;
+/// ADR-019 phase 3 "Source lists"): the metrics of `kind` in the order of the key table, by
+/// menu label. A metric the device does not report is not listed. Empty while the device is
+/// gone.
+fn own_page_source_groups(
+    key: &str,
+    kind: DeviceKind,
+    metrics: &[&str],
+    snap: &Snapshot,
+    cx: &App,
+) -> Vec<SourceGroup> {
+    let Some(entry) = snap.devices.entries.iter().filter(|e| e.present).find(|e| {
+        *e.persistent_key == *key
+            || DeviceKey::from_identity(&e.identity).is_some_and(|k| *k.0 == *key)
+    }) else {
+        return Vec::new();
+    };
+    let items = metrics
+        .iter()
+        .filter_map(|metric_key| {
+            let metric = MetricKey::new(metric_key);
+            let (value, _) = box_reading(kind, &metric, snap, entry.idx, None);
+            if value.validity == Validity::Unsupported {
+                return None;
+            }
+            Some(SourceItem {
+                offered: MetricMeta::of(kind, &metric).map_or(FormSet::empty(), |m| {
+                    m.offered_forms(Some((snap, entry.idx)))
+                }),
+                label: tr(cx, box_metric_name_key(kind, &metric)?),
+                metric,
+                engine: false,
+                device: None,
+            })
+        })
+        .collect();
+    vec![SourceGroup {
+        key: Arc::from(key),
+        name: SharedString::from(entry.display_name.to_string()),
+        items,
+        subs: Vec::new(),
+        add_group: None,
+    }]
+}
+
 /// The sources of the device page `container` on `snap` (ADR-019 phase 3 "Source lists"): the
 /// metrics of the page's own device, from the box lists. Only the CPU and GPU pages offer a
 /// group: the CPU page "All cores >" (`tasklens-hzire.5`), the GPU page "All engines"
@@ -1094,6 +1140,18 @@ pub fn page_source_groups(container: &str, snap: &Snapshot, cx: &App) -> Vec<Sou
         DeviceKind::Cpu => return cpu_page_source_groups(snap, cx),
         DeviceKind::Memory => return memory_page_source_groups(snap, cx),
         DeviceKind::Net => return net_page_source_groups(key, snap, cx),
+        DeviceKind::Fan => {
+            let metrics = [METRIC_SPEED, METRIC_RPM, METRIC_PWM, METRIC_TEMP];
+            return own_page_source_groups(key, DeviceKind::Fan, &metrics, snap, cx);
+        }
+        DeviceKind::Battery => {
+            let metrics = [METRIC_POWER, METRIC_PERCENT];
+            return own_page_source_groups(key, DeviceKind::Battery, &metrics, snap, cx);
+        }
+        DeviceKind::AggregateGpu => {
+            let metrics = [METRIC_UTIL, METRIC_GPU_MEMORY];
+            return own_page_source_groups(key, DeviceKind::AggregateGpu, &metrics, snap, cx);
+        }
         _ => Vec::new(),
     };
     groups

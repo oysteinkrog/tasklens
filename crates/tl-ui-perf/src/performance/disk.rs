@@ -70,7 +70,7 @@ use tl_ui_base::settings_global::{Section, TlSettings};
 use tl_ui_base::shell::{DiskEject, ShellApi};
 use tl_ui_base::text::style::label_style;
 use tl_ui_base::theme::{UiMetrics, current, metrics};
-use tl_ui_chart::chart::{ChartBg, ChartSeries, ChartSpec, ChartView, GridStyle, YScale};
+use tl_ui_chart::chart::ChartView;
 use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use tl_ui_kit::components::icons::TlIcon;
 use tl_ui_kit::components::menu::TlMenu;
@@ -186,25 +186,6 @@ pub(super) fn section_versions(cx: &App) -> [u64; 3] {
         tl.version(Section::Motion),
         tl.version(Section::Appearance),
     ]
-}
-
-pub(super) fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettings) -> ChartSpec {
-    ChartSpec {
-        series,
-        y,
-        range_ns: s.range_ns,
-        grid: GridStyle {
-            lines: true,
-            baseline: false,
-            outline: true,
-            rounded: s.rounded,
-            vertical_at: None,
-        },
-        smooth: s.smooth,
-        background: ChartBg::Window,
-        hover: true,
-        ..ChartSpec::default()
-    }
 }
 
 // ---- Details grid (UI-PRF-030, PERF-049) ----
