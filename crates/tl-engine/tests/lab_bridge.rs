@@ -19,6 +19,7 @@ use tl_collect::sysroot::SysRoot;
 use tl_engine::bridge::{DRAIN_BUDGET, Engine, EngineHooks, HookCtx, OPEN_WAIT, TEARDOWN_BUDGET};
 use tl_engine::client_session::{ClientSessionId, OpenError, SESSIONS_MAX};
 use tl_engine::config::{EngineConfig, EngineMode};
+use tl_engine::desktop::DesktopSource;
 use tl_engine::reducer::{ActionGate, AdmissionView, Publisher};
 use tl_engine::session::engine_root;
 use tl_engine::source::{Source, WorkerIo};
@@ -153,10 +154,16 @@ impl ActionGate for IdleGate {
     }
 }
 
-fn fixture_config(mode: EngineMode) -> EngineConfig {
+/// The fixture config with no desktop and a temp state folder: a test never touches the real
+/// session bus or the fixture tree. Keep the returned dir alive until the engine has shut down.
+fn fixture_config(mode: EngineMode) -> (EngineConfig, tempfile::TempDir) {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../tl-collect/tests/fixtures/minimal-vm");
-    EngineConfig::new(mode, base.join("state")).with_sys_root(SysRoot::at(&base))
+    let state = tempfile::tempdir().expect("state dir");
+    let config = EngineConfig::new(mode, state.path().join("state"))
+        .with_sys_root(SysRoot::at(&base))
+        .with_desktop(DesktopSource::None);
+    (config, state)
 }
 
 #[test]
@@ -178,8 +185,8 @@ fn command_queue_busy_on_257th() {
         ..EngineHooks::default()
     };
     // Low-memory mode has no workers, so only the test fills the queue.
-    let handle =
-        Engine::start(fixture_config(EngineMode::LowMemory), hooks).expect("engine starts");
+    let (config, _state) = fixture_config(EngineMode::LowMemory);
+    let handle = Engine::start(config, hooks).expect("engine starts");
     parked_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("the session calls the gate factory");
@@ -212,8 +219,8 @@ fn open_session_returns_only_after_the_reducer_admits() {
         })),
         ..EngineHooks::default()
     };
-    let handle =
-        Engine::start(fixture_config(EngineMode::LowMemory), hooks).expect("engine starts");
+    let (config, _state) = fixture_config(EngineMode::LowMemory);
+    let handle = Engine::start(config, hooks).expect("engine starts");
     parked_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("the session calls the gate factory");
@@ -324,7 +331,8 @@ fn start_with_fake_workers_publishes() {
         modes: &[EngineMode::Full],
         factory: wall_cpu_factory,
     }];
-    let config = Arc::new(fixture_config(EngineMode::Full));
+    let (config, _state) = fixture_config(EngineMode::Full);
+    let config = Arc::new(config);
     let (ep, ui) = fake_sources::root_endpoints(config, workers);
     rt.handle()
         .try_spawn_with_cx(move |cx| engine_root(cx, ep))
@@ -372,8 +380,8 @@ fn header_rows(snap: &Snapshot) -> usize {
 /// memory worker and the table query instead.
 #[test]
 fn end_to_end_engine_real_runtime() {
-    let handle =
-        Engine::start(fixture_config(EngineMode::Full), EngineHooks::default()).expect("starts");
+    let (config, _state) = fixture_config(EngineMode::Full);
+    let handle = Engine::start(config, EngineHooks::default()).expect("starts");
     let wake = handle.wake();
     handle.set_demand(Demand {
         memory: true,
@@ -466,12 +474,9 @@ fn wall_cpu_spec() -> WorkerSpec {
 
 /// Starts the engine with the fake `Cpu` worker and waits until its samples reach a snapshot.
 fn start_wall_cpu() -> tl_engine::EngineHandle {
-    let handle = Engine::start_with_workers(
-        fixture_config(EngineMode::Full),
-        EngineHooks::default(),
-        vec![wall_cpu_spec()],
-    )
-    .expect("engine starts");
+    let (config, _state) = fixture_config(EngineMode::Full);
+    let handle = Engine::start_with_workers(config, EngineHooks::default(), vec![wall_cpu_spec()])
+        .expect("engine starts");
     let begin = Instant::now();
     while handle.latest().sequence < 2 {
         assert!(
@@ -525,8 +530,9 @@ fn blocked_cpu_factory(_cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
 
 #[test]
 fn shutdown_clean_with_blocked_sample() {
+    let (config, _state) = fixture_config(EngineMode::Full);
     let handle = Engine::start_with_workers(
-        fixture_config(EngineMode::Full),
+        config,
         EngineHooks::default(),
         vec![WorkerSpec {
             id: SourceId::Cpu,

@@ -128,6 +128,8 @@ pub enum DesktopSource {
     /// The engine service: the session comes and goes with KWin on the user bus, and its
     /// variables come from the user manager.
     UserManager,
+    /// No desktop and no session bus: tests. Every session-bus worker stays off.
+    None,
 }
 
 /// The engine's view of the host's desktop session. Cheap to clone: clones share one state.
@@ -188,6 +190,7 @@ impl DesktopSession {
         match self.shared.source {
             DesktopSource::Process => true,
             DesktopSource::UserManager => self.lock_env().is_some(),
+            DesktopSource::None => false,
         }
     }
 
@@ -195,7 +198,7 @@ impl DesktopSession {
     /// inherit them, and while there is no session.
     pub fn overrides(&self) -> Option<Arc<DesktopEnv>> {
         match self.shared.source {
-            DesktopSource::Process => None,
+            DesktopSource::Process | DesktopSource::None => None,
             DesktopSource::UserManager => self.lock_env().clone(),
         }
     }
@@ -208,12 +211,16 @@ impl DesktopSession {
                 .lock_env()
                 .as_ref()
                 .and_then(|env| env.get(key).map(str::to_owned)),
+            DesktopSource::None => None,
         }
     }
 
     /// Records that the session started (`Some`) or ended (`None`). Ignored for `Process`.
     pub fn set(&self, env: Option<DesktopEnv>) {
-        if self.shared.source == DesktopSource::Process {
+        if matches!(
+            self.shared.source,
+            DesktopSource::Process | DesktopSource::None
+        ) {
             return;
         }
         let present = env.is_some();
@@ -443,6 +450,16 @@ mod tests {
             "XDG_SESSION_TYPE=wayland\u{1b}[31m",
             "DISPLAY=:1",
         ]
+    }
+
+    #[test]
+    fn none_session_has_no_desktop() {
+        let session = DesktopSession::new(DesktopSource::None);
+        assert!(!session.is_present());
+        assert_eq!(session.var("WAYLAND_DISPLAY"), None);
+        assert_eq!(session.var("XDG_CURRENT_DESKTOP"), None);
+        assert!(session.overrides().is_none());
+        assert!(session.own_app_id(7, None).is_none());
     }
 
     #[test]

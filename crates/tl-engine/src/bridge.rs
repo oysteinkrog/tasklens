@@ -1028,7 +1028,7 @@ mod tests {
     use tl_model::table::{Manager, UnitRef};
 
     use crate::config::EngineMode;
-    use crate::desktop::APP_ID;
+    use crate::desktop::{APP_ID, DesktopSource};
     use crate::reducer::AdmissionView;
 
     /// Command queue size from ADR-005.
@@ -1290,8 +1290,10 @@ mod tests {
     fn start_returns_empty_snapshot() {
         let base =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../tl-collect/tests/fixtures/minimal-vm");
-        let config = EngineConfig::new(EngineMode::LowMemory, base.join("state"))
-            .with_sys_root(SysRoot::at(&base));
+        let state = tempfile::tempdir().expect("state dir");
+        let config = EngineConfig::new(EngineMode::LowMemory, state.path().join("state"))
+            .with_sys_root(SysRoot::at(&base))
+            .with_desktop(DesktopSource::None);
         let begin = Instant::now();
         let handle = Engine::start(config, EngineHooks::default()).expect("engine starts");
         // Start must not wait for a first sample. The bound is loose so a busy machine does not
@@ -1316,8 +1318,10 @@ mod tests {
     fn wake_after_first_publish() {
         let base =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../tl-collect/tests/fixtures/minimal-vm");
-        let config = EngineConfig::new(EngineMode::LowMemory, base.join("state"))
-            .with_sys_root(SysRoot::at(&base));
+        let state = tempfile::tempdir().expect("state dir");
+        let config = EngineConfig::new(EngineMode::LowMemory, state.path().join("state"))
+            .with_sys_root(SysRoot::at(&base))
+            .with_desktop(DesktopSource::None);
         let handle = Engine::start(config, EngineHooks::default()).expect("engine starts");
         let wake = handle.wake();
         // The first `Tick` after 1 s makes the reducer publish.
@@ -1360,6 +1364,8 @@ mod tests {
         handle: EngineHandle,
         parked_rx: std::sync::mpsc::Receiver<()>,
         release_tx: std::sync::mpsc::Sender<()>,
+        /// Dropped last: the engine's state folder.
+        _state: tempfile::TempDir,
     }
 
     impl Live {
@@ -1378,13 +1384,16 @@ mod tests {
             };
             let base = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../tl-collect/tests/fixtures/minimal-vm");
-            let config = EngineConfig::new(EngineMode::LowMemory, base.join("state"))
-                .with_sys_root(SysRoot::at(&base));
+            let state = tempfile::tempdir().expect("state dir");
+            let config = EngineConfig::new(EngineMode::LowMemory, state.path().join("state"))
+                .with_sys_root(SysRoot::at(&base))
+                .with_desktop(DesktopSource::None);
             let handle = Engine::start(config, hooks).expect("engine starts");
             Self {
                 handle,
                 parked_rx,
                 release_tx,
+                _state: state,
             }
         }
 
@@ -1559,8 +1568,10 @@ mod tests {
     fn port_gets_snapshots_and_its_drop_frees_the_slot() {
         let base =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../tl-collect/tests/fixtures/minimal-vm");
-        let config = EngineConfig::new(EngineMode::LowMemory, base.join("state"))
-            .with_sys_root(SysRoot::at(&base));
+        let state = tempfile::tempdir().expect("state dir");
+        let config = EngineConfig::new(EngineMode::LowMemory, state.path().join("state"))
+            .with_sys_root(SysRoot::at(&base))
+            .with_desktop(DesktopSource::None);
         let handle = Engine::start(config, EngineHooks::default()).expect("engine starts");
         let port = handle.open_session(ClientSessionId(1)).expect("room");
         let wake = port.wake();

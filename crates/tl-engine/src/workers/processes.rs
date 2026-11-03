@@ -219,8 +219,8 @@ impl ProcessesSource {
             ],
             // The engine service has no session until KWin appears (`refresh_protect`).
             compositor_pid: match cfg.desktop.source() {
-                DesktopSource::Process => host_compositor_pid(),
-                DesktopSource::UserManager => None,
+                DesktopSource::Process => host_compositor_pid(cfg.desktop.var("WAYLAND_DISPLAY")),
+                DesktopSource::UserManager | DesktopSource::None => None,
             },
             session_bus_pid: None,
         };
@@ -421,7 +421,11 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
         EngineMode::LowMemory => Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
             let io = io.clone();
             let root = cfg.sys_root.clone();
-            async move { source::run(cx, io, crate::workers::lowmem::LowMemSource::new(root)).await }
+            let display = cfg.desktop.var("WAYLAND_DISPLAY");
+            async move {
+                let source = crate::workers::lowmem::LowMemSource::new(root, display);
+                source::run(cx, io, source).await
+            }
         }),
     }
 }
@@ -615,9 +619,9 @@ impl ProcessesSource {
 }
 
 /// The Wayland compositor of this session, for the protected set.
-fn host_compositor_pid() -> Option<u32> {
+fn host_compositor_pid(display: Option<String>) -> Option<u32> {
     let runtime = absolute(std::env::var_os("XDG_RUNTIME_DIR"))?;
-    let display = std::env::var_os("WAYLAND_DISPLAY").unwrap_or_default();
+    let display = std::ffi::OsString::from(display.unwrap_or_default());
     wayland_compositor_pid(&runtime, &display)
 }
 

@@ -147,9 +147,10 @@ pub(crate) fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
         async move {
             match desktop.source() {
                 DesktopSource::Process => {
-                    let current = std::env::var("XDG_CURRENT_DESKTOP").ok();
+                    let current = desktop.var("XDG_CURRENT_DESKTOP");
                     run(cx, io, commands, current.as_deref()).await
                 }
+                DesktopSource::None => run(cx, io, commands, None).await,
                 DesktopSource::UserManager => run_service(cx, io, commands, desktop).await,
             }
         }

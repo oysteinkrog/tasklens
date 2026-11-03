@@ -47,6 +47,7 @@ use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 
 use crate::config::{EngineConfig, EngineMode};
 use crate::dbus::{Bus, DbusConn, DbusError, connect};
+use crate::desktop::DesktopSource;
 use crate::source::{CommandProgress, IDLE_RECHECK, WorkerCommand, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, SourceUpdate, StartupUpdate, WorkerError};
@@ -149,11 +150,12 @@ pub fn spec() -> WorkerSpec {
     }
 }
 
-pub(crate) fn factory(_cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+pub(crate) fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    let session_bus = cfg.desktop.source() != DesktopSource::None;
     Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
         let io = io.clone();
         let scanner: Scanner = Arc::new(host_scan);
-        async move { run(cx, io, scanner, System).await }
+        async move { run(cx, io, scanner, System { session_bus }).await }
     })
 }
 
@@ -321,7 +323,20 @@ trait UnitFileSignals {
 }
 
 /// The real machine: the process environment, inotify and the session bus.
-struct System;
+struct System {
+    /// False when the engine has no desktop (`DesktopSource::None`): no session bus is opened.
+    session_bus: bool,
+}
+
+impl System {
+    fn require_bus(&self) -> Result<(), DbusError> {
+        if self.session_bus {
+            Ok(())
+        } else {
+            Err(DbusError::Connect("no session bus".into()))
+        }
+    }
+}
 
 impl Host for System {
     type Files = StartupWatch;
@@ -337,10 +352,12 @@ impl Host for System {
     }
 
     async fn subscribe(&self, cx: &Cx) -> Result<UnitFilesSignals, DbusError> {
+        self.require_bus()?;
         UnitFilesSignals::open(cx).await
     }
 
     async fn manager(&self, cx: &Cx) -> Result<SessionManager, DbusError> {
+        self.require_bus()?;
         Ok(SessionManager {
             conn: connect(cx, Bus::Session).await?,
         })
@@ -2008,7 +2025,7 @@ mod tests {
         let rt = crate::runtime::build_runtime().expect("runtime builds");
         let join = rt.handle().spawn_checked(async move {
             let cx = Cx::current().expect("task has a Cx");
-            let Ok(mut m) = System.manager(&cx).await else {
+            let Ok(mut m) = System { session_bus: true }.manager(&cx).await else {
                 return None;
             };
             let listing = m.list(&cx).await.expect("listing");

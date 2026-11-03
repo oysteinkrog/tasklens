@@ -79,6 +79,7 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::config::{EngineConfig, EngineMode};
 use crate::dbus::{Bus, DbusConn, DbusError, ManagerConnSlot, connect};
+use crate::desktop::DesktopSource;
 use crate::source::{IDLE_RECHECK, WorkerCommand, WorkerControl, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, ServicesUpdate, SourceUpdate, WorkerError};
@@ -245,6 +246,13 @@ async fn run<O: Opener>(
     }
     loop {
         let opened = match backend {
+            ServiceBackend::Systemd
+                if manager == Manager::User && cfg.desktop.source() == DesktopSource::None =>
+            {
+                Err(OpenError::Unavailable(DbusError::Connect(
+                    "no session bus".into(),
+                )))
+            }
             ServiceBackend::Systemd => opener.open(&cx, manager).await,
             ServiceBackend::OpenRc => Err(OpenError::Unavailable(DbusError::Connect(
                 "OpenRC has no user manager".into(),
@@ -3703,6 +3711,38 @@ mod tests {
         assert!(matches!(outcome, Outcome::Ok(())), "{outcome:?}");
         let report = lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    /// Fails the test when the worker tries to open a bus.
+    struct PanicBus;
+
+    impl Opener for PanicBus {
+        async fn open(&self, _cx: &Cx, _manager: Manager) -> Result<DbusConn, OpenError> {
+            panic!("a worker without a desktop must not open the session bus");
+        }
+    }
+
+    #[test]
+    fn user_manager_without_session_bus_is_unavailable() {
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
+        let (io, mut rx, _control_tx, _demand_tx) = worker_io();
+        let cfg = Arc::new(
+            EngineConfig::new(EngineMode::Full, std::path::PathBuf::from("/nonexistent"))
+                .with_desktop(DesktopSource::None),
+        );
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let _ = run(cx, io, cfg, Manager::User, &PanicBus).await;
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        assert_eq!(unavailable_count(&mut rx), 1);
+        handle.abort();
+        advance(&mut lab, IDLE_RECHECK);
     }
 
     struct FakeSettings;

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use tl_collect::sysroot::SysRoot;
 use tl_engine::bridge::{DRAIN_BUDGET, Engine, EngineHooks, TEARDOWN_BUDGET};
 use tl_engine::config::{EngineConfig, EngineMode};
+use tl_engine::desktop::DesktopSource;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
 
@@ -19,16 +20,23 @@ const SHUTDOWN_LIMIT: Duration = DRAIN_BUDGET
     .saturating_add(TEARDOWN_BUDGET)
     .saturating_add(Duration::from_secs(2));
 
-fn fixture_config() -> EngineConfig {
+/// The fixture config with no desktop and a temp state folder: a test never touches the real
+/// session bus or the fixture tree. Keep the returned dir alive until the engine has shut down.
+fn fixture_config() -> (EngineConfig, tempfile::TempDir) {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../tl-collect/tests/fixtures/minimal-vm");
-    EngineConfig::new(EngineMode::Full, base.join("state")).with_sys_root(SysRoot::at(&base))
+    let state = tempfile::tempdir().expect("state dir");
+    let config = EngineConfig::new(EngineMode::Full, state.path().join("state"))
+        .with_sys_root(SysRoot::at(&base))
+        .with_desktop(DesktopSource::None);
+    (config, state)
 }
 
 /// Starts the engine, waits `delay`, shuts it down and checks the report. With `keep_clone`, a
 /// second handle stays alive across the shutdown, as the GPUI global does in `tl-app`.
 fn shutdown_after(delay: Duration, keep_clone: bool) {
-    let handle = Engine::start(fixture_config(), EngineHooks::default()).expect("engine starts");
+    let (config, _state) = fixture_config();
+    let handle = Engine::start(config, EngineHooks::default()).expect("engine starts");
     let clone = keep_clone.then(|| handle.clone());
     std::thread::sleep(delay);
     let begin = Instant::now();

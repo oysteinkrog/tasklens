@@ -107,7 +107,7 @@ impl LowMemSource {
     /// The user names come from `<root>/etc/passwd`, where `<root>` is the parent of
     /// `root.proc`. Never fails: a boot id or cgroup root that cannot be read now is tried
     /// again at each sweep.
-    pub fn new(root: SysRoot) -> Self {
+    pub fn new(root: SysRoot, display: Option<String>) -> Self {
         let base = root.proc.parent().unwrap_or(Path::new("/"));
         let users = PasswdUserNames::load(&base.join("etc/passwd"));
         let protect = ProtectInputs {
@@ -117,7 +117,7 @@ impl LowMemSource {
                     .get()
                     .unsigned_abs()
             ],
-            compositor_pid: host_compositor_pid(),
+            compositor_pid: host_compositor_pid(display),
             session_bus_pid: None,
         };
         Self {
@@ -607,12 +607,12 @@ fn open_cgroup_root(root: &SysRoot) -> Option<OwnedFd> {
 }
 
 /// The Wayland compositor of this session, for the protected set, as the full sweep finds it.
-fn host_compositor_pid() -> Option<u32> {
+fn host_compositor_pid(display: Option<String>) -> Option<u32> {
     let runtime = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
     if !runtime.is_absolute() {
         return None;
     }
-    let display = std::env::var_os("WAYLAND_DISPLAY").unwrap_or_default();
+    let display = std::ffi::OsString::from(display.unwrap_or_default());
     wayland_compositor_pid(&runtime, &display)
 }
 
@@ -747,7 +747,7 @@ mod tests {
         }
 
         fn source(&self) -> LowMemSource {
-            LowMemSource::new(self.root())
+            LowMemSource::new(self.root(), None)
                 .with_self_uid(1000)
                 .with_clock(test_clock)
         }
