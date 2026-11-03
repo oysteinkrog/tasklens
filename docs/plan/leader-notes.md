@@ -1118,3 +1118,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-11-03 closed 23 finished epics (fb52cde2d says 24; cr0 stays open for cr0.20, queued). qfx.38 stays held at the owner's choice.
 - 2026-11-03 02dhy: same-name app groups get a group-kind suffix only where names clash; the filter chip shows it too. m4fs2: keep straight-line stacking (UI-PRF-060); fix only the switch gap and the hover clear on MouseExitEvent.
 - 2026-11-03 general rule for prep decisions: when the prep's recommended option stays inside the current spec, changes no shared rule and needs no owner input, take it without a HELD round. Hold only for spec changes, cross-chart rules or owner questions.
+- 2026-11-04 cr0.20: tasklens takes over Meta+Esc (System Monitor's key on Plasma 6.8), not Ctrl+Esc; off restores System Monitor's default; shortcut checks run in a nested KWin with its own kglobalaccel. qfx.15 root tests run by the leader: 6/6 pass.
