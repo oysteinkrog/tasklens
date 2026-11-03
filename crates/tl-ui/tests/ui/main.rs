@@ -12,7 +12,7 @@ mod components_words;
 mod connections_shell;
 mod demand;
 mod detached;
-mod device_pages;
+mod device_pages_shell;
 mod focus;
 mod history_shell;
 mod host_clock;

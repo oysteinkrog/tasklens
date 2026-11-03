@@ -1,12 +1,14 @@
 //! tl-ui-perf integration tests in one test binary (ADR-020): the Overview and device page
 //! widget tests that need the device sidebar (tasklens-zljr5.38), the device pages
-//! (tasklens-zljr5.39), and the OverviewPage and time range tests (tasklens-zljr5.41), moved
-//! from the tl-ui `ui` binary.
+//! (tasklens-zljr5.39), the OverviewPage and time range tests (tasklens-zljr5.41), and the
+//! device_pages and net_page tests that need no shell (tasklens-zljr5.52), moved from the tl-ui
+//! `ui` binary.
 //!
 //! Run with `cargo test -p tl-ui-perf --features test-hooks --test perf`.
 
 mod battery_page;
 mod cpu_page;
+mod device_pages;
 mod disk_page;
 mod fan_page;
 mod gpu_page;
