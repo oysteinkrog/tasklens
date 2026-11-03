@@ -8,7 +8,7 @@
 //!
 //! The placer draws only what is not a widget: the gaps. Each page says how tall each of its
 //! parts is ([`PagePart`]); the Details widget and the blocks are as tall as their content,
-//! which their views measure ([`PartHeight::Natural`]). The page's own module (`page_flow::cpu`
+//! which their views measure ([`PartHeight::Natural`]). The page's own module (`page_flow::gpu`
 //! and the others, added by the page beads) gives its heights; [`default_part`] is the rule
 //! every page shares.
 //!
@@ -25,6 +25,8 @@ use super::widget::compose::ROW_H;
 use super::widget::container::{FlowInput, FlowPlace};
 use super::widget::grid::{InnerGrid, InnerPlacement, PlacedWidget};
 use super::widget::source::Availability;
+
+pub mod gpu;
 
 /// The gap between two page parts (`sp4`), logical px.
 pub const PART_GAP: f32 = 8.;
@@ -66,9 +68,10 @@ pub struct PagePart {
     pub height: PartHeight,
     /// The gap above the part, logical px. The first placed part has none.
     pub gap: f32,
-    /// The part sits beside the next part that is a pair too (the GPU page's Memory and
-    /// Temperature charts).
-    pub pair: bool,
+    /// `Some(row)`: the part sits beside the next part of the same pair row (the GPU page's
+    /// Memory and Temperature charts are row 1, Power and Clocks row 2). One part of a row
+    /// alone takes the full width.
+    pub pair: Option<u8>,
 }
 
 /// The part a page widget is: `None` when it takes no space.
@@ -82,7 +85,7 @@ pub fn default_part(w: &WidgetSetting, details: &Rc<Cell<f32>>) -> PagePart {
     let chart = PagePart {
         height: PartHeight::Fixed(GRAPH_H_STACKED),
         gap: PART_GAP,
-        pair: false,
+        pair: None,
     };
     match &w.content {
         WidgetContent::Metric(_) if w.forms.contains(FormSet::CHART) => chart,
@@ -97,12 +100,12 @@ pub fn default_part(w: &WidgetSetting, details: &Rc<Cell<f32>>) -> PagePart {
                 estimate: DETAILS_HEAD,
             },
             gap: DETAILS_GAP,
-            pair: false,
+            pair: None,
         },
         WidgetContent::Fixed(kind) => PagePart {
             height: PartHeight::Fixed(super::widget::compose::fixed_min(kind).height),
             gap: BLOCK_GAP,
-            pair: false,
+            pair: None,
         },
     }
 }
@@ -145,7 +148,8 @@ pub fn place_column(
         if i > 0 {
             y += part.gap * s;
         }
-        let pair = part.pair && parts.get(i + 1).is_some_and(|(_, p)| p.pair);
+        let pair =
+            part.pair.is_some() && parts.get(i + 1).is_some_and(|(_, p)| p.pair == part.pair);
         if pair {
             let (id2, part2) = &parts[i + 1];
             let gap = PART_GAP * s;
@@ -302,7 +306,7 @@ mod tests {
             Some(PagePart {
                 height: PartHeight::Fixed(150.),
                 gap: PART_GAP,
-                pair: w.id != 3,
+                pair: (w.id != 3).then_some(1),
             })
         };
         let p = placed(&l, &[], 1., &part);

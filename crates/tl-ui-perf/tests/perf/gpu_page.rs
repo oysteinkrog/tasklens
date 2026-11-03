@@ -1,4 +1,6 @@
 //! GPU page: probe states, the Memory chart and demand (E25, UI-PRF-032; PERF-062 to PERF-065).
+//! The page body is a widget container since `tasklens-hzire.4`: the charts are chart widgets,
+//! found by metric (`GpuPage::chart_of`), and their boxes by the widget selectors.
 
 use std::sync::Arc;
 
@@ -22,7 +24,9 @@ use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_chart::chart::{ChartState, LegendStyle};
 use tl_ui_kit::components::kv_grid;
+use tl_ui_overview::widget::metric_widget::widget_id;
 use tl_ui_perf::performance::gpu::{GpuPage, GpuVendor, ProbeState};
+use tl_ui_perf::performance::gpu_views::engines_id;
 use tl_ui_perf::performance::page::DevicePage as _;
 use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
@@ -208,7 +212,7 @@ fn open<'a>(cx: &'a mut TestAppContext, module: &str, temp_source: &str, shared:
     });
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
     let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-    let key = DeviceKey(Arc::from("gpu:GPU-0100"));
+    let key = gpu_key();
     let row = DeviceRow {
         key: key.clone(),
         kind: DeviceKind::Gpu,
@@ -233,6 +237,40 @@ fn open<'a>(cx: &'a mut TestAppContext, module: &str, temp_source: &str, shared:
         engine,
         vcx,
     }
+}
+
+/// The page's device key: the persistent key of the GPU's identity, which its widget sources
+/// resolve.
+fn gpu_key() -> DeviceKey {
+    DeviceKey::from_identity(&DeviceIdentity::Gpu {
+        uuid: [1; 16],
+        pci_bus_id: Arc::from("0000:2d:00.0"),
+    })
+    .expect("gpu key")
+}
+
+/// The debug selector of the box of the first widget of `metric` (a chart widget's root).
+fn widget_box(r: &mut Rig, metric: &str) -> Option<&'static str> {
+    let page = r.page.clone();
+    r.vcx.update(|_, cx| {
+        let p = page.read(cx);
+        let c = p.container().read(cx);
+        c.layout()
+            .widgets
+            .iter()
+            .find(|w| {
+                matches!(&w.content, tl_ui_settings::layout::WidgetContent::Metric(s)
+                    if s.metric.as_str() == metric)
+            })
+            .map(|w| &*String::leak(widget_id(p.container_id(), w.id)))
+    })
+}
+
+/// The debug selector of the engine grid box.
+fn engines_box(r: &mut Rig) -> &'static str {
+    let page = r.page.clone();
+    r.vcx
+        .update(|_, cx| &*String::leak(engines_id(page.read(cx).container_id())))
 }
 
 fn nvidia(cx: &mut TestAppContext) -> Rig<'_> {
@@ -306,7 +344,10 @@ fn gpu_probe_restart_glyphs(cx: &mut TestAppContext) {
             p.probe_tooltip().map(|t| t.as_ref()),
             Some("GPU monitor restarting")
         );
-        for view in [p.memory(), p.temperature()] {
+        for view in [
+            p.memory(cx).expect("memory chart"),
+            p.temperature(cx).expect("temperature chart"),
+        ] {
             let v = view.read(cx);
             assert_eq!(v.state, ChartState::Failed("GPU monitor restarting".into()));
             assert_eq!(v.value_now().map(|(_, s)| s), Some(Validity::Failed), "`!`");
@@ -328,7 +369,10 @@ fn gpu_probe_restart_glyphs(cx: &mut TestAppContext) {
         let p = r.page.read(cx);
         assert_eq!(p.probe(), ProbeState::Ok);
         assert_eq!(p.probe_tooltip(), None);
-        assert_eq!(p.memory().read(cx).state, ChartState::Live);
+        assert_eq!(
+            p.memory(cx).expect("memory chart").read(cx).state,
+            ChartState::Live
+        );
     });
 }
 
@@ -357,7 +401,10 @@ fn gpu_probe_missing_placeholder_cell(cx: &mut TestAppContext) {
             Some(Validity::Unsupported),
             "`n/a`"
         );
-        for view in [p.memory(), p.temperature()] {
+        for view in [
+            p.memory(cx).expect("memory chart"),
+            p.temperature(cx).expect("temperature chart"),
+        ] {
             assert_eq!(view.read(cx).state, ChartState::Unsupported);
         }
     });
@@ -371,7 +418,7 @@ fn gpu_probe_states_only_on_nvidia(cx: &mut TestAppContext) {
         let p = r.page.read(cx);
         assert_eq!(p.vendor(), GpuVendor::Amd);
         assert_eq!(p.probe(), ProbeState::Ok);
-        let state = &p.memory().read(cx).state;
+        let state = &p.memory(cx).expect("memory chart").read(cx).state;
         assert!(
             !matches!(state, ChartState::Failed(_) | ChartState::Unsupported),
             "{state:?}"
@@ -383,7 +430,7 @@ fn gpu_probe_states_only_on_nvidia(cx: &mut TestAppContext) {
 fn gpu_memory_legend_without_shared(cx: &mut TestAppContext) {
     let r = nvidia(cx);
     r.vcx.update(|_, cx| {
-        let v = r.page.read(cx).memory().read(cx);
+        let v = r.page.read(cx).memory(cx).expect("memory chart").read(cx);
         assert_eq!(v.spec.series.len(), 1);
         assert_eq!(v.spec.series[0].id.metric, MetricId::GPU_MEM);
         let legend: Vec<(&str, LegendStyle)> = v
@@ -409,7 +456,7 @@ fn gpu_memory_legend_without_shared(cx: &mut TestAppContext) {
 fn gpu_memory_shared_series_when_reported(cx: &mut TestAppContext) {
     let r = open(cx, "amdgpu", "hwmon amdgpu: junction", true);
     r.vcx.update(|_, cx| {
-        let v = r.page.read(cx).memory().read(cx);
+        let v = r.page.read(cx).memory(cx).expect("memory chart").read(cx);
         assert_eq!(v.spec.series.len(), 2);
         assert_eq!(v.spec.series[1].id.metric, MetricId::GPU_MEM_SHARED);
         assert!(v.spec.series[1].dashed);
@@ -744,7 +791,9 @@ fn gpu_memory_value_text_painted(cx: &mut TestAppContext) {
     use tl_model::time::now_boot_ns;
 
     let r = nvidia(cx);
-    let memory = r.vcx.update(|_, cx| r.page.read(cx).memory().clone());
+    let memory = r
+        .vcx
+        .update(|_, cx| r.page.read(cx).memory(cx).expect("memory chart"));
     let now = now_boot_ns();
     let view = Arc::new(SeriesView {
         id: SeriesId {
@@ -781,7 +830,6 @@ mod engines {
     use tl_model::system::GpuEngine;
     use tl_ui_kit::components::menu::{MenuEntryKind, TlMenu};
     use tl_ui_perf::performance::actions::PerfToggleGpuEngine;
-    use tl_ui_perf::performance::gpu::{ENGINES_ID, MEMORY_ID};
     use tl_ui_perf::performance::menu::{PageMenuCtx, page_menu};
 
     use super::*;
@@ -826,20 +874,23 @@ mod engines {
             window.focus(&focus, cx);
         });
         r.vcx.dispatch_action(PerfToggleGpuEngine {
-            key: DeviceKey(Arc::from("gpu:GPU-0100")),
+            key: gpu_key(),
             engine: Arc::from(engine),
         });
         draw(r.vcx);
     }
 
+    /// The engine grid's height; 0 while it takes no space (it is not drawn then).
     fn box_height(r: &mut Rig) -> f32 {
-        f32::from(
-            r.vcx
-                .debug_bounds(ENGINES_ID)
-                .expect("engine box")
-                .size
-                .height,
-        )
+        let id = engines_box(r);
+        r.vcx
+            .debug_bounds(id)
+            .map_or(0., |b| f32::from(b.size.height))
+    }
+
+    fn memory_top(r: &mut Rig) -> gpui_kit::Pixels {
+        let id = widget_box(r, "memory").expect("memory widget");
+        r.vcx.debug_bounds(id).expect("memory").top()
     }
 
     #[gpui_kit::test]
@@ -884,13 +935,13 @@ mod engines {
         for e in ["gpu", "memctl", "enc"] {
             toggle(&mut r, e);
         }
-        let before = r.vcx.debug_bounds(MEMORY_ID).expect("memory").top();
+        let before = memory_top(&mut r);
         toggle(&mut r, "dec");
         r.vcx.executor().advance_clock(Duration::from_millis(250));
         draw(r.vcx);
         assert!(cell_keys(&mut r).is_empty());
         assert_eq!(box_height(&mut r), 0.);
-        let after = r.vcx.debug_bounds(MEMORY_ID).expect("memory").top();
+        let after = memory_top(&mut r);
         assert_eq!(f32::from(before - after), 112. + 8., "rows 2 and 3 move up");
         toggle(&mut r, "dec");
         r.vcx.executor().advance_clock(Duration::from_millis(250));
@@ -932,7 +983,7 @@ mod engines {
                 .map(|e| {
                     let hide = e.action.as_ref().map(|a| {
                         a.partial_eq(&PerfToggleGpuEngine {
-                            key: DeviceKey(Arc::from("gpu:GPU-0100")),
+                            key: gpu_key(),
                             engine: Arc::from("memctl"),
                         })
                     });
@@ -1269,32 +1320,55 @@ mod optional {
     use gpui_kit::{Focusable as _, TestAppContext};
     use tl_model::system::ClockEventReasons;
     use tl_ui_perf::performance::actions::PerfToggleGpuOptionalGraph;
-    use tl_ui_perf::performance::gpu::{CLOCKS_ID, ENGINES_ID, POWER_ID};
     use tl_ui_settings::settings::GpuOptionalGraph;
 
     use super::*;
 
+    /// Turns the page's Power and Clocks charts on or off with the page menu's items, so the
+    /// page shows the charts of `list`.
     fn set_optional(r: &mut Rig, list: &[GpuOptionalGraph]) {
-        r.vcx.update(|_, cx| {
-            TlSettings::update(cx, |d| {
-                d.settings.performance.gpu_optional_graphs = list.to_vec();
-            });
+        let page = r.page.clone();
+        r.vcx.update(|window, cx| {
+            let focus = page.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
         });
+        for (which, metric) in [
+            (GpuOptionalGraph::Power, "power"),
+            (GpuOptionalGraph::Clocks, "clocks"),
+        ] {
+            let on = widget_box(r, metric).is_some();
+            if on != list.contains(&which) {
+                r.vcx.dispatch_action(PerfToggleGpuOptionalGraph {
+                    key: gpu_key(),
+                    which,
+                });
+            }
+        }
         draw(r.vcx);
     }
 
-    fn width(r: &mut Rig, id: &'static str) -> f32 {
-        f32::from(r.vcx.debug_bounds(id).expect("chart box").size.width)
+    fn box_of(r: &mut Rig, metric: &str) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+        let id = widget_box(r, metric)?;
+        r.vcx.debug_bounds(id)
+    }
+
+    fn width(r: &mut Rig, metric: &str) -> f32 {
+        f32::from(box_of(r, metric).expect("chart box").size.width)
+    }
+
+    fn engines_width(r: &mut Rig) -> f32 {
+        let id = engines_box(r);
+        f32::from(r.vcx.debug_bounds(id).expect("engine box").size.width)
     }
 
     #[gpui_kit::test]
     fn gpu_optional_row_full_width_when_one(cx: &mut TestAppContext) {
         let mut r = nvidia(cx);
         set_optional(&mut r, &[GpuOptionalGraph::Power]);
-        let engines = width(&mut r, ENGINES_ID);
-        assert_eq!(width(&mut r, POWER_ID), engines, "one chart spans row 3");
-        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_none());
-        let height = f32::from(r.vcx.debug_bounds(POWER_ID).expect("power").size.height);
+        let engines = engines_width(&mut r);
+        assert_eq!(width(&mut r, "power"), engines, "one chart spans row 3");
+        assert!(box_of(&mut r, "clocks").is_none());
+        let height = f32::from(box_of(&mut r, "power").expect("power").size.height);
         assert_eq!(height, 150.);
     }
 
@@ -1302,26 +1376,27 @@ mod optional {
     fn gpu_optional_row_split(cx: &mut TestAppContext) {
         let mut r = nvidia(cx);
         set_optional(&mut r, &[GpuOptionalGraph::Power, GpuOptionalGraph::Clocks]);
-        let engines = width(&mut r, ENGINES_ID);
+        let engines = engines_width(&mut r);
         let half = (engines - 8.) / 2.;
-        assert_eq!(width(&mut r, POWER_ID), half);
-        assert_eq!(width(&mut r, CLOCKS_ID), half);
+        assert_eq!(width(&mut r, "power"), half);
+        assert_eq!(width(&mut r, "clocks"), half);
     }
 
     #[gpui_kit::test]
     fn gpu_optional_row_absent(cx: &mut TestAppContext) {
         let mut r = nvidia(cx);
-        assert!(r.vcx.debug_bounds(POWER_ID).is_none());
-        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_none());
+        assert!(box_of(&mut r, "power").is_none());
+        assert!(box_of(&mut r, "clocks").is_none());
         r.vcx.update(|_, cx| {
             let page = r.page.read(cx);
-            assert!(page.power().is_none() && page.clocks().is_none());
+            assert!(page.power(cx).is_none() && page.clocks(cx).is_none());
         });
         set_optional(&mut r, &[GpuOptionalGraph::Power]);
+        assert!(box_of(&mut r, "power").is_some());
         set_optional(&mut r, &[]);
-        assert!(r.vcx.debug_bounds(POWER_ID).is_none(), "dropped again");
+        assert!(box_of(&mut r, "power").is_none(), "dropped again");
         r.vcx
-            .update(|_, cx| assert!(r.page.read(cx).power().is_none()));
+            .update(|_, cx| assert!(r.page.read(cx).power(cx).is_none()));
     }
 
     #[gpui_kit::test]
@@ -1330,10 +1405,10 @@ mod optional {
         set_optional(&mut r, &[GpuOptionalGraph::Power]);
         r.vcx.update(|_, cx| {
             let page = r.page.read(cx);
-            let view = page.power().expect("power chart").read(cx);
+            let view = page.power(cx).expect("power chart").read(cx);
             assert_eq!(view.value_text().map(|t| t.as_ref()), Some("31.9 / 300 W"));
             assert_eq!(
-                page.power_tooltip().map(|t| t.as_ref()),
+                page.tip_of("power", cx).as_deref(),
                 Some("Limit range 100 to 350 W · 1.24 kWh since boot")
             );
         });
@@ -1345,7 +1420,7 @@ mod optional {
         publish_totals(&mut r, &t);
         r.vcx.update(|_, cx| {
             assert_eq!(
-                r.page.read(cx).power_tooltip().map(|t| t.as_ref()),
+                r.page.read(cx).tip_of("power", cx).as_deref(),
                 Some("max 350 W · 1.24 kWh since boot")
             );
         });
@@ -1357,19 +1432,19 @@ mod optional {
         set_optional(&mut r, &[GpuOptionalGraph::Clocks]);
         r.vcx.update(|_, cx| {
             let page = r.page.read(cx);
-            let view = page.clocks().expect("clocks chart").read(cx);
+            let view = page.clocks(cx).expect("clocks chart").read(cx);
             assert_eq!(
                 view.value_text().map(|t| t.as_ref()),
                 Some("1905 / 3105 MHz")
             );
-            assert_eq!(page.clocks_tooltip().map(|t| t.as_ref()), Some("P3"));
+            assert_eq!(page.tip_of("clocks", cx).as_deref(), Some("P3"));
         });
         let mut t = full_totals();
         t.clock_event_reasons = Metric::valid(ClockEventReasons::POWER_CAP);
         publish_totals(&mut r, &t);
         r.vcx.update(|_, cx| {
             assert_eq!(
-                r.page.read(cx).clocks_tooltip().map(|t| t.as_ref()),
+                r.page.read(cx).tip_of("clocks", cx).as_deref(),
                 Some("P3 · Throttled: power cap")
             );
         });
@@ -1378,12 +1453,14 @@ mod optional {
         publish_totals(&mut r, &t);
         r.vcx.update(|_, cx| {
             assert_eq!(
-                r.page.read(cx).clocks_tooltip().map(|t| t.as_ref()),
+                r.page.read(cx).tip_of("clocks", cx).as_deref(),
                 Some("P3 · Throttled: power cap, hardware thermal")
             );
         });
     }
 
+    /// The Power and Clocks items edit this page's flow layout and leave
+    /// `gpu_optional_graphs` as it was (ADR-019 phase 3).
     #[gpui_kit::test]
     fn gpu_toggle_optional_graph(cx: &mut TestAppContext) {
         let r = nvidia(cx);
@@ -1393,7 +1470,7 @@ mod optional {
             window.focus(&focus, cx);
         });
         r.vcx.dispatch_action(PerfToggleGpuOptionalGraph {
-            key: DeviceKey(Arc::from("gpu:GPU-0100")),
+            key: gpu_key(),
             which: GpuOptionalGraph::Clocks,
         });
         draw(r.vcx);
@@ -1402,15 +1479,16 @@ mod optional {
                 .performance
                 .gpu_optional_graphs
                 .clone();
-            assert_eq!(list, [GpuOptionalGraph::Clocks]);
-            assert!(r.page.read(cx).clocks().is_some());
+            assert!(list.is_empty(), "the old key is not written");
+            assert!(r.page.read(cx).clocks(cx).is_some());
         });
-        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_some());
+        let mut r = r;
+        assert!(box_of(&mut r, "clocks").is_some());
         r.vcx.dispatch_action(PerfToggleGpuOptionalGraph {
-            key: DeviceKey(Arc::from("gpu:GPU-0100")),
+            key: gpu_key(),
             which: GpuOptionalGraph::Clocks,
         });
         draw(r.vcx);
-        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_none());
+        assert!(box_of(&mut r, "clocks").is_none());
     }
 }

@@ -1,10 +1,26 @@
-//! The GPU page: the engine grid, the Memory and Temperature charts side by side, and the probe
-//! states (docs/ui/performance.md UI-PRF-032; PERF-062 to PERF-065, PERF-068; R-054).
+//! The GPU page: the engine grid, the Memory and Temperature charts side by side, Details and
+//! Displays, and the probe states (docs/ui/performance.md UI-PRF-032; PERF-062 to PERF-065,
+//! PERF-068; R-054).
 //!
-//! The page re-renders only when its header, probe state, engine list or Details rows change.
-//! The engine grid is one `ChartGridView` (ADR-009 rule 7) and each chart is a cached view that
-//! re-renders for its own series. A sample that changes nothing the page draws costs one compare
-//! of the reported engine bits and the memory totals.
+//! The page body is one widget container (ADR-019 phase 3, `tasklens-hzire.4`). By default it
+//! holds the 1.3.0 parts in their 1.3.0 places (`page_flow::gpu`): the engine grid
+//! ([`GpuEngineGridView`] as the fixed widget `gpu_engine_grid`), the Memory and Temperature
+//! chart widgets, Power and Clocks when `performance.gpu_optional_graphs` lists them, the
+//! Details widget and the Displays block ([`GpuDisplaysView`], fixed widget `gpu_displays`).
+//! Edit Widgets adds any engine, all engines, VRAM, shared memory, clocks, power, temperature
+//! and fan as chart, bar, value, stats or any mix. Each GPU has its own layout,
+//! `page.<gpu key>`.
+//!
+//! A GPU page converts `gpu_optional_graphs` the first time the window builds it, when the page
+//! has no entry and the list is not empty: it arms the `settings.toml.pre-layouts-v2` copy
+//! (`AppEnv.keep_pre_layouts_copy`) and writes `convert_gpu_page` as its entry. The "Power" and
+//! "Clocks" items of the page menu add or remove those widgets in the page's flow layout; they
+//! never write `gpu_optional_graphs`, which every GPU page reads.
+//!
+//! Render contract: the page renders on a header change, a range change and a layout change,
+//! never because of a sample. The engine grid, the charts, Details and Displays are views of
+//! their own that notify only for their own changes. The engine grid is one `ChartGridView`
+//! (ADR-009 rule 7).
 //!
 //! The page's words are `en-US.ftl` keys, translated once per strings version into [`Words`].
 
@@ -14,130 +30,72 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
-use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, AppContext as _, AsyncApp,
-    Context, Div, ElementId, Entity, EntityId, FocusHandle, Focusable, FontWeight,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Point, Render, SharedString, StyleRefinement, Styled as _, Subscription, WeakEntity, Window,
-    canvas, div, px,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Subscription, Window, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceEntry, DeviceIdentity};
-use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::snapshot::{DisplayMode, GraphicsAdapter, Snapshot};
-use tl_model::system::{ClockEventReasons, GpuEngine, GpuTotals, Metric};
+use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::units;
 use tl_model::validity::Validity;
+use tl_ui_settings::layout::{
+    ContainerLayout, DeviceSelector, FixedWidget, FormSet, METRIC_POWER, METRIC_TEMP, MetricKey,
+    SourceSelector, WidgetContent, WidgetOptions, WidgetSetting, container_layout,
+};
+use tl_ui_settings::layout_pages::{
+    METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, convert_page, page_container, page_needs_conversion,
+};
 use tl_ui_settings::settings::GpuOptionalGraph;
 
-use super::actions::{PerfToggleGpuEngine, PerfToggleGpuOptionalGraph};
-// The engine model moved to `core/gpu.rs` (tasklens-zljr5.22). These keep the old paths working.
+use super::actions::{
+    PerfToggleGpuEngine, PerfToggleGpuOptionalGraph, PerfWidgetEditStart, PerfWidgetResetPage,
+};
+use super::aggregate::{add_demand, page_layout, reset_page, start_page_edit, strings_version};
+// The engine model moved to `core/gpu.rs` (tasklens-zljr5.22), and the probe state with it
+// (tasklens-hzire.4). These keep the old paths working.
 pub(crate) use super::core::gpu::gpu_totals;
 #[cfg(test)]
 use super::core::gpu::reported_bits;
-pub use super::core::gpu::{GpuVendor, adapter, device_engines, engine_cells};
-use super::core::gpu::{NAME_3D, Reported, vendor_cells};
+pub use super::core::gpu::{
+    GpuVendor, PROBE_NOT_INSTALLED, ProbeState, adapter, device_engines, engine_cells, probe_state,
+};
+use super::core::gpu::{KEY_MISSING, KEY_RESTARTING, NAME_3D, Reported, vendor_cells};
 use super::details::{Fallback, KeyValueModel};
-use super::menu::ClickedEngine;
+use super::gpu_views::{
+    DisplaysShown, EnginesShown, GpuDisplaysView, GpuEngineGridView, PartResized,
+};
+pub use super::gpu_views::{ENGINE_CELL_H, ENGINE_CELL_MIN_W, ENGINE_TIP_ID};
 use super::page::{
-    DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_history_request, page_range_ns,
+    DevicePage, DevicePageFrame, details_draw, header_text, page_history_request, page_range_ns,
     page_words,
 };
+use super::page_flow::gpu::{GpuParts, gpu_flow};
+use super::widget::container::WidgetContainer;
+use super::widget::details_widget::{DetailsResized, DetailsShown, DetailsView};
+use super::widget::edit::{WidgetEditor, default_layout};
+use super::widget::fixed_widget::FixedContent;
+use super::widget::source::SourceStore;
 use super::{DeviceKey, DeviceKind, DeviceRow};
+use tl_ui_base::app_env::AppEnv;
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
-use tl_ui_base::selector::TlSelector;
-use tl_ui_base::settings_global::{Section, TlSettings, animations_on};
-use tl_ui_base::text::style::label_style;
+use tl_ui_base::settings_global::{Section, TlSettings};
 use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
-use tl_ui_chart::chart::labels::LABEL_ROW;
 use tl_ui_chart::chart::{
     ChartBg, ChartGridSpec, ChartGridView, ChartLabels, ChartSeries, ChartSpec, ChartState,
-    ChartView, GridCellSpec, GridStyle, LegendStyle, ValueAlign, ValueFormat, YScale, grid_height,
-    grid_layout,
+    ChartView, GridCellSpec, GridStyle, LegendStyle, ValueAlign, ValueFormat, YScale,
 };
 use tl_ui_kit::components::menu::TlMenu;
-use tl_ui_kit::components::motion::{M_BASE, ease_out_cubic};
-use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
-/// `grid_cell_h`, × ui_scale.
-pub const ENGINE_CELL_H: f32 = 112.;
-/// Minimum engine cell width, × ui_scale.
-pub const ENGINE_CELL_MIN_W: f32 = 160.;
-
-/// Debug selector of the engine grid box.
+/// The debug selector prefix of the engine grid box; the box's selector adds the page
+/// container id (`gpu_views::engines_id`).
 pub const ENGINES_ID: &str = "perf-gpu-engines";
-/// Debug selector of the Memory chart box.
-pub const MEMORY_ID: &str = "perf-gpu-memory";
-/// Debug selector of the Temperature chart box.
-pub const TEMPERATURE_ID: &str = "perf-gpu-temperature";
-/// Debug selector of the Power chart box.
-pub const POWER_ID: &str = "perf-gpu-power";
-/// Debug selector of the Clocks chart box.
-pub const CLOCKS_ID: &str = "perf-gpu-clocks";
-/// The trigger over the Power heading.
-pub const POWER_TIP_ID: &str = "perf-gpu-power-tooltip";
-/// The trigger over the Clocks heading.
-pub const CLOCKS_TIP_ID: &str = "perf-gpu-clocks-tooltip";
-
-/// The `last_error` of the GPU source when the probe binary is missing. The engine's
-/// `gpu::NOT_INSTALLED` holds the same text.
-pub const PROBE_NOT_INSTALLED: &str = "GPU probe not installed";
-
-const KEY_MEMORY: &str = "perf-gpu-heading-memory";
-const KEY_TEMPERATURE: &str = "perf-gpu-heading-temperature";
-const KEY_MEMORY_USAGE: &str = "perf-gpu-range-memory";
-const KEY_DEDICATED: &str = "perf-gpu-legend-dedicated";
-const KEY_SHARED: &str = "perf-gpu-legend-shared";
-const KEY_POWER: &str = "perf-gpu-heading-power";
-const KEY_CLOCKS: &str = "perf-gpu-heading-clocks";
-const KEY_POWER_DRAW: &str = "perf-gpu-row-power";
-const KEY_CLOCK_SPEED: &str = "perf-gpu-row-clock";
-const KEY_GPU_CLOCK: &str = "perf-gpu-legend-gpu-clock";
-const KEY_MEM_CLOCK: &str = "perf-gpu-legend-mem-clock";
-const KEY_RESTARTING: &str = "perf-gpu-probe-restarting";
-const KEY_MISSING: &str = "perf-gpu-probe-missing";
-
-/// The trigger over a hovered engine heading that has a tooltip.
-pub const ENGINE_TIP_ID: &str = "perf-gpu-engine-tooltip";
-
-/// Width used for the grid height before the first paint has measured the box.
-const UNMEASURED_W: f32 = 1.0e6;
-
-/// The state of the NVIDIA probe as the page shows it (PERF-062).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ProbeState {
-    #[default]
-    Ok,
-    /// The GPU source is in backoff: values `!`, plots stop.
-    Restarting,
-    /// The probe binary is not installed: values `n/a`, one placeholder engine cell.
-    Missing,
-}
-
-/// The probe state for a GPU of `vendor` from the snapshot's source health. AMD, Intel and
-/// unknown GPUs are always `Ok`.
-pub fn probe_state(vendor: GpuVendor, snap: &Snapshot) -> ProbeState {
-    if vendor != GpuVendor::Nvidia {
-        return ProbeState::Ok;
-    }
-    let h = snap.health.get(SourceId::GpuNvidia);
-    match h.state {
-        SourceState::Failed | SourceState::Disabled { .. } => ProbeState::Restarting,
-        SourceState::Unsupported
-            if h.last_error
-                .as_deref()
-                .is_some_and(|e| e.contains(PROBE_NOT_INSTALLED)) =>
-        {
-            ProbeState::Missing
-        }
-        _ => ProbeState::Ok,
-    }
-}
 
 /// Every engine name key and the "Own processes only" tooltip key, for [`Words`].
 const WORD_KEYS: [&str; 14] = [
@@ -156,6 +114,11 @@ const WORD_KEYS: [&str; 14] = [
     "perf-gpu-engine-video-enhance",
     "perf-gpu-tip-own-processes",
 ];
+
+const KEY_MEMORY: &str = "perf-gpu-heading-memory";
+const KEY_MEMORY_USAGE: &str = "perf-gpu-range-memory";
+const KEY_DEDICATED: &str = "perf-gpu-legend-dedicated";
+const KEY_SHARED: &str = "perf-gpu-legend-shared";
 
 /// The engines that AMD reads only from fdinfo, so "Own processes only" applies to them.
 fn fdinfo_engine(engine: GpuEngine) -> bool {
@@ -187,17 +150,11 @@ pub struct Words {
     version: Option<Option<u64>>,
     /// The engine names and the tooltip, by `en-US.ftl` key ([`WORD_KEYS`]).
     pub engines: Vec<(&'static str, SharedString)>,
+    /// The Memory chart's words, which the Aggregate graphics page uses too.
     pub memory: SharedString,
-    pub temperature: SharedString,
     pub memory_usage: SharedString,
     pub dedicated: SharedString,
     pub shared: SharedString,
-    pub power: SharedString,
-    pub clocks: SharedString,
-    pub power_draw: SharedString,
-    pub clock_speed: SharedString,
-    pub gpu_clock: SharedString,
-    pub mem_clock: SharedString,
     pub restarting: SharedString,
     pub missing: SharedString,
     pub displays: SharedString,
@@ -215,16 +172,9 @@ impl Words {
         let t = |key| tr(cx, key);
         self.engines = WORD_KEYS.iter().map(|k| (*k, t(k))).collect();
         self.memory = t(KEY_MEMORY);
-        self.temperature = t(KEY_TEMPERATURE);
         self.memory_usage = t(KEY_MEMORY_USAGE);
         self.dedicated = t(KEY_DEDICATED);
         self.shared = t(KEY_SHARED);
-        self.power = t(KEY_POWER);
-        self.clocks = t(KEY_CLOCKS);
-        self.power_draw = t(KEY_POWER_DRAW);
-        self.clock_speed = t(KEY_CLOCK_SPEED);
-        self.gpu_clock = t(KEY_GPU_CLOCK);
-        self.mem_clock = t(KEY_MEM_CLOCK);
         self.restarting = t(KEY_RESTARTING);
         self.missing = t(KEY_MISSING);
         self.displays = t("perf-gpu-block-displays");
@@ -254,13 +204,11 @@ impl Words {
 /// The settings the page draws from.
 #[derive(Clone, Debug, PartialEq)]
 struct PageSettings {
-    /// The shared range the charts and the engine grid draw.
+    /// The shared range the engine grid draws.
     range_ns: u64,
     smooth: bool,
     rounded: bool,
     hidden: Vec<Arc<str>>,
-    /// `performance.gpu_optional_graphs`.
-    optional: Vec<GpuOptionalGraph>,
 }
 
 impl PageSettings {
@@ -276,7 +224,6 @@ impl PageSettings {
                 .iter()
                 .map(|k| Arc::from(k.as_str()))
                 .collect(),
-            optional: s.performance.gpu_optional_graphs.clone(),
         }
     }
 }
@@ -289,31 +236,6 @@ fn section_versions(cx: &App) -> [u64; 3] {
         tl.version(Section::Motion),
         tl.version(Section::Appearance),
     ]
-}
-
-/// The memory facts the Memory chart is built from.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct MemoryShape {
-    /// VRAM total in bytes, 0 when unknown.
-    total: u64,
-    /// The device reports shared memory (never on NVIDIA).
-    shared: bool,
-}
-
-impl MemoryShape {
-    fn of(totals: Option<&GpuTotals>) -> Self {
-        let Some(t) = totals else {
-            return Self::default();
-        };
-        let total = match t.mem_total.validity {
-            Validity::Valid | Validity::Stale => t.mem_total.value,
-            _ => 0,
-        };
-        Self {
-            total,
-            shared: t.shared_total.validity == Validity::Valid && t.shared_total.value > 0,
-        }
-    }
 }
 
 fn plot_grid(s: &PageSettings) -> GridStyle {
@@ -331,7 +253,7 @@ fn series(device: DeviceIdx, metric: MetricId) -> SeriesId {
 }
 
 /// The Memory chart: dedicated filled, shared as a dashed line when the device reports it,
-/// 0..VRAM total.
+/// 0..VRAM total. The Aggregate graphics page draws its Memory chart with it.
 pub fn memory_spec(device: DeviceIdx, shared: bool, total: u64, theme: &TlTheme) -> ChartSpec {
     let mut series_list = smallvec![ChartSeries {
         id: series(device, MetricId::GPU_MEM),
@@ -378,142 +300,6 @@ pub fn memory_labels(shared: bool, words: &Words) -> ChartLabels {
     }
 }
 
-fn temperature_spec(device: DeviceIdx, theme: &TlTheme) -> ChartSpec {
-    ChartSpec {
-        series: smallvec![ChartSeries {
-            id: series(device, MetricId::GPU_TEMP),
-            fill: Some(theme.graph.gpu_fill),
-            line: theme.graph.gpu_line,
-            ..ChartSeries::default()
-        }],
-        y: YScale::StickyTemp,
-        background: ChartBg::Window,
-        hover: true,
-        ..ChartSpec::default()
-    }
-}
-
-fn temperature_labels(words: &Words) -> ChartLabels {
-    ChartLabels {
-        heading: Some(words.temperature.clone()),
-        value_fmt: ValueFormat::Celsius,
-        value_align: ValueAlign::Right,
-        range_word: words.temperature.clone(),
-        legend: SmallVec::new(),
-        show_axis_max: true,
-    }
-}
-
-/// The device facts the Power and Clocks scales are built from.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct OptionalShape {
-    /// The enforced power limit in W, else the card's highest limit.
-    power_max: Option<f32>,
-    /// The maximum graphics clock in MHz.
-    clock_max: Option<u32>,
-}
-
-impl OptionalShape {
-    fn of(totals: Option<&GpuTotals>) -> Self {
-        let Some(t) = totals else {
-            return Self::default();
-        };
-        Self {
-            power_max: shown(t.power_limit_w).or(t.info.power_max_limit_w),
-            clock_max: t.info.clock_gfx_max_mhz,
-        }
-    }
-}
-
-/// The Power chart: the draw filled, 0 up to the power limit.
-pub fn power_spec(device: DeviceIdx, hw_max: Option<f32>, theme: &TlTheme) -> ChartSpec {
-    ChartSpec {
-        series: smallvec![ChartSeries {
-            id: series(device, MetricId::GPU_POWER),
-            fill: Some(theme.graph.gpu_fill),
-            line: theme.graph.gpu_line,
-            ..ChartSeries::default()
-        }],
-        y: YScale::StickyUp { hw_max },
-        background: ChartBg::Window,
-        hover: true,
-        ..ChartSpec::default()
-    }
-}
-
-pub fn power_labels(words: &Words) -> ChartLabels {
-    ChartLabels {
-        heading: Some(words.power.clone()),
-        value_fmt: ValueFormat::Watts,
-        value_align: ValueAlign::Right,
-        range_word: words.power_draw.clone(),
-        legend: SmallVec::new(),
-        show_axis_max: true,
-    }
-}
-
-/// The Clocks chart: the GPU clock filled, the memory clock as a dashed line, 0 up to the maximum
-/// graphics clock.
-pub fn clocks_spec(device: DeviceIdx, hw_max: Option<f32>, theme: &TlTheme) -> ChartSpec {
-    ChartSpec {
-        series: smallvec![
-            ChartSeries {
-                id: series(device, MetricId::GPU_CLOCK),
-                fill: Some(theme.graph.gpu_fill),
-                line: theme.graph.gpu_line,
-                ..ChartSeries::default()
-            },
-            ChartSeries {
-                id: series(device, MetricId::GPU_MEM_CLOCK),
-                fill: None,
-                line: theme.graph.gpu_line,
-                dashed: true,
-                ..ChartSeries::default()
-            },
-        ],
-        y: YScale::StickyUp { hw_max },
-        background: ChartBg::Window,
-        hover: true,
-        ..ChartSpec::default()
-    }
-}
-
-pub fn clocks_labels(words: &Words) -> ChartLabels {
-    ChartLabels {
-        heading: Some(words.clocks.clone()),
-        value_fmt: ValueFormat::Mhz,
-        value_align: ValueAlign::Right,
-        range_word: words.clock_speed.clone(),
-        legend: smallvec![
-            (words.gpu_clock.clone(), LegendStyle::Solid),
-            (words.mem_clock.clone(), LegendStyle::Dashed),
-        ],
-        show_axis_max: false,
-    }
-}
-
-/// The `en-US.ftl` keys of the reasons the clocks are held down, in bit order. Idle is not a
-/// throttle, so it has no word.
-const REASON_WORDS: [(ClockEventReasons, &str); 8] = [
-    (ClockEventReasons::APP_CLOCKS, "perf-gpu-reason-app-clocks"),
-    (ClockEventReasons::POWER_CAP, "perf-gpu-reason-power-cap"),
-    (
-        ClockEventReasons::HW_SLOWDOWN,
-        "perf-gpu-reason-hw-slowdown",
-    ),
-    (ClockEventReasons::SYNC_BOOST, "perf-gpu-reason-sync-boost"),
-    (ClockEventReasons::SW_THERMAL, "perf-gpu-reason-sw-thermal"),
-    (ClockEventReasons::HW_THERMAL, "perf-gpu-reason-hw-thermal"),
-    (
-        ClockEventReasons::HW_POWER_BRAKE,
-        "perf-gpu-reason-hw-power-brake",
-    ),
-    (
-        ClockEventReasons::DISPLAY_CLOCKS,
-        "perf-gpu-reason-display-clocks",
-    ),
-];
-
 /// The placeholder cell shown in place of the grid while the probe is missing: "3D / Compute"
 /// reading `n/a`.
 fn placeholder_labels(words: &Words) -> ChartLabels {
@@ -548,7 +334,8 @@ fn with_settings(mut spec: ChartSpec, s: &PageSettings) -> ChartSpec {
     spec
 }
 
-/// The chart state every GPU chart shows in `probe`.
+/// The chart state the engine grid and the placeholder show in `probe`. The chart widgets
+/// read the same state from their sources (`SourceData::chart_state`).
 fn probe_chart_state(probe: ProbeState, words: &Words) -> ChartState {
     match probe {
         ProbeState::Ok => ChartState::Live,
@@ -557,11 +344,97 @@ fn probe_chart_state(probe: ProbeState, words: &Words) -> ChartState {
     }
 }
 
+/// Converts `gpu_optional_graphs` to the page's entry the first time the window builds the
+/// GPU page `container` (ADR-019 phase 3 "When"): only when GPU pages are widget containers,
+/// the page has no entry and the list is not empty. The first save then keeps
+/// `settings.toml.pre-layouts-v2`. The old key stays as it is.
+fn convert_on_first_build(container: &str, cx: &mut App) {
+    if !cx.has_global::<TlSettings>()
+        || !page_needs_conversion(&TlSettings::settings(cx).performance, container)
+    {
+        return;
+    }
+    if let Some(env) = cx.try_global::<AppEnv>() {
+        (env.keep_pre_layouts_copy)();
+    }
+    TlSettings::update(cx, |d| {
+        let perf = &mut d.settings.performance;
+        if let Some(layout) = convert_page(perf, container) {
+            perf.layouts.set(layout);
+        }
+    });
+}
+
+/// The metric key of an optional graph: `power` or `clocks`.
+fn optional_metric(which: GpuOptionalGraph) -> &'static str {
+    match which {
+        GpuOptionalGraph::Power => METRIC_POWER,
+        GpuOptionalGraph::Clocks => METRIC_GPU_CLOCKS,
+    }
+}
+
+/// Whether `w` is a metric widget of `metric`.
+fn is_metric(w: &WidgetSetting, metric: &str) -> bool {
+    matches!(&w.content, WidgetContent::Metric(s) if s.metric.as_str() == metric)
+}
+
+/// Adds or removes the `which` chart in the flow layout `layout` of the GPU page of `key`, as
+/// the 1.3.0 "Power" and "Clocks" items add or remove the chart (ADR-019 phase 3 "Header
+/// buttons and page menu"). An added chart goes where conversion puts it: Power before Clocks,
+/// both before Details. The other widgets keep their ids.
+pub fn toggle_optional(layout: &mut ContainerLayout, key: &str, which: GpuOptionalGraph) {
+    let metric = optional_metric(which);
+    if let Some(i) = layout.widgets.iter().position(|w| is_metric(w, metric)) {
+        layout.widgets.remove(i);
+        return;
+    }
+    let before = |w: &WidgetSetting| match which {
+        GpuOptionalGraph::Power => {
+            is_metric(w, METRIC_GPU_CLOCKS) || matches!(w.content, WidgetContent::Fixed(_))
+        }
+        GpuOptionalGraph::Clocks => {
+            matches!(w.content, WidgetContent::Fixed(_))
+                && !matches!(w.content, WidgetContent::Fixed(FixedWidget::GpuEngineGrid))
+        }
+    };
+    // After the first chart widget, so the engine grid stays first.
+    let first_chart = layout
+        .widgets
+        .iter()
+        .position(|w| matches!(w.content, WidgetContent::Metric(_)))
+        .unwrap_or(0);
+    let at = layout
+        .widgets
+        .iter()
+        .enumerate()
+        .skip(first_chart)
+        .find(|(_, w)| before(w))
+        .map_or(layout.widgets.len(), |(i, _)| i);
+    let id = layout.next_id;
+    layout.next_id += 1;
+    layout.widgets.insert(
+        at,
+        WidgetSetting {
+            id,
+            content: WidgetContent::Metric(SourceSelector {
+                device: DeviceSelector::Key(Arc::from(key)),
+                metric: MetricKey::new(metric),
+            }),
+            forms: FormSet::CHART | FormSet::VALUE | FormSet::LABEL,
+            cell: None,
+            options: WidgetOptions::default(),
+            device_name: None,
+        },
+    );
+}
+
 /// The GPU device page.
 pub struct GpuPage {
     key: DeviceKey,
     row: DeviceRow,
     vendor: GpuVendor,
+    /// The container id, `page.<gpu key>`.
+    container_id: SharedString,
     engines: Entity<ChartGridView>,
     /// Engine keys in grid order, one per grid cell.
     engine_keys: Vec<Arc<str>>,
@@ -570,21 +443,14 @@ pub struct GpuPage {
     /// The one-cell "3D / Compute" chart shown while the probe is missing. Created the first
     /// time the probe is missing.
     placeholder: Option<Entity<ChartView>>,
-    memory: Entity<ChartView>,
-    memory_shape: MemoryShape,
-    /// Reused buffer for the Memory value text.
-    memory_text: String,
-    temperature: Entity<ChartView>,
-    /// The optional Power chart, present while `performance.gpu_optional_graphs` lists it.
-    power: Option<Entity<ChartView>>,
-    /// The optional Clocks chart.
-    clocks: Option<Entity<ChartView>>,
-    optional_shape: OptionalShape,
-    /// The heading tooltips: "Limit range 100 to 350 W · 1.24 kWh since boot" and
-    /// "P3 · Throttled: power cap".
-    power_tip: Option<SharedString>,
-    clocks_tip: Option<SharedString>,
+    engines_view: Entity<GpuEngineGridView>,
+    /// The cells the engine grid draws, shared with the flow placer: 0 takes no space.
+    engine_cells: Rc<Cell<usize>>,
+    displays_view: Entity<GpuDisplaysView>,
     details: KeyValueModel,
+    details_view: Entity<DetailsView>,
+    container: Entity<WidgetContainer>,
+    editor: Entity<WidgetEditor>,
     probe: ProbeState,
     focus: FocusHandle,
     hub: Entity<SnapshotHub>,
@@ -597,34 +463,16 @@ pub struct GpuPage {
     header: (SharedString, SharedString),
     settings: PageSettings,
     settings_versions: [u64; 3],
-    /// `UiMetrics.style_version` the chart colours and grid sizes were built for.
+    /// `UiMetrics.style_version` the grid's colours and sizes were built for.
     style_version: u64,
     words: Words,
     /// One formatted row per display of this GPU's adapter (PERF-073).
     display_rows: Vec<SharedString>,
-    /// The engine box width of the last paint; 0 before the first.
-    width: Rc<Cell<Pixels>>,
-    /// The engine box's top-left corner in the window at the last paint, for the cell under a
-    /// right-click.
-    origin: Rc<Cell<Point<Pixels>>>,
-    /// The number of cells the grid was last built with.
-    shown_cells: usize,
-    /// Row 1 growing from or shrinking to height 0 (UI-PRF-032).
-    row_anim: Option<RowAnim>,
-    anim_generation: u32,
-    _subs: SmallVec<[Subscription; 3]>,
+    _subs: SmallVec<[Subscription; 10]>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
-}
-
-/// Row 1's height animation after the last engine is hidden or the first is shown again.
-#[derive(Clone, Copy, Debug)]
-struct RowAnim {
-    showing: bool,
-    /// The cell count the full height is measured for.
-    cells: usize,
-    /// Bumped on each change, so a new change restarts the animation.
-    generation: u32,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub notify_count: Cell<u32>,
 }
 
 impl GpuPage {
@@ -635,6 +483,8 @@ impl GpuPage {
         demand: Entity<DemandAggregator>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let container_id = SharedString::from(page_container(&key.0));
+        convert_on_first_build(&container_id, cx);
         let theme = current(cx).clone();
         let settings = PageSettings::read(cx);
         let snap = Arc::clone(hub.read(cx).current());
@@ -655,32 +505,98 @@ impl GpuPage {
             metrics(cx),
             &mut engine_keys,
         );
-        let shown_cells = spec.cells.len();
         let engines = cx.new(|cx| ChartGridView::new(spec, &hub, cx).with_device_history(&snap));
-
-        let memory_shape = MemoryShape::of(totals);
-        let spec = with_settings(
-            memory_spec(row.idx, memory_shape.shared, memory_shape.total, &theme),
-            &settings,
-        );
-        let labels = memory_labels(memory_shape.shared, &words);
-        let memory = cx.new(|cx| {
-            ChartView::new(spec, labels, &hub, cx)
-                .with_newest_marks()
-                .with_device_history(&snap)
-        });
-        let spec = with_settings(temperature_spec(row.idx, &theme), &settings);
-        let labels = temperature_labels(&words);
-        let temperature = cx.new(|cx| {
-            ChartView::new(spec, labels, &hub, cx)
-                .with_newest_marks()
-                .with_device_history(&snap)
-        });
+        let shown = EnginesShown {
+            keys: engine_keys.clone(),
+            missing: false,
+            probe_tip: None,
+        };
+        let engine_cells = Rc::new(Cell::new(shown.cells()));
+        let engines_view = {
+            let (id, grid) = (container_id.clone(), engines.clone());
+            cx.new(|_| GpuEngineGridView::new(id, grid, None, shown))
+        };
+        let displays_view = {
+            let shown = DisplaysShown {
+                heading: words.displays.clone(),
+                no_display: words.no_display.clone(),
+                rows: Vec::new(),
+            };
+            let id = container_id.clone();
+            cx.new(|_| GpuDisplaysView::new(id, shown))
+        };
+        let mut details = gpu_details_model();
+        details.refresh_strings(cx);
+        let details_view = {
+            let shown = DetailsShown::of(&details, strings_version(cx));
+            let draw = details_draw(cx.weak_entity());
+            let id = container_id.clone();
+            cx.new(|_| DetailsView::new(id, shown, draw))
+        };
+        let parts = GpuParts {
+            engines: engines_view.read(cx).natural_height(),
+            engine_cells: Rc::clone(&engine_cells),
+            details: details_view.read(cx).natural_height(),
+            displays: displays_view.read(cx).natural_height(),
+        };
+        let content: FixedContent = {
+            let details: AnyView = details_view.clone().into();
+            let engines: AnyView = engines_view.clone().into();
+            let displays: AnyView = displays_view.clone().into();
+            Rc::new(move |kind: &FixedWidget, _: &mut App| match kind {
+                FixedWidget::Details => Some(details.clone()),
+                FixedWidget::GpuEngineGrid => Some(engines.clone()),
+                FixedWidget::GpuDisplays => Some(displays.clone()),
+                _ => None,
+            })
+        };
+        let container = {
+            let store = Rc::new(std::cell::RefCell::new(SourceStore::for_page(&hub)));
+            let layout = page_layout(&container_id, cx);
+            let id = container_id.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| {
+                let mut c = WidgetContainer::new(id, layout, &hub, store, cx);
+                c.set_flow_placer(Some(gpu_flow(parts)), cx);
+                c.set_fixed_content(Some(content), cx);
+                c
+            })
+        };
+        let editor = {
+            let container = container.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| {
+                let mut e = WidgetEditor::new(container, &hub, cx);
+                e.set_page_parts(vec![
+                    FixedWidget::Details,
+                    FixedWidget::GpuEngineGrid,
+                    FixedWidget::GpuDisplays,
+                ]);
+                e
+            })
+        };
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
         subs.push(cx.observe_global::<UiMetrics>(Self::sync_style));
+        subs.push(cx.observe_global::<Strings>(Self::sync_words));
+        // A part got taller or shorter: the parts under it move.
+        subs.push(
+            cx.subscribe(&details_view, |this, _, _: &DetailsResized, cx| {
+                this.place_again(cx);
+            }),
+        );
+        subs.push(cx.subscribe(&engines_view, |this, _, _: &PartResized, cx| {
+            this.place_again(cx);
+        }));
+        subs.push(
+            cx.subscribe(&displays_view, |this, _, _: &PartResized, cx| {
+                this.place_again(cx);
+            }),
+        );
+        // A layout change can change what the page asks for.
+        subs.push(cx.observe(&container, |this, _, cx| this.send_demand(cx)));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -690,20 +606,18 @@ impl GpuPage {
             key,
             row,
             vendor,
+            container_id,
             engines,
             engine_keys,
             reported,
             placeholder: None,
-            memory,
-            memory_shape,
-            memory_text: String::new(),
-            temperature,
-            power: None,
-            clocks: None,
-            optional_shape: OptionalShape::default(),
-            power_tip: None,
-            clocks_tip: None,
-            details: gpu_details_model(),
+            engines_view,
+            engine_cells,
+            displays_view,
+            details,
+            details_view,
+            container,
+            editor,
             probe: ProbeState::Ok,
             focus: cx.focus_handle(),
             hub,
@@ -717,14 +631,11 @@ impl GpuPage {
             style_version: metrics(cx).style_version,
             words,
             display_rows: Vec::new(),
-            width: Rc::new(Cell::new(px(0.))),
-            origin: Rc::new(Cell::new(Point::default())),
-            shown_cells,
-            row_anim: None,
-            anim_generation: 0,
             _subs: subs,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            notify_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
         this
@@ -752,30 +663,75 @@ impl GpuPage {
         self.placeholder.as_ref()
     }
 
-    pub fn memory(&self) -> &Entity<ChartView> {
-        &self.memory
+    /// The engine grid part (fixed widget `gpu_engine_grid`).
+    pub fn engines_view(&self) -> &Entity<GpuEngineGridView> {
+        &self.engines_view
     }
 
-    pub fn temperature(&self) -> &Entity<ChartView> {
-        &self.temperature
+    /// The Displays part (fixed widget `gpu_displays`).
+    pub fn displays_view(&self) -> &Entity<GpuDisplaysView> {
+        &self.displays_view
     }
 
-    /// The Power chart while it is enabled.
-    pub fn power(&self) -> Option<&Entity<ChartView>> {
-        self.power.as_ref()
+    /// The page's widget container.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
     }
 
-    /// The Clocks chart while it is enabled.
-    pub fn clocks(&self) -> Option<&Entity<ChartView>> {
-        self.clocks.as_ref()
+    /// The editor around the container (Edit Widgets).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
     }
 
-    pub fn power_tooltip(&self) -> Option<&SharedString> {
-        self.power_tip.as_ref()
+    /// The Details widget's view.
+    pub fn details_view(&self) -> &Entity<DetailsView> {
+        &self.details_view
     }
 
-    pub fn clocks_tooltip(&self) -> Option<&SharedString> {
-        self.clocks_tip.as_ref()
+    /// The container id, `page.<gpu key>`.
+    pub fn container_id(&self) -> &SharedString {
+        &self.container_id
+    }
+
+    /// The chart of the first placed widget of `metric` that draws one.
+    pub fn chart_of(&self, metric: &str, cx: &App) -> Option<Entity<ChartView>> {
+        let c = self.container.read(cx);
+        c.layout()
+            .widgets
+            .iter()
+            .filter(|w| is_metric(w, metric))
+            .find_map(|w| c.widget(w.id)?.read(cx).chart().cloned())
+    }
+
+    /// The Memory chart, while the page shows it.
+    pub fn memory(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_GPU_MEMORY, cx)
+    }
+
+    /// The Temperature chart, while the page shows it.
+    pub fn temperature(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_TEMP, cx)
+    }
+
+    /// The Power chart, while the page shows it.
+    pub fn power(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_POWER, cx)
+    }
+
+    /// The Clocks chart, while the page shows it.
+    pub fn clocks(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_GPU_CLOCKS, cx)
+    }
+
+    /// The tooltip on the name of the first placed widget of `metric` (the Power and Clocks
+    /// heading texts, or the probe's text).
+    pub fn tip_of(&self, metric: &str, cx: &App) -> Option<SharedString> {
+        let c = self.container.read(cx);
+        c.layout()
+            .widgets
+            .iter()
+            .filter(|w| is_metric(w, metric))
+            .find_map(|w| c.source(w.id)?.read(cx).tip().cloned())
     }
 
     /// The Displays block rows, one per display of this GPU's adapter.
@@ -793,23 +749,39 @@ impl GpuPage {
     }
 
     /// This page's demand part while it is active: the GPU component, the inventory for the
-    /// adapter's vendor and static rows, and the device metric history at 1 h, 24 h and 7 d.
-    pub fn demand_part(&self) -> Demand {
-        Demand {
+    /// adapter's vendor and static rows, the device metric history at 1 h, 24 h and 7 d, and
+    /// what the placed widgets read. With the default layout it equals 1.3.0's.
+    pub fn demand_part(&self, cx: &App) -> Demand {
+        let mut demand = Demand {
             any_surface_visible: true,
             gpus: true,
             inventory: true,
             device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
-        }
+        };
+        add_demand(&mut demand, &self.container.read(cx).demand_part());
+        demand
     }
 
     fn send_demand(&self, cx: &mut App) {
         if !self.active {
             return;
         }
-        let (id, window, part) = (self.id, self.window, self.demand_part());
+        let (id, window, part) = (self.id, self.window, self.demand_part(cx));
         self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
+    }
+
+    fn notify(&self, cx: &mut Context<Self>) {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// A part's height changed: the flow layout places the parts again.
+    fn place_again(&mut self, cx: &mut Context<Self>) {
+        self.container.update(cx, |c, cx| {
+            c.place_again(cx);
+        });
     }
 
     fn on_snapshot(
@@ -822,10 +794,10 @@ impl GpuPage {
         self.apply_snapshot(&snap, ev.mask, cx);
     }
 
-    /// Brings the engine cells, Memory chart, probe state and header up to date with the
-    /// components in `mask`. Notifies only when something the page draws changed.
+    /// Brings the engine grid, the probe state, Details, Displays and the header up to date
+    /// with the components in `mask`. Only a header change renders the page; each part
+    /// notifies for its own change.
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
-        let mut changed = false;
         let devices = mask.contains(ComponentMask::DEVICES);
         let inventory = mask.contains(ComponentMask::INVENTORY);
         // A new vendor can change the engine names and whether probe states apply.
@@ -836,7 +808,6 @@ impl GpuPage {
                 self.vendor = vendor;
                 vendor_changed = true;
                 self.rebuild_grid(cx);
-                changed = true;
             }
         }
 
@@ -846,22 +817,13 @@ impl GpuPage {
             if reported != self.reported {
                 self.reported = reported;
                 self.rebuild_grid(cx);
-                changed = true;
             }
-            let shape = MemoryShape::of(totals);
-            if shape != self.memory_shape {
-                let labels_changed = shape.shared != self.memory_shape.shared;
-                self.memory_shape = shape;
-                self.rebuild_memory(labels_changed, cx);
-            }
-            self.sync_memory_text(totals, cx);
         }
         if mask.contains(ComponentMask::HEALTH) || vendor_changed {
             let probe = probe_state(self.vendor, snap);
             if probe != self.probe {
                 self.probe = probe;
                 self.apply_probe(cx);
-                changed = true;
             }
         }
         if mask.intersects(
@@ -889,9 +851,10 @@ impl GpuPage {
                 uuid,
                 pci_bus_id,
             };
-            changed |= update_gpu_details_p1(&mut self.details, &inputs);
-            changed |= update_gpu_details_p2(&mut self.details, &inputs);
-            changed |= self.sync_optional(snap, false, cx);
+            let p1 = update_gpu_details_p1(&mut self.details, &inputs);
+            if update_gpu_details_p2(&mut self.details, &inputs) || p1 {
+                self.sync_details(cx);
+            }
         }
         if inventory {
             let rows: Vec<SharedString> = adapter(snap, self.row.idx)
@@ -904,7 +867,7 @@ impl GpuPage {
                 .unwrap_or_default();
             if rows != self.display_rows {
                 self.display_rows = rows;
-                changed = true;
+                self.sync_displays(cx);
             }
         }
         if (devices || inventory)
@@ -912,17 +875,61 @@ impl GpuPage {
         {
             let header = header_text(page_words(cx), DeviceKind::Gpu, 0, entry, snap);
             if header != self.header {
+                let word = header.0.clone();
+                self.editor.update(cx, |e, _| e.set_page_name(word));
                 self.header = header;
-                changed = true;
+                self.notify(cx);
             }
         }
-        if changed {
-            cx.notify();
+        // The GPU went away: an edit ends as Cancel does.
+        if devices
+            && !snap
+                .devices
+                .entries
+                .iter()
+                .any(|e| e.idx == self.row.idx && e.present)
+        {
+            self.editor.update(cx, |e, cx| e.cancel(cx));
         }
     }
 
-    /// Sets every GPU chart's state for the probe state, creating the placeholder cell the first
-    /// time the probe is missing.
+    /// Hands the Details view what the grid shows; it notifies only when that changed.
+    fn sync_details(&mut self, cx: &mut Context<Self>) {
+        let shown = DetailsShown::of(&self.details, strings_version(cx));
+        self.details_view.update(cx, |v, cx| v.set_shown(shown, cx));
+    }
+
+    /// Hands the Displays view its heading and rows; it notifies only when they changed.
+    fn sync_displays(&mut self, cx: &mut Context<Self>) {
+        let shown = DisplaysShown {
+            heading: self.words.displays.clone(),
+            no_display: self.words.no_display.clone(),
+            rows: self.display_rows.clone(),
+        };
+        self.displays_view
+            .update(cx, |v, cx| v.set_shown(shown, cx));
+    }
+
+    /// Hands the engine grid view its cells and probe state. The flow places the parts again
+    /// when the grid starts or stops taking space.
+    fn sync_engines(&mut self, cx: &mut Context<Self>) {
+        let shown = EnginesShown {
+            keys: self.engine_keys.clone(),
+            missing: self.probe == ProbeState::Missing,
+            probe_tip: self.probe_tooltip().cloned(),
+        };
+        let cells = shown.cells();
+        let placeholder = self.placeholder.clone();
+        self.engines_view
+            .update(cx, |v, cx| v.set_shown(shown, placeholder, cx));
+        if (self.engine_cells.replace(cells) == 0) != (cells == 0) {
+            self.place_again(cx);
+        }
+    }
+
+    /// Sets the engine grid's state for the probe state, creating the placeholder cell the
+    /// first time the probe is missing. The chart widgets read the probe state from their
+    /// sources.
     fn apply_probe(&mut self, cx: &mut Context<Self>) {
         let state = probe_chart_state(self.probe, &self.words);
         if self.probe == ProbeState::Missing && self.placeholder.is_none() {
@@ -932,40 +939,18 @@ impl GpuPage {
             let hub = self.hub.clone();
             self.placeholder = Some(cx.new(|cx| history_chart(spec, labels, &hub, cx)));
         }
-        for view in [&self.memory, &self.temperature]
-            .into_iter()
-            .chain(self.placeholder.as_ref())
-        {
+        if let Some(p) = &self.placeholder {
             let state = state.clone();
-            view.update(cx, |v, cx| v.set_state(state, cx));
+            p.update(cx, |v, cx| v.set_state(state, cx));
         }
         // Restarting keeps the per-engine cells, each reading `!`. Missing shows the placeholder.
         self.engines.update(cx, |v, cx| v.set_state(state, cx));
-    }
-
-    /// The Memory value as "2.80 GiB / 15.92 GiB" when used and total are known. The chart gets a
-    /// new text only when the formatted text differs.
-    fn sync_memory_text(&mut self, totals: Option<&GpuTotals>, cx: &mut Context<Self>) {
-        let total = self.memory_shape.total;
-        let used = totals.and_then(|t| shown_u64(t.mem_used.value, t.mem_used.validity));
-        let Some(used) = used.filter(|_| total > 0) else {
-            self.memory.update(cx, |v, cx| v.set_value_text(None, cx));
-            return;
-        };
-        self.memory_text.clear();
-        units::bytes_of(&mut self.memory_text, used, total);
-        let text = &self.memory_text;
-        if self.memory.read(cx).value_text().map(|t| t.as_ref()) == Some(text.as_str()) {
-            return;
-        }
-        let text = SharedString::from(text.clone());
-        self.memory
-            .update(cx, |v, cx| v.set_value_text(Some(text), cx));
+        self.sync_engines(cx);
     }
 
     fn rebuild_grid(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
-        let spec = grid_spec(
+        let mut spec = grid_spec(
             self.row.idx,
             self.vendor,
             self.reported,
@@ -975,39 +960,10 @@ impl GpuPage {
             metrics(cx),
             &mut self.engine_keys,
         );
-        let new = spec.cells.len();
+        // The engine view gives the cells the row height its box gives them.
+        spec.cell_h = spec.cell_h.max(self.engines.read(cx).spec.cell_h);
         self.engines.update(cx, |v, cx| v.set_spec(spec, cx));
-        self.sync_row_anim(new, cx);
-    }
-
-    /// Starts row 1's height animation when the cell count moved between 0 and more over
-    /// `m_base`; with animations off the height jumps.
-    fn sync_row_anim(&mut self, new: usize, cx: &mut Context<Self>) {
-        let old = std::mem::replace(&mut self.shown_cells, new);
-        if (old == 0) == (new == 0) {
-            return;
-        }
-        self.anim_generation = self.anim_generation.wrapping_add(1);
-        if !animations_on(cx) {
-            self.row_anim = None;
-            return;
-        }
-        let generation = self.anim_generation;
-        self.row_anim = Some(RowAnim {
-            showing: new > 0,
-            cells: old.max(new),
-            generation,
-        });
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            cx.background_executor().timer(M_BASE).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.anim_generation == generation {
-                    this.row_anim = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        self.sync_engines(cx);
     }
 
     /// `PerfToggleGpuEngine`: hides or shows the graph of one engine in
@@ -1040,166 +996,10 @@ impl GpuPage {
         self.sync_settings(cx);
     }
 
-    /// Creates or drops the Power and Clocks charts to match the setting, and brings their
-    /// scale, value text, state and heading tooltip up to date. `force` rebuilds the specs (a
-    /// new setting, theme or scale). True when something the page draws outside the charts
-    /// changed.
-    fn sync_optional(&mut self, snap: &Snapshot, force: bool, cx: &mut Context<Self>) -> bool {
-        let mut changed = false;
-        let totals = gpu_totals(snap, self.row.idx);
-        let shape = OptionalShape::of(totals);
-        let rescale = force || shape != self.optional_shape;
-        self.optional_shape = shape;
-        let theme = current(cx).clone();
-        let hub = self.hub.clone();
-        let idx = self.row.idx;
-        let want = |g| self.settings.optional.contains(&g);
-
-        if want(GpuOptionalGraph::Power) {
-            let spec = || with_settings(power_spec(idx, shape.power_max, &theme), &self.settings);
-            match &self.power {
-                Some(v) if rescale => {
-                    let spec = spec();
-                    v.update(cx, |v, cx| v.set_spec(spec, cx));
-                }
-                Some(_) => {}
-                None => {
-                    let (spec, labels) = (spec(), power_labels(&self.words));
-                    self.power = Some(cx.new(|cx| history_chart(spec, labels, &hub, cx)));
-                    changed = true;
-                }
-            }
-        } else if self.power.take().is_some() {
-            self.power_tip = None;
-            changed = true;
-        }
-        if want(GpuOptionalGraph::Clocks) {
-            let spec = || {
-                let max = shape.clock_max.map(|m| m as f32);
-                with_settings(clocks_spec(idx, max, &theme), &self.settings)
-            };
-            match &self.clocks {
-                Some(v) if rescale => {
-                    let spec = spec();
-                    v.update(cx, |v, cx| v.set_spec(spec, cx));
-                }
-                Some(_) => {}
-                None => {
-                    let (spec, labels) = (spec(), clocks_labels(&self.words));
-                    self.clocks = Some(cx.new(|cx| history_chart(spec, labels, &hub, cx)));
-                    changed = true;
-                }
-            }
-        } else if self.clocks.take().is_some() {
-            self.clocks_tip = None;
-            changed = true;
-        }
-
-        let probe_state = probe_chart_state(self.probe, &self.words);
-        let mut buf = String::new();
-        if let Some(view) = self.power.clone() {
-            let power = totals.map_or(missing(), |t| t.power_w);
-            let inputs = GpuDetailInputs {
-                now_boot_ns: 0,
-                observed_end_ns: 0,
-                totals,
-                adapter: adapter(snap, idx),
-                vendor: self.vendor,
-                probe: self.probe,
-                uuid: None,
-                pci_bus_id: None,
-            };
-            // An Intel iGPU reads the CPU package meter, which needs setup.
-            let state = if self.probe == ProbeState::Ok
-                && is_intel_igpu(&inputs)
-                && matches!(power.validity, Validity::Restricted | Validity::Unsupported)
-            {
-                ChartState::Unsupported
-            } else {
-                probe_state.clone()
-            };
-            let limit = totals.and_then(|t| shown(t.power_limit_w));
-            let text = shown(power).zip(limit).map(|(p, l)| {
-                units::watts_pair(&mut buf, p, l);
-                SharedString::from(buf.clone())
-            });
-            view.update(cx, |v, cx| {
-                v.set_state(state, cx);
-                v.set_value_text(text, cx);
-            });
-            let tip = self.power_tooltip_text(totals, cx);
-            if tip != self.power_tip {
-                self.power_tip = tip;
-                changed = true;
-            }
-        }
-        if let Some(view) = self.clocks.clone() {
-            let now = totals.and_then(|t| shown(t.clock_gfx_mhz));
-            let text = now.zip(shape.clock_max).map(|(c, m)| {
-                buf.clear();
-                units::mhz_pair(&mut buf, c as f32, m as f32);
-                SharedString::from(buf.clone())
-            });
-            view.update(cx, |v, cx| {
-                v.set_state(probe_state, cx);
-                v.set_value_text(text, cx);
-            });
-            let tip = self.clocks_tooltip_text(totals, cx);
-            if tip != self.clocks_tip {
-                self.clocks_tip = tip;
-                changed = true;
-            }
-        }
-        changed
-    }
-
-    /// "Limit range 100 to 350 W · 1.24 kWh since boot"; "max 350 W · 1.24 kWh since boot" while
-    /// the card's lowest limit is unknown. None without the highest limit or the energy.
-    fn power_tooltip_text(&self, totals: Option<&GpuTotals>, cx: &App) -> Option<SharedString> {
-        let t = totals?;
-        let max = t.info.power_max_limit_w?;
-        let joules = shown(t.energy_since_boot)?;
-        let arg = |v: String| FluentValue::from(v);
-        let kwh = ("kwh", arg(format!("{:.2}", joules / 3.6e6)));
-        let max = ("max", arg(format!("{max:.0}")));
-        Some(match t.info.power_min_limit_w {
-            Some(min) => tr_args(
-                cx,
-                "perf-gpu-power-tooltip",
-                &[("min", arg(format!("{min:.0}"))), max, kwh],
-            ),
-            None => tr_args(cx, "perf-gpu-power-row-tooltip", &[max, kwh]),
-        })
-    }
-
-    /// "P3 · Throttled: power cap", reasons joined by ", "; "P3" while none is set or the
-    /// reasons are not reported. None without a P-state.
-    fn clocks_tooltip_text(&self, totals: Option<&GpuTotals>, cx: &App) -> Option<SharedString> {
-        let t = totals?;
-        let pstate = ("pstate", FluentValue::from(shown(t.pstate)?.to_string()));
-        let reasons = shown(t.clock_event_reasons).unwrap_or_default();
-        let words: Vec<SharedString> = REASON_WORDS
-            .iter()
-            .filter(|(bit, _)| reasons.contains(*bit))
-            .map(|(_, key)| tr(cx, key))
-            .collect();
-        if words.is_empty() {
-            return Some(tr_args(cx, "perf-gpu-clocks-tooltip-plain", &[pstate]));
-        }
-        let joined = words
-            .iter()
-            .map(|w| w.as_ref())
-            .collect::<Vec<_>>()
-            .join(", ");
-        Some(tr_args(
-            cx,
-            "perf-gpu-clocks-tooltip",
-            &[pstate, ("reasons", FluentValue::from(joined))],
-        ))
-    }
-
-    /// `PerfToggleGpuOptionalGraph`: adds or removes Power or Clocks in
-    /// `performance.gpu_optional_graphs`. The page follows through its settings observer.
+    /// `PerfToggleGpuOptionalGraph`: adds or removes the Power or Clocks chart in this page's
+    /// flow layout. A page without an entry gets one, from its built-in default.
+    /// `gpu_optional_graphs` is not written. Nothing with a grid layout, whose menu hides the
+    /// items.
     fn on_toggle_optional(
         &mut self,
         a: &PerfToggleGpuOptionalGraph,
@@ -1209,49 +1009,29 @@ impl GpuPage {
         if a.key != self.key {
             return;
         }
+        let container = self.container_id.to_string();
+        let key = Arc::clone(&self.key.0);
+        let which = a.which;
         TlSettings::update(cx, |d| {
-            let list = &mut d.settings.performance.gpu_optional_graphs;
-            match list.iter().position(|g| *g == a.which) {
-                Some(i) => {
-                    list.remove(i);
-                }
-                None => list.push(a.which),
+            let perf = &mut d.settings.performance;
+            let mut layout =
+                container_layout(perf, &container).unwrap_or_else(|| default_layout(&container));
+            if layout.preset.is_none() {
+                return;
             }
+            toggle_optional(&mut layout, &key, which);
+            perf.layouts.set(layout);
         });
         self.sync_settings(cx);
     }
 
-    fn rebuild_memory(&mut self, labels_too: bool, cx: &mut Context<Self>) {
-        let theme = current(cx).clone();
-        let shape = self.memory_shape;
-        let spec = with_settings(
-            memory_spec(self.row.idx, shape.shared, shape.total, &theme),
-            &self.settings,
-        );
-        self.memory.update(cx, |v, cx| v.set_spec(spec, cx));
-        if labels_too {
-            let labels = memory_labels(shape.shared, &self.words);
-            self.memory.update(cx, |v, cx| v.set_labels(labels, cx));
-        }
-    }
-
-    /// Rebuilds every chart spec from the current settings and theme.
-    fn rebuild_all(&mut self, cx: &mut Context<Self>) {
-        self.rebuild_grid(cx);
-        self.rebuild_memory(false, cx);
-        let theme = current(cx).clone();
-        let spec = with_settings(temperature_spec(self.row.idx, &theme), &self.settings);
-        self.temperature.update(cx, |v, cx| v.set_spec(spec, cx));
-        if let Some(p) = &self.placeholder {
-            let spec = with_settings(placeholder_spec(self.row.idx, &theme), &self.settings);
-            p.update(cx, |v, cx| v.set_spec(spec, cx));
-        }
-        let snap = Arc::clone(self.hub.read(cx).current());
-        self.sync_optional(&snap, true, cx);
-    }
-
-    /// Applies the page's settings when one of their sections changed.
+    /// Applies the page's settings when one of their sections changed. A saved layout (Apply,
+    /// Reset Page, a menu item) shows when the page is not in Edit Widgets.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        if !self.editor.read(cx).is_editing() {
+            let layout = page_layout(&self.container_id, cx);
+            self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+        }
         let versions = section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -1263,227 +1043,73 @@ impl GpuPage {
         }
         let range_moved = new.range_ns != self.settings.range_ns;
         self.settings = new;
-        self.rebuild_all(cx);
+        self.rebuild_specs(cx);
         if range_moved {
+            // The header switch shows the new range.
             self.send_demand(cx);
+            self.notify(cx);
         }
-        cx.notify();
     }
 
-    /// A new theme or UI scale: every chart takes the new colours and the grid its new sizes.
+    /// Rebuilds the engine grid's and the placeholder's specs from the current settings and
+    /// theme.
+    fn rebuild_specs(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_grid(cx);
+        if let Some(p) = &self.placeholder {
+            let theme = current(cx).clone();
+            let spec = with_settings(placeholder_spec(self.row.idx, &theme), &self.settings);
+            p.update(cx, |v, cx| v.set_spec(spec, cx));
+        }
+    }
+
+    /// A new theme or UI scale: the grid takes the new colours and sizes.
     fn sync_style(&mut self, cx: &mut Context<Self>) {
         let version = metrics(cx).style_version;
         if version == self.style_version {
             return;
         }
         self.style_version = version;
-        self.rebuild_all(cx);
-        cx.notify();
+        self.rebuild_specs(cx);
     }
 
-    /// Row 1: the engine grid in a box as tall as its rows for the measured width, or the
-    /// placeholder cell while the probe is missing. The box ends with the gap to row 2 and has
-    /// height 0 when every engine is hidden.
-    fn engines_element(&self, window: &mut Window, cx: &mut App) -> AnyElement {
-        let spec = &self.engines.read(cx).spec;
-        let (min_w, cell_h, gap) = (spec.cell_min_w, spec.cell_h, spec.gap);
-        let n = match self.probe {
-            ProbeState::Missing => 1,
-            _ => spec.cells.len(),
-        };
-        let width = self.width.get();
-        let measured = if width > px(0.) {
-            width
-        } else {
-            px(UNMEASURED_W)
-        };
-        let layout = grid_layout(n, measured, min_w, gap);
-        let height = grid_height(&layout, cell_h, gap);
-
-        let measure = {
-            let cell = Rc::clone(&self.width);
-            let origin = Rc::clone(&self.origin);
-            canvas(
-                move |bounds, window, cx| {
-                    origin.set(bounds.origin);
-                    let old = cell.replace(bounds.size.width);
-                    let at = |w: Pixels| {
-                        let w = if w > px(0.) { w } else { px(UNMEASURED_W) };
-                        grid_layout(n, w, min_w, gap)
-                    };
-                    if at(old) != at(bounds.size.width) {
-                        cx.notify(window.current_view());
-                    }
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .inset_0()
-        };
-
-        // The cell under a right-press, named for the page menu's "Hide this engine graph".
-        let hit = {
-            let keys = self.engine_keys.clone();
-            let origin = Rc::clone(&self.origin);
-            move |ev: &MouseDownEvent, cx: &mut App| {
-                if ev.button != MouseButton::Right {
-                    return;
-                }
-                let p = ev.position - origin.get();
-                let (x, y) = (f32::from(p.x), f32::from(p.y));
-                let (w, h, g) = (f32::from(layout.cell_w), f32::from(cell_h), f32::from(gap));
-                let (col, row) = (x / (w + g), y / (h + g));
-                let inside = x >= 0.
-                    && y >= 0.
-                    && x - col.floor() * (w + g) < w
-                    && y - row.floor() * (h + g) < h;
-                let cell = (row.floor() as usize) * layout.cols + col.floor() as usize;
-                if inside
-                    && (col.floor() as usize) < layout.cols
-                    && let Some(key) = keys.get(cell)
-                {
-                    cx.set_global(ClickedEngine(Some(key.clone())));
-                }
-            }
-        };
-
-        let root = div()
-            .tl_selector(|| ENGINES_ID.into())
-            .relative()
-            .w_full()
-            .h(height)
-            .capture_any_mouse_down(move |ev, _, cx| hit(ev, cx));
-        let root = match (&self.placeholder, self.probe) {
-            (Some(p), ProbeState::Missing) => {
-                let cell = div()
-                    .w(layout.cell_w)
-                    .h(cell_h)
-                    .child(p.clone().cached(StyleRefinement::default().size_full()));
-                let cell = self.with_probe_tip(cell, "perf-gpu-tip-engines", window, cx);
-                root.child(cell)
-            }
-            _ => {
-                let mut grid = div().relative().size_full().child(
-                    self.engines
-                        .clone()
-                        .cached(StyleRefinement::default().size_full()),
-                );
-                let view = self.engines.read(cx);
-                if let Some((i, text)) = view.hovered_cell().zip(view.hovered_tooltip().cloned()) {
-                    let m = *metrics(cx);
-                    let pad = m.sp[3];
-                    let (col, row) = (i % layout.cols, i / layout.cols);
-                    let trigger = div()
-                        .tl_selector(|| ENGINE_TIP_ID.into())
-                        .absolute()
-                        .left((layout.cell_w + gap) * col as f32 + pad)
-                        .top((cell_h + gap) * row as f32 + pad)
-                        .w((layout.cell_w - pad * 2.).max(px(0.)))
-                        .h(px(LABEL_ROW * m.ui_scale));
-                    // One state per heading, so moving to another heading restarts the delay.
-                    let state = HoverTooltip::state((ENGINE_TIP_ID, i), window, cx);
-                    grid = grid.child(HoverTooltip::attach(
-                        &state,
-                        trigger,
-                        DELAY_CONTROL,
-                        TlTooltip::text(text).build(),
-                        window,
-                        cx,
-                    ));
-                }
-                root.child(self.with_probe_tip(grid, "perf-gpu-tip-engines", window, cx))
-            }
-        };
-        let root = root.child(measure);
-
-        // The gap to row 2 belongs to the box, so rows 2 and 3 move up when it collapses.
-        let outer = div().w_full().flex_none().overflow_hidden();
-        match self.row_anim.filter(|_| self.probe != ProbeState::Missing) {
-            Some(RowAnim {
-                showing,
-                cells,
-                generation,
-            }) => {
-                let full =
-                    grid_height(&grid_layout(cells, measured, min_w, gap), cell_h, gap) + gap;
-                outer
-                    .child(root.h(full - gap).mb(gap))
-                    .with_animation(
-                        ("perf-gpu-row-anim", generation as usize),
-                        Animation::new(M_BASE).with_easing(ease_out_cubic),
-                        move |el, t| el.h(full * if showing { t } else { 1. - t }),
-                    )
-                    .into_any_element()
-            }
-            None if n == 0 => outer.h(px(0.)).child(root).into_any_element(),
-            None => outer.pb(gap).child(root).into_any_element(),
+    /// New strings: the engine names, the placeholder, the probe text, Details, Displays and
+    /// the header.
+    fn sync_words(&mut self, cx: &mut Context<Self>) {
+        if !self.words.refresh(cx) {
+            return;
         }
-    }
-
-    /// A chart box of `(W − sp4) / 2 × GRAPH_H_STACKED`. With `tip` (the trigger id and text), a
-    /// trigger over the heading row shows the text, unless the probe tooltip covers the box.
-    fn chart_box(
-        &self,
-        view: &Entity<ChartView>,
-        selector: &'static str,
-        tip: Option<(&'static str, &SharedString)>,
-        m: &UiMetrics,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        let mut chart = div()
-            .tl_selector(move || selector.into())
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .h(px(GRAPH_H_STACKED * m.ui_scale))
-            .child(view.clone().cached(StyleRefinement::default().size_full()));
-        if let Some((id, text)) = tip.filter(|_| self.probe_tooltip().is_none()) {
-            let trigger = div()
-                .tl_selector(move || id.into())
-                .absolute()
-                .top_0()
-                .left_0()
-                .w_1_2()
-                .h(px(LABEL_ROW * m.ui_scale) + m.sp[3]);
-            let state = HoverTooltip::state(id, window, cx);
-            chart = chart.child(HoverTooltip::attach(
-                &state,
-                trigger,
-                DELAY_CONTROL,
-                TlTooltip::text(text.clone()).build(),
-                window,
-                cx,
-            ));
+        self.details.refresh_strings(cx);
+        self.sync_details(cx);
+        if let Some(p) = &self.placeholder {
+            let labels = placeholder_labels(&self.words);
+            p.update(cx, |v, cx| v.set_labels(labels, cx));
         }
-        self.with_probe_tip(chart, selector, window, cx)
+        self.rebuild_grid(cx);
+        self.apply_probe(cx);
+        let snap = Arc::clone(self.hub.read(cx).current());
+        self.apply_snapshot(&snap, ComponentMask::INVENTORY, cx);
+        self.sync_displays(cx);
     }
 
-    /// Hangs the probe tooltip on `el` while the probe is not Ok.
-    fn with_probe_tip(
-        &self,
-        el: Div,
-        id: &'static str,
+    /// "Edit Widgets…" in the page menu.
+    fn on_edit_start(
+        &mut self,
+        _: &PerfWidgetEditStart,
         window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        let Some(text) = self.probe_tooltip() else {
-            return el.into_any_element();
-        };
-        let id = ElementId::NamedChild(
-            Arc::new(ElementId::Name(SharedString::from(self.key.0.clone()))),
-            id.into(),
-        );
-        let state = HoverTooltip::state(id, window, cx);
-        HoverTooltip::attach(
-            &state,
-            el,
-            DELAY_CONTROL,
-            TlTooltip::text(text.clone()).build(),
-            window,
-            cx,
-        )
-        .into_any_element()
+        cx: &mut Context<Self>,
+    ) {
+        start_page_edit(&self.editor, &self.hub, window, cx);
+    }
+
+    /// "Reset Page" in the page menu (ADR-019 phase 3 "Reset"). A GPU page saves its built-in
+    /// default as an explicit entry (`reset_page_to_default`).
+    fn on_reset_page(
+        &mut self,
+        _: &PerfWidgetResetPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        reset_page(&self.container_id, self.header.0.clone(), window, cx);
     }
 }
 
@@ -2349,83 +1975,56 @@ impl DevicePage for GpuPage {
         SmallVec::new()
     }
 
-    fn graphs(&self, window: &mut Window, cx: &mut App) -> AnyElement {
-        let m = *metrics(cx);
-        let row2 = h_flex()
-            .w_full()
-            .gap(m.sp[4])
-            .child(self.chart_box(&self.memory, MEMORY_ID, None, &m, window, cx))
-            .child(self.chart_box(&self.temperature, TEMPERATURE_ID, None, &m, window, cx));
-        let mut page = v_flex()
-            .w_full()
-            .child(self.engines_element(window, cx))
-            .child(row2);
-        // Row 3: one chart takes the full width, two split it; none leaves no row.
-        if self.power.is_some() || self.clocks.is_some() {
-            let mut row3 = h_flex().w_full().pt(m.sp[4]).gap(m.sp[4]);
-            if let Some(v) = &self.power {
-                let tip = self.power_tip.as_ref().map(|t| (POWER_TIP_ID, t));
-                row3 = row3.child(self.chart_box(v, POWER_ID, tip, &m, window, cx));
-            }
-            if let Some(v) = &self.clocks {
-                let tip = self.clocks_tip.as_ref().map(|t| (CLOCKS_TIP_ID, t));
-                row3 = row3.child(self.chart_box(v, CLOCKS_ID, tip, &m, window, cx));
-            }
-            page = page.child(row3);
-        }
-        page.into_any_element()
+    fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {
+        // The engine grid and the charts are widgets of the container.
+        div().into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
         &self.details
     }
 
-    fn blocks(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 3]> {
-        let (m, theme) = (metrics(cx), current(cx));
-        let mut heading = div()
-            .text_color(theme.text_primary)
-            .child(self.words.displays.clone());
-        *heading.text_style() = label_style(m, m.text.md, FontWeight::MEDIUM);
-        let mut block = v_flex().gap(m.sp[4]).child(heading);
-        if self.display_rows.is_empty() {
-            let mut el = div()
-                .h(px(24.))
-                .text_color(theme.text_secondary)
-                .child(self.words.no_display.clone());
-            *el.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
-            block = block.child(el);
-        }
-        for row in &self.display_rows {
-            let mut el = div()
-                .h(px(24.))
-                .text_color(theme.text_primary)
-                .child(row.clone());
-            *el.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
-            block = block.child(el);
-        }
-        smallvec![block.into_any_element()]
+    fn blocks(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 3]> {
+        // Displays is a widget of the container.
+        SmallVec::new()
     }
 
-    /// "Select GPU engine graphs >": one check item per reported engine, then the optional Power
-    /// and Clocks graphs (PERF-063, UI-PRF-032).
+    /// "Select GPU engine graphs >": one check item per reported engine while the page has the
+    /// engine grid, then the Power and Clocks graphs, checked from the page's flow layout
+    /// (PERF-063, UI-PRF-032). A grid layout hides Power and Clocks (ADR-019 phase 3).
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
-        let key = self.key.clone();
-        let items: Vec<(Arc<str>, SharedString, bool)> = vendor_cells(self.vendor)
+        let layout = page_layout(&self.container_id, cx);
+        let has_grid = layout
+            .widgets
             .iter()
-            .filter(|c| self.reported.has(c.engine))
-            .map(|c| {
-                (
-                    Arc::from(c.engine.key()),
-                    self.words.engine(c.name),
-                    !c.engine.is_hidden(&self.settings.hidden),
-                )
-            })
-            .collect();
-        let (power, clocks) = (
-            tr(cx, "perf-gpu-menu-power"),
-            tr(cx, "perf-gpu-menu-clocks"),
-        );
-        let (power_on, clocks_on) = (self.power.is_some(), self.clocks.is_some());
+            .any(|w| matches!(w.content, WidgetContent::Fixed(FixedWidget::GpuEngineGrid)));
+        let flow = layout.preset.is_some();
+        if !has_grid && !flow {
+            return menu;
+        }
+        let key = self.key.clone();
+        let items: Vec<(Arc<str>, SharedString, bool)> = if has_grid {
+            vendor_cells(self.vendor)
+                .iter()
+                .filter(|c| self.reported.has(c.engine))
+                .map(|c| {
+                    (
+                        Arc::from(c.engine.key()),
+                        self.words.engine(c.name),
+                        !c.engine.is_hidden(&self.settings.hidden),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let on = |metric| layout.widgets.iter().any(|w| is_metric(w, metric));
+        let optional = flow.then(|| {
+            (
+                (tr(cx, "perf-gpu-menu-power"), on(METRIC_POWER)),
+                (tr(cx, "perf-gpu-menu-clocks"), on(METRIC_GPU_CLOCKS)),
+            )
+        });
         menu.submenu(
             tr(cx, "perf-gpu-menu-select-engines"),
             window,
@@ -2441,25 +2040,26 @@ impl DevicePage for GpuPage {
                         }),
                     );
                 }
-                let optional = |which| {
+                let Some(((power, power_on), (clocks, clocks_on))) = &optional else {
+                    return menu;
+                };
+                let action = |which| {
                     Box::new(PerfToggleGpuOptionalGraph {
                         key: key.clone(),
                         which,
                     })
                 };
-                menu.separator()
-                    .check_item(power.clone(), power_on, optional(GpuOptionalGraph::Power))
-                    .check_item(
-                        clocks.clone(),
-                        clocks_on,
-                        optional(GpuOptionalGraph::Clocks),
-                    )
+                if !items.is_empty() {
+                    menu = menu.separator();
+                }
+                menu.check_item(power.clone(), *power_on, action(GpuOptionalGraph::Power))
+                    .check_item(clocks.clone(), *clocks_on, action(GpuOptionalGraph::Clocks))
             },
         )
     }
 
     /// The GPU copy text (PERF-011, UI-PRF-022): the header lines, the Details rows, then the
-    /// Displays block with one indented line per display.
+    /// Displays block with one indented line per display, whatever the layout holds.
     fn copy_text(&self, out: &mut String) {
         let (word, model) = &self.header;
         out.push_str(word);
@@ -2492,6 +2092,10 @@ impl DevicePage for GpuPage {
         SmallVec::new()
     }
 
+    fn widget_editor(&self) -> Option<&Entity<WidgetEditor>> {
+        Some(&self.editor)
+    }
+
     fn set_active(&mut self, active: bool, cx: &mut App) {
         if self.active == active {
             return;
@@ -2522,30 +2126,6 @@ impl Render for GpuPage {
             self.window = Some(handle);
             self.send_demand(cx);
         }
-        self.details.refresh_strings(cx);
-        if self.words.refresh(cx) {
-            let labels = memory_labels(self.memory_shape.shared, &self.words);
-            self.memory.update(cx, |v, cx| v.set_labels(labels, cx));
-            let labels = temperature_labels(&self.words);
-            self.temperature
-                .update(cx, |v, cx| v.set_labels(labels, cx));
-            if let Some(v) = &self.power {
-                let labels = power_labels(&self.words);
-                v.update(cx, |v, cx| v.set_labels(labels, cx));
-            }
-            if let Some(v) = &self.clocks {
-                let labels = clocks_labels(&self.words);
-                v.update(cx, |v, cx| v.set_labels(labels, cx));
-            }
-            if let Some(p) = &self.placeholder {
-                let labels = placeholder_labels(&self.words);
-                p.update(cx, |v, cx| v.set_labels(labels, cx));
-            }
-            self.rebuild_grid(cx);
-            self.apply_probe(cx);
-            let snap = Arc::clone(self.hub.read(cx).current());
-            self.apply_snapshot(&snap, ComponentMask::INVENTORY, cx);
-        }
         let m = *metrics(cx);
         let theme = current(cx).clone();
         div()
@@ -2553,6 +2133,8 @@ impl Render for GpuPage {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle_engine))
             .on_action(cx.listener(Self::on_toggle_optional))
+            .on_action(cx.listener(Self::on_edit_start))
+            .on_action(cx.listener(Self::on_reset_page))
             .child(
                 DevicePageFrame {
                     page: self,

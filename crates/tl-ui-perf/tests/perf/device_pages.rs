@@ -383,11 +383,33 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
         let page = gpu.read(cx);
         assert_eq!(page.header().0.as_ref(), "Graphics adapter");
         assert_eq!(page.engines().read(cx).spec.cells.len(), 3);
-        assert!(!page.memory().read(cx).spec.series.is_empty());
-        assert!(!page.temperature().read(cx).spec.series.is_empty());
+        assert!(
+            !page
+                .memory(cx)
+                .expect("memory chart")
+                .read(cx)
+                .spec
+                .series
+                .is_empty()
+        );
+        assert!(
+            !page
+                .temperature(cx)
+                .expect("temperature chart")
+                .read(cx)
+                .spec
+                .series
+                .is_empty()
+        );
         assert!(page.engines().read(cx).spec.hover);
-        assert!(page.memory().read(cx).spec.hover);
-        assert!(page.temperature().read(cx).spec.hover);
+        assert!(page.memory(cx).expect("memory chart").read(cx).spec.hover);
+        assert!(
+            page.temperature(cx)
+                .expect("temperature chart")
+                .read(cx)
+                .spec
+                .hover
+        );
         assert_rows(
             page,
             &[
@@ -450,7 +472,7 @@ mod shared_range {
                 ns(memory.read(cx).physical()),
                 ns(disk.read(cx).active_chart()),
                 ns(net.read(cx).throughput()),
-                ns(gpu.read(cx).memory()),
+                ns(&gpu.read(cx).memory(cx).expect("memory chart")),
                 ns(fan.read(cx).speed()),
                 cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
                 gpu.read(cx).engines().read(cx).spec.range_ns / S,
@@ -3075,7 +3097,11 @@ fn gpu_displays_empty_text(cx: &mut TestAppContext) {
             assert!(page.display_rows().is_empty());
             assert_eq!(page.words().displays.as_ref(), "Displays");
             assert_eq!(page.words().no_display.as_ref(), "No display connected");
-            assert_eq!(page.blocks(window, cx).len(), 1);
+            // Displays is a widget of the page's container (tasklens-hzire.4).
+            assert!(page.blocks(window, cx).is_empty());
+            let shown = page.displays_view().read(cx).shown();
+            assert!(shown.rows.is_empty());
+            assert_eq!(shown.no_display.as_ref(), "No display connected");
         });
     });
     publish_displays(

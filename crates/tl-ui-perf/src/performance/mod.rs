@@ -15,6 +15,7 @@ pub mod cpu_details;
 pub mod cpu_grid;
 pub mod disk;
 pub mod gpu;
+pub mod gpu_views;
 pub mod memory;
 pub mod memory_bar;
 pub mod menu;

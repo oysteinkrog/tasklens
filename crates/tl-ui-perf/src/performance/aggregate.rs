@@ -433,12 +433,12 @@ pub struct AggregateDiskPage {
 }
 
 /// The strings version, `None` without strings (tests).
-fn strings_version(cx: &App) -> Option<u64> {
+pub(super) fn strings_version(cx: &App) -> Option<u64> {
     cx.try_global::<Strings>().map(|s| s.strings_version)
 }
 
 /// The layout `container` shows now: its saved entry, else its built-in default.
-fn page_layout(container: &str, cx: &App) -> ContainerLayout {
+pub(super) fn page_layout(container: &str, cx: &App) -> ContainerLayout {
     cx.has_global::<TlSettings>()
         .then(|| container_layout(&TlSettings::settings(cx).performance, container))
         .flatten()
@@ -753,7 +753,7 @@ pub fn reset_page(container: &str, page: SharedString, window: &mut Window, cx: 
 }
 
 /// Adds the records `part` asks for to `demand`.
-fn add_demand(demand: &mut Demand, part: &Demand) {
+pub(super) fn add_demand(demand: &mut Demand, part: &Demand) {
     demand.memory |= part.memory;
     demand.disks |= part.disks;
     demand.nets |= part.nets;
