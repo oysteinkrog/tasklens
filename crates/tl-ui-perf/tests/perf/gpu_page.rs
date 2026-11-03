@@ -50,7 +50,7 @@ impl Render for Host {
     }
 }
 
-fn totals(shared: bool) -> GpuTotals {
+pub(super) fn totals(shared: bool) -> GpuTotals {
     let shared_total = if shared {
         Metric::valid(8 * GIB)
     } else {
@@ -102,7 +102,7 @@ fn text(value: &str) -> InvField<Arc<str>> {
 }
 
 /// The fake NVIDIA record with every P2 value of UI-PRF-033.
-fn full_totals() -> GpuTotals {
+pub(super) fn full_totals() -> GpuTotals {
     GpuTotals {
         fan_pct: Metric::valid(0.0),
         fan_rpm: Metric::valid(0),
