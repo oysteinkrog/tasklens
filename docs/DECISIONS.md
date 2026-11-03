@@ -2,6 +2,15 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-11-03
+
+### D-042 CPU by app as a stacked chart
+
+- **Decision** (owner request, 2026-11-03: "Show the same kind of by app setup for CPU on the CPU graph"): CPU use can show as a stacked chart split into the memory groups of D-036. The top N groups each get their own colour, then "Other apps", then five system bands (UI-PRF-062). The top of the stack is total CPU use, the value of the Utilization chart. It is the fixed widget `cpu_by_app`: the preset `apps` ("By app") of the Overview CPU box and the graph mode "By app" of the CPU page, and Edit Widgets offers it in both places, as for Memory by app. It works on every range, including 24 h and 7 d, so its series go into the device metric history (ADR-017).
+- **Data source**: each process's CPU from `/proc/<pid>/stat` (utime + stime, the CPU column), summed per memory group. Not cgroup `cpu.stat` `usage_usec`: cgroups do not give the D-036 groups (each Claude Code session sits in its own scope), and the same groups give the same names, legend click and colours as Memory by app. The cost: CPU time of a process that starts and ends between two sweeps is in no group. It shows as its own band, "Short-lived processes", so the stack still sums to total CPU use.
+- **System bands**: Kernel threads, Hardware interrupts, Software interrupts, Steal and Short-lived processes. With the groups they sum to busy CPU from the `/proc/stat` `cpu` line over the same window as the per-process rates.
+- **Cost**: the CPU series use the memory group devices, with a new metric `CPU_GROUP`. History stores 26 more series. The 10 s group sweep of D-036 now keeps a CPU baseline per process (it already reads `stat`), and each sweep reads the first line of `/proc/stat` once.
+
 ## 2026-10-31
 
 ### D-041 Configurable widget layout everywhere
