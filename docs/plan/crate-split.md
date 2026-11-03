@@ -387,3 +387,32 @@ goldens, because `copy_rows.tsv` has trailing tabs.
 The three `*_shell` files hold the fixtures their tests need, copied from the moved files (about
 1,100 lines for props, 1,000 for history, 2,800 for processes): those tests need MainWindow, so
 they cannot run on the page host, and the fixtures cannot sit in a crate below tl-ui.
+
+### What zljr5.43 moved
+
+Counts from the test lists before the move (68 startup, 80 connections, 98 services, 64
+service_props and 44 sys_table tests) and from each binary after it.
+
+| Module | Before | After | Stayed in tl-ui, and why |
+|---|---|---|---|
+| service_props | 64 | tl-ui-sys `sys` 64 | none |
+| startup | 68 | tl-ui-sys 63 | `startup_shell` 5: the filter box (startup_filter_sends_query), the tab strip and status chip (startup_tab_mounted_and_kept, startup_page_layout_golden asserts the chip text), leaving the tab clears demand, the keymap at app init |
+| connections | 80 | tl-ui-sys 64 | `connections_shell` 16: the whole `jump` mod 9 (jumps switch tabs and read the Processes page through MainWindow), the tab strip and status chip 4 (mounted_and_kept, page_layout_golden, end_to_end_jump, demand_cleared_on_tab_switch), `props` 2 (demand while the tab changes, the Process link jumps to the Processes tab), the keymap at app init 1 |
+| services | 98 | tl-ui-sys 87 | `services_shell` 11: the keymap at app init, lazy page creation, toolbar slots, status chip, filter box 3 (type-to-filter goes through the shell filter box), go to service 2 and go to parent 1 (tab switches), jump to process 2 (read the active tab) |
+| sys_table | 44 | tl-ui-table `table` 44 | none |
+
+The triage estimated 4 stayers for connections and services each and 3 for startup. More stay
+because those tests assert shell behaviour: the filter box, the active tab and the status chip.
+Moving them would change an assertion.
+
+The sys rig is `tests/sys/common.rs`. `shell_free_init` installs the page host plus the toast
+queues, key bindings, action tracker, request ends, helper flow and shell events that
+`TasklensUi::init` adds. `open_page` opens one 1200 x 800 px window with a page and a toast queue
+that answers `ShellApi::main_toasts` and `push_toast`; `open_sink` does the same with an empty
+page, for the window tests. `PageHost::install_with_client` takes a client that wraps the
+`FakeEngine` (the demand-driven client tests), so no second hub reads the wake channel.
+
+`startup_copy_block.txt`, `startup_props_lines.txt`, `conn_copy_block.txt` and
+`conn_props_lines.txt` moved to `crates/tl-ui-sys/tests/golden`. The three `*_shell` files hold
+the fixtures their tests need, copied from the moved files, for the same reason as the procs
+`*_shell` files.
