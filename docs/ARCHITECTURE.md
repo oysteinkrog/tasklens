@@ -3278,7 +3278,7 @@ The phase 2 keys `active`, `read`, `write` and `io` on `aggregate:disk`, and eve
 
 | Key | Format | Scale | Kind | Bar max | Stats | Value text |
 |---|---|---|---|---|---|---|
-| `cores_overlaid`, `cores_stacked` | `Percent` | `Fixed { 0, 100 }`; stacked `Stacked(n)` | gauge | no bar | the CPU total, `util_pct`: one decimal on a page ("21.6%"), whole percent in a box (as `total`) | none (offers chart, value and name) |
+| `cores_overlaid`, `cores_stacked` | `Percent` | `Fixed { 0, 100 }`; stacked `Stacked(n)` | gauge | no bar | none | the CPU total, `util_pct`, one decimal on a page ("21.6%"), whole percent in a box (as `total`) |
 | `clock`, `freq_max` | `Mhz` | `StickyUp { hw_max: cpuinfo_max_freq }` | gauge | `freq_max`: the inventory's `max_mhz`; `clock`: no bar | `freq_max` min, avg, peak; `clock` none | "4631 MHz" |
 | `physical` | `Bytes` | `FixedTotal(MemTotal)` | gauge | no bar | none | used, "34.68 GiB" |
 | `commit_pct` | `PercentOf { CommitLimit }` | `Commit(CommitLimit)`, axis text above 100% | gauge | 100% of the limit (the bar stops at full) | min, avg, peak | "69.0%" |
