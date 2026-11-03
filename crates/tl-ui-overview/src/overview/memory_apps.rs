@@ -50,9 +50,9 @@ use std::sync::Arc;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, Entity, Hsla,
-    InteractiveElement as _, IntoElement, MouseMoveEvent, ParentElement as _, Pixels, Point,
-    Render, SharedString, Size, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
-    Subscription, Window, canvas, div, px,
+    InteractiveElement as _, IntoElement, MouseExitEvent, MouseMoveEvent, ParentElement as _,
+    Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _, StyleRefinement,
+    Styled as _, Subscription, Window, canvas, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::devices::DeviceIdentity;
@@ -1585,6 +1585,15 @@ impl AppsChart {
             .sum()
     }
 
+    /// Drops the hover and the tooltip when the pointer has left the chart or the window.
+    fn clear_hover(&mut self, cx: &mut Context<Self>) {
+        if self.hover != Hover::default() {
+            self.hover = Hover::default();
+            self.rebuild_spec(cx);
+            cx.notify();
+        }
+    }
+
     fn on_pointer(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
         let origin = self.bounds.get().origin;
         let pos = ev.position - origin;
@@ -1911,9 +1920,21 @@ impl Render for AppsChart {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let bounds = Rc::clone(&self.bounds);
-        let probe = canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
-            .absolute()
-            .inset_0();
+        // The window sends no move when the pointer leaves it, so `on_hover` never fires then.
+        let this = cx.entity().downgrade();
+        let probe = canvas(
+            move |b, _, _| bounds.set(b),
+            move |_, _, window, _| {
+                let this = this.clone();
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        this.update(cx, |a, cx| a.clear_hover(cx)).ok();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0();
 
         // Group bands and "Other apps" top first, then the kernel bands; whole rows only, the
         // last row that fits says "+n more".
@@ -1972,10 +1993,8 @@ impl Render for AppsChart {
             )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| this.on_pointer(ev, cx)))
             .on_hover(cx.listener(|this, on: &bool, _, cx| {
-                if !*on && this.hover != Hover::default() {
-                    this.hover = Hover::default();
-                    this.rebuild_spec(cx);
-                    cx.notify();
+                if !*on {
+                    this.clear_hover(cx);
                 }
             }))
             .children(tooltip);

@@ -1469,19 +1469,49 @@ fn mem_only_sweep_keeps_cpu_rates() {
     assert!(p.fd_count.is_none());
     assert_eq!(io_reads(), io0, "no io read");
 
-    // Turning the mode off forgets the baseline, as before.
+    // Turning the mode off keeps the baselines: the next sweep has a rate and a window. The
+    // memory-only Prev has no io, so the io rates warm up for one sweep.
     core.set_mem_only(false);
     fs::write(
         root.proc_path("4201/statm"),
         fixture_bytes("process-edge", "proc/4201/statm"),
     )
     .expect("restore statm");
+    // utime grew by 10 ticks in 1 s: 10 ticks at 100 Hz on 32 CPUs.
+    set_stat(&root, 8812 + 40, 1204 + 20, 351_220);
+    fs::write(root.proc_path("stat"), stat_text(300, 700)).expect("write stat");
     mem_only_cpu_clock::set(12 * SEC, 12 * SEC);
     core.sweep_core(&ctx, &mut out);
-    assert_eq!(
-        only(&out).validity.get(ProcessField::Cpu),
-        Validity::WarmingUp
-    );
+    let p = only(&out);
+    assert_eq!(p.validity.get(ProcessField::Cpu), Validity::Valid);
+    assert!((p.cpu_pct - 0.3125).abs() < 0.001, "cpu_pct {}", p.cpu_pct);
+    assert_eq!(p.validity.get(ProcessField::IoRead), Validity::WarmingUp);
+    assert!(core.cpu_window().is_some());
+}
+
+sweep_clock!(full_to_mem_only_clock);
+
+/// The reverse change: a full sweep, then memory-only mode. The next sweep keeps the rate and
+/// the window.
+#[test]
+fn full_to_mem_only_keeps_cpu_rates() {
+    let (_tmp, root) = sweep_root();
+    let mut core = SweepCore::new(root.clone()).with_clock(full_to_mem_only_clock::now);
+    let ctx = sweep_ctx(false);
+    let mut out = Vec::new();
+
+    set_stat(&root, 8812, 1204, 351_220);
+    fs::write(root.proc_path("stat"), stat_text(100, 900)).expect("write stat");
+    full_to_mem_only_clock::set(10 * SEC, 10 * SEC);
+    core.sweep_core(&ctx, &mut out);
+
+    core.set_mem_only(true);
+    set_stat(&root, 8812 + 10, 1204, 351_220);
+    fs::write(root.proc_path("stat"), stat_text(200, 1800)).expect("write stat");
+    full_to_mem_only_clock::set(11 * SEC, 11 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    assert_eq!(only(&out).validity.get(ProcessField::Cpu), Validity::Valid);
+    assert!(core.cpu_window().is_some());
 }
 
 sweep_clock!(window_clock);
@@ -2485,6 +2515,25 @@ fn cgroup_cpu_baselines_pruned() {
         s.reset_baselines();
         assert_eq!(s.cgroup_baselines(), 0);
     }
+}
+
+/// A change of mode keeps the cgroup `usage_usec` baselines, so the first sweep after it has
+/// a delta.
+#[test]
+fn mode_change_keeps_cgroup_cpu_baselines() {
+    let (tmp, root) = merged_root();
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root.clone(), cache.path()).with_clock(cgroup_cpu_clock::now);
+    let mut out = SweepOutput::default();
+    write_cpu_stat(tmp.path(), CG_FIREFOX, 1_000_000);
+    cgroup_cpu_sweep(&mut s, &root, 1, &mut out);
+    assert!(s.has_cgroup_baseline(CG_FIREFOX));
+
+    s.set_mem_only(true);
+    assert!(s.has_cgroup_baseline(CG_FIREFOX));
+    write_cpu_stat(tmp.path(), CG_FIREFOX, 1_500_000);
+    cgroup_cpu_sweep(&mut s, &root, 2, &mut out);
+    assert_pct(&out, CG_FIREFOX, 5.0);
 }
 
 sweep_clock!(full_snapshot_clock);

@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-    MouseUpEvent, ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext,
-    Window, div, px, size,
+    MouseExitEvent, MouseUpEvent, ParentElement as _, Render, Styled as _, TestAppContext,
+    VisualTestContext, Window, div, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
@@ -22,7 +22,7 @@ use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_overview::overview::memory_apps::{
-    AppsChart, AppsMetric, AppsPlace, BandKind, CPU_BANDS, LEGEND_ID,
+    APPS_ID, AppsChart, AppsMetric, AppsPlace, BandKind, CPU_BANDS, LEGEND_ID,
 };
 use tl_ui_settings::settings::{
     AppearanceSettings, GroupColor, OverviewRange, Settings, ThemeSettings, UiState,
@@ -581,4 +581,27 @@ fn cpu_by_app_same_name_gets_kind_suffix(cx: &mut TestAppContext) {
         a.last_open.as_ref().map(|o| o.1.to_string())
     });
     assert_eq!(name.as_deref(), Some("tasklens (program)"));
+}
+
+/// docs/ui/performance.md "hidden on mouse leave": the window sends a `MouseExitEvent` and no
+/// move when the pointer leaves it, and the hover goes with it.
+#[gpui_kit::test]
+fn cpu_by_app_hover_clears_on_exit(cx: &mut TestAppContext) {
+    let mut r = open(
+        cx,
+        &flat(&[8., 6.], [0.5, 0.25, 0.75, 0.125, 0.375]),
+        |_| {},
+    );
+    let b = r.vcx.debug_bounds(APPS_ID).expect("the chart");
+    let at = gpui_kit::point(b.center().x, b.bottom() - px(4.));
+    r.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    draw(r.vcx);
+    assert!(r.vcx.read_entity(&r.apps, |a, _| a.hovered()).is_some());
+    r.vcx.simulate_event(MouseExitEvent {
+        position: at,
+        pressed_button: None,
+        modifiers: Modifiers::none(),
+    });
+    draw(r.vcx);
+    assert_eq!(r.vcx.read_entity(&r.apps, |a, _| a.hovered()), None);
 }

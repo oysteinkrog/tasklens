@@ -344,11 +344,11 @@ impl SweepCore {
         }
     }
 
-    /// Turns memory-only mode on or off (see the module doc). A change forgets every baseline.
+    /// Turns memory-only mode on or off (see the module doc). A change keeps the CPU baselines: both
+    /// modes read `stat` and `/proc/stat`.
     pub fn set_mem_only(&mut self, on: bool) {
         if self.mem_only != on {
             self.mem_only = on;
-            self.reset_baselines();
         }
     }
 
@@ -1071,12 +1071,12 @@ impl ProcessSampler {
 
     /// Memory-only mode (see the module doc): for the memory and CPU group series alone. The
     /// metadata is re-read every `MEM_ONLY_META_REFRESH` sweeps and no app unit is sampled. A
-    /// change forgets every baseline.
+    /// change keeps the process and cgroup CPU baselines (both modes read `stat` and `cpu.stat`)
+    /// and clears the app baselines.
     pub fn set_mem_only(&mut self, on: bool) {
         if self.core.mem_only != on {
             self.core.set_mem_only(on);
             self.app_prev.clear();
-            self.cg_cpu.clear();
         }
     }
 
