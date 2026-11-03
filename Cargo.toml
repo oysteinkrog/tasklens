@@ -120,7 +120,7 @@ tl-remote  = { path = "crates/tl-remote" }
 tl-tray    = { path = "crates/tl-tray" }
 
 [profile.dev]
-opt-level = 1
+opt-level = 1                 # workspace crates; at 0 the overview tests run 1.6x slower (ADR-002, CS-H1)
 debug = "line-tables-only"   # keeps target/ small; backtraces keep file and line
 [profile.dev.package."*"]
 opt-level = 2                 # GPUI and wgpu are too slow at opt-level 0 for UI work

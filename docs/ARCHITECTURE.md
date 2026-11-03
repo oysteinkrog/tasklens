@@ -292,6 +292,32 @@ debug = true
 
 The `perf` profile is for `cargo xtask bench` and for profiling: it builds much faster than fat LTO. Packaging (PKGBUILD) still builds `--release`. Rule: the two arms of a bench A/B comparison must be built with the same profile. `cargo xtask bench --release` runs the bench on the fat-LTO build when someone wants packaging numbers.
 
+**Opt-level of the workspace crates in dev and test** (CS-H1, tasklens-zljr5.46, measured 2026-11-03 on the split tree). The workspace crates stay at `opt-level = 1` in `[profile.dev]`, the dependencies at 2, and there is no `[profile.test]`. Three settings were measured:
+
+- (a) today: `[profile.dev] opt-level = 1` for workspace crates, dependencies 2.
+- (b) (a) plus `[profile.test] opt-level = 0`.
+- (c) `[profile.dev] opt-level = 0` for workspace crates, dependencies 2; test inherits.
+
+Method. A private worktree at 2e470f2f7 whose `target/` started from a reflink copy of the main dependency artifacts, so only workspace crates were built. `CARGO_INCREMENTAL=1` and `CARGO_BUILD_JOBS=4`, the cap heavy-build gives lane builds. Load average 7 to 27. The edit changes one literal in a `std::hint::black_box` line in a function body: `count_text` in tl-ui-kit `components/badge.rs`, `core_gutter` in tl-ui-overview `overview/cpu_box.rs`. A build time is cargo's `Finished` time. A run time is the wall time of `cargo test -p <crate>` with nothing left to build. Each value is the median of 3 runs.
+
+| Step | (a) | (b) | (c) |
+|---|---|---|---|
+| kit edit, then `cargo test -p tl-ui-kit --no-run` | 6.7 s | 3.2 s | 3.1 s |
+| overview edit, then `cargo test -p tl-ui-overview --no-run` | 4.2 s | 2.9 s | 3.6 s |
+| run `cargo test -p tl-ui-kit` (248 tests) | 1.0 s | 1.2 s | 1.0 s |
+| run `cargo test -p tl-ui-overview` (267 tests) | 33.1 s | 53.9 s | 53.4 s |
+| run `cargo test -p tl-ui-perf` (490 tests) | 4.3 s | 6.5 s | 5.7 s |
+| run `cargo test -p tl-ui-procs` (610 tests) | 2.7 s | 2.9 s | 3.0 s |
+| `cargo build -p tl-app` after a kit edit and a kit test build | 9.5 s | 9.7 s | 11.5 s |
+| lane loop, kit: 3 × (edit build + run), then the tl-app build | 32.5 s | 22.9 s | 24.0 s |
+| lane loop, overview: 3 × (edit build + run), then the tl-app build | 121.2 s | 180.3 s | 182.3 s |
+
+An earlier round of (a) at load 38 to 53 gave 15.2 s for the kit edit, 4.0 s for the overview edit and 37.7 s for the overview run, so the order holds under load.
+
+Sharing between the test build and the app build. In all three settings `cargo build -p tl-app` after the kit test build compiled the same 10 workspace crates: tl-ui-kit, every UI crate above it, tl-ui and tl-app. The test build uses the gpui-kit `test-support` variant (Dev builds, ADR-020). So the app build cannot reuse the edited crate from it at any opt-level, and (b) loses no sharing that (a) has. Cargo keys units by their settings, not by the profile name: after (b), the first kit test build in (c) compiled nothing, because both build test units at opt-level 0.
+
+Decision: keep (a). Opt-level 0 halves the kit edit build (6.7 s to 3.2 s) and saves about 1 s on the overview edit build. But the overview integration tests then run 20 s longer on every run, so an overview loop costs about 59 s more, against 10 s saved on a kit loop. (c) also makes the tl-app build after an edit 2 s slower and the dev app slower to run. `[profile.dev.package."*"] opt-level = 2` stays: GPUI is too slow at 0, and this measurement gave no reason to change it.
+
 **Workspace lints:**
 
 ```toml
