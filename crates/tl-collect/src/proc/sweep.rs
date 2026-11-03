@@ -1204,7 +1204,7 @@ impl ProcessSampler {
                 .cg
                 .read_stats(rel, CPU_WANT, &mut self.scratch.stat_buf, &mut stats)
                 .ok()
-                .and_then(|()| stats.usage_usec);
+                .and(stats.usage_usec);
             let Some(usage_usec) = read else {
                 next.insert(rel.clone(), None);
                 continue;
