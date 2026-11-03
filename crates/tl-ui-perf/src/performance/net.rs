@@ -948,8 +948,6 @@ pub struct NetPage {
     details_view: Entity<DetailsView>,
     /// The Network settings link (fixed widget `net_settings`).
     settings_view: Entity<MemoryPartView>,
-    /// The heights and the shown flag the flow placer reads.
-    parts: NetParts,
     container: Entity<WidgetContainer>,
     editor: Entity<WidgetEditor>,
     /// The range and the unit of the Details rates.
@@ -1103,7 +1101,6 @@ impl NetPage {
             details,
             details_view,
             settings_view,
-            parts,
             container,
             editor,
             settings,
