@@ -101,6 +101,9 @@ pub enum ScaleRule {
     StickyUpOpen,
     /// `YScale::StickyTemp`.
     StickyTemp,
+    /// `YScale::AutoRate` in binary units: the ceiling is the next power of two above the
+    /// visible maximum, as the 1.3.0 disk charts (UI-PRF-029, "4 MiB/s" for a 3 MiB/s peak).
+    AutoRateIec,
     /// The CPU page's Core clocks chart: 0 to the highest core maximum (`ClockScale`).
     CoreClocks,
     /// The Network page's Throughput rule: the adapter's link speed (bits per second, the
@@ -502,11 +505,11 @@ pub const MEM_COMPOSITION: MetricMeta = MetricMeta {
     ..MEM_PART
 };
 
-/// `read` and `write` of a disk or of every disk.
+/// `read` and `write` of a disk or of every disk, on the 1.3.0 disk chart axis.
 pub const DISK_RATE: MetricMeta = MetricMeta {
     unit: Unit::BytesPerSecond,
     format: ValueFormat::RateIec,
-    scale: ScaleRule::StickyUpOpen,
+    scale: ScaleRule::AutoRateIec,
     bar: BarMax::None,
     ..PERCENT
 };
@@ -983,6 +986,7 @@ impl MetricMeta {
             },
             ScaleRule::StickyUpOpen => YScale::StickyUp { hw_max: None },
             ScaleRule::StickyTemp => YScale::StickyTemp,
+            ScaleRule::AutoRateIec => YScale::AutoRate { iec: true },
             ScaleRule::CoreClocks => match on {
                 Some((snap, _)) => ClockScale::read(snap).y(),
                 None => YScale::StickyUp { hw_max: None },
@@ -1593,6 +1597,22 @@ mod tests {
         for (kind, key) in BOX_METRICS {
             let smoothed = at(kind, key).smoothed;
             assert_eq!(smoothed, key == METRIC_LOAD, "{kind:?} {key}");
+        }
+    }
+
+    /// Disk rates keep the 1.3.0 disk chart axis: a power-of-two ceiling in binary units
+    /// (UI-PRF-029), on a disk and on every disk.
+    #[test]
+    fn disk_rates_use_power_of_two_axis() {
+        for kind in [DeviceKind::Disk, DeviceKind::Disks] {
+            for key in [METRIC_DISK_READ, METRIC_DISK_WRITE, METRIC_DISK_IO] {
+                let meta = MetricMeta::of(kind, &MetricKey::new(key)).expect("known");
+                assert_eq!(
+                    meta.y_scale(None, net()),
+                    YScale::AutoRate { iec: true },
+                    "{kind:?} {key}"
+                );
+            }
         }
     }
 
