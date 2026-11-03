@@ -536,6 +536,10 @@ fn assert_gap_before_all(snap: &Snapshot, seed: u64) {
 #[test]
 fn explore_session_restart() {
     let mut cancels = 0;
+    // Seeds whose session 2 published series. Chaos can cancel the session 2 worker's
+    // controller, which then never samples (asupersync 0.6.2 seed 3); such a seed has no
+    // series to check.
+    let mut checked = 0;
     for seed in 0..16 {
         let fake = chaos_lab(seed, 0.01);
         let workers = fake_worker_set(vec![(
@@ -549,6 +553,7 @@ fn explore_session_restart() {
             .run_for(Duration::from_millis(500), Duration::from_millis(100));
         assert_eq!(rig.latest().epoch, 1, "seed {seed}");
 
+        let before = rig.fake.lab.chaos_stats().cancellations;
         rig.send(action(1));
         rig.fake.advance(RESTART_DELAY);
         assert_eq!(rig.sessions(), 2, "seed {seed}: session 2 starts");
@@ -556,13 +561,25 @@ fn explore_session_restart() {
             .run_for(Duration::from_millis(300), Duration::from_millis(100));
         let after = rig.latest();
         assert_eq!(after.epoch, 2, "seed {seed}");
-        assert!(!after.series.series.is_empty(), "seed {seed}");
-        assert_gap_before_all(&after, seed);
+        let cancelled_in_2 = rig.fake.lab.chaos_stats().cancellations > before;
+        if after.series.series.is_empty() {
+            assert!(
+                cancelled_in_2,
+                "seed {seed}: no series and no cancel in session 2"
+            );
+        } else {
+            assert_gap_before_all(&after, seed);
+            checked += 1;
+        }
         cancels += rig.fake.lab.chaos_stats().cancellations;
         rig.finish();
     }
-    // The seeds are fixed, so this count is too. Chaos must have cancelled some tasks.
+    // The seeds are fixed, so these counts are too. Chaos must have cancelled some tasks.
     assert!(cancels > 0);
+    assert!(
+        checked >= 14,
+        "only {checked} of 16 seeds published series in session 2"
+    );
 }
 
 /// A worker that panics on every sample starts 6 times: 1 start plus 5 restarts, then the
