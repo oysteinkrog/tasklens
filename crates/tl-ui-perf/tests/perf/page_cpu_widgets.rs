@@ -1121,6 +1121,7 @@ fn page_cpu_all_cores_look_survives_edit_and_apply(cx: &mut TestAppContext) {
     ] {
         let mut r = open(cx, perf(mode, CpuSecondaryGraph::None));
         publish_cpu(&r.engine, false, false, 21.6);
+        publish_cores(&r.engine);
         draw(r.vcx);
         let container = r.container();
         let id = r.metric_id(key);
@@ -1152,6 +1153,7 @@ fn page_cpu_all_cores_look_survives_edit_and_apply(cx: &mut TestAppContext) {
     )]));
     let mut r = open(cx, perf);
     publish_cpu(&r.engine, false, false, 21.6);
+    publish_cores(&r.engine);
     draw(r.vcx);
     let container = r.container();
     let chart = r.vcx.update(|_, cx| {

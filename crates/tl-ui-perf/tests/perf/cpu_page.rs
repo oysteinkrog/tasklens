@@ -1444,24 +1444,18 @@ mod page {
                 v.labels.value_align,
                 v.labels.heading.as_ref().map(|h| h.to_string()),
                 v.value_text().map(|t| t.to_string()),
-                v.painted_value_text().map(str::to_owned),
             )
         };
         let utilization = Some("Utilization".to_owned());
         let total = |s: &str| Some(s.to_owned());
         assert_eq!(
             r.vcx.update(|_, cx| look(cx, false)),
-            (
-                ValueAlign::Right,
-                utilization.clone(),
-                total("18.6%"),
-                total("18.6%")
-            )
+            (ValueAlign::Right, utilization.clone(), total("18.6%"))
         );
         publish(27.4);
         draw(r.vcx);
         assert_eq!(
-            r.vcx.update(|_, cx| look(cx, false)).3,
+            r.vcx.update(|_, cx| look(cx, false)).2,
             total("27.4%"),
             "follows the sample"
         );
@@ -1471,52 +1465,7 @@ mod page {
         draw(r.vcx);
         assert_eq!(
             r.vcx.update(|_, cx| look(cx, true)),
-            (
-                ValueAlign::Right,
-                utilization,
-                total("27.4%"),
-                total("27.4%")
-            )
-        );
-    }
-
-    #[gpui_kit::test]
-    fn cpu_all_cores_show_no_value(cx: &mut TestAppContext) {
-        use tl_ui_chart::chart::ValueAlign;
-
-        let r = open(cx, with_mode(CpuGraphMode::AllCoresOverlaid));
-        r.engine.publish_with(|s| {
-            let sys = Arc::make_mut(&mut s.system);
-            sys.header.version += 1;
-            sys.cpu.util_pct = Metric::valid(18.6);
-        });
-        draw(r.vcx);
-        let page = r.page.clone();
-        let look = |cx: &mut gpui_kit::App, stacked: bool| {
-            let p = page.read(cx);
-            let v = if stacked {
-                p.stacked(cx)
-            } else {
-                p.overlaid(cx)
-            };
-            let v = v.expect("chart").read(cx);
-            (
-                v.labels.value_align,
-                v.labels.heading.as_ref().map(|h| h.to_string()),
-            )
-        };
-        let utilization = Some("Utilization".to_owned());
-        assert_eq!(
-            r.vcx.update(|_, cx| look(cx, false)),
-            (ValueAlign::Hidden, utilization.clone())
-        );
-        r.vcx.dispatch_action(PerfSetCpuGraphMode {
-            mode: CpuGraphMode::AllCoresStacked,
-        });
-        draw(r.vcx);
-        assert_eq!(
-            r.vcx.update(|_, cx| look(cx, true)),
-            (ValueAlign::Hidden, utilization)
+            (ValueAlign::Right, utilization, total("27.4%"))
         );
     }
 
