@@ -859,9 +859,8 @@ fn cpu_group_history_only_sweep() {
             .sum();
         close(apps, 1.0, "the groups and Other apps");
     }
-    // The first sweep has no window, so 5 of the 6 sweeps in 60 s carry CPU values.
-    assert_eq!(times.len(), 5, "{times:?}");
-    assert!(times.windows(2).all(|w| w[1] - w[0] == 10_000), "{times:?}");
+    // The sweep at 0 s has no window, so it gives no CPU values. Each later one does.
+    assert_eq!(times, [10_000, 20_000, 30_000, 40_000, 50_000, 60_000]);
     let snap = ui.latest.load_full();
     let band = snap.system.cpu.groups.first().expect("a CPU band");
     let id = SeriesId {
