@@ -4,7 +4,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui_kit::{TestAppContext, VisualTestContext};
@@ -15,11 +14,11 @@ use tl_model::table::ProcessTableView;
 use tl_model::time::now_boot_ns;
 use tl_ui::bench::engine::{BenchEngine, BenchFeed};
 use tl_ui::bench::scenes::{SOAK_TITLES, TABLE_SCROLL_PX_PER_S, TableScroller, open_scene};
-use tl_ui::bench::stats::{BenchReport, OUTPUT_PERIOD_NS};
+use tl_ui::bench::stats::OUTPUT_PERIOD_NS;
 use tl_ui::bench::synth::{
     BenchRng, SEED, TABLE_GROUP_SIZE, TABLE_GROUPS, TABLE_PROCESSES, TableSynth,
 };
-use tl_ui::bench::{BenchClocks, BenchError, BenchOptions, BenchScene, run};
+use tl_ui::bench::{BenchOptions, BenchScene};
 use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::demand::GlobalDemand;
 use tl_ui_perf::performance::DeviceKey;
@@ -27,18 +26,7 @@ use tl_ui_perf::performance::cpu::CpuPage;
 use tl_ui_perf::performance::overview::{OVERVIEW_KEY, OverviewPage};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
-static FAKE_CPU: AtomicU64 = AtomicU64::new(0);
-
-fn fake_cpu() -> u64 {
-    FAKE_CPU.fetch_add(1_000, Ordering::Relaxed)
-}
-
-fn clocks() -> BenchClocks {
-    BenchClocks {
-        thread_cpu_ns: fake_cpu,
-        process_cpu_ns: fake_cpu,
-    }
-}
+use super::bench_run::run_scene;
 
 fn draw(cx: &mut VisualTestContext) {
     for _ in 0..2 {
@@ -48,63 +36,6 @@ fn draw(cx: &mut VisualTestContext) {
             window.draw(cx).clear(cx);
         });
     }
-}
-
-type Outcome = Rc<RefCell<Option<Result<BenchReport, BenchError>>>>;
-
-/// Runs `scene` for `duration_s` simulated seconds with no warm-up and returns its result. With
-/// `frames`, the scene window gets one simulated frame every 100 ms; without, no frame callback
-/// ever runs (a locked screen).
-fn run_scene(
-    cx: &mut TestAppContext,
-    scene: BenchScene,
-    duration_s: u32,
-    json: Option<std::path::PathBuf>,
-    real: Option<Arc<dyn EngineClient>>,
-    frames: bool,
-) -> Result<BenchReport, BenchError> {
-    cx.executor().allow_parking();
-    let outcome: Outcome = Rc::default();
-    let slot = Rc::clone(&outcome);
-    cx.update(|cx| {
-        let opts = BenchOptions {
-            duration_s,
-            warmup_s: 0,
-            json,
-        };
-        let task = run(cx, scene, opts, clocks(), real);
-        cx.spawn(async move |_| *slot.borrow_mut() = Some(task.await))
-            .detach();
-    });
-    let window = cx.update(|cx| cx.windows().last().copied());
-    let mut vcx = window.map(|w| VisualTestContext::from_window(w, cx));
-    for _ in 0..=duration_s * 10 {
-        // Stop the clock once the scene has its result, so no timer runs after it.
-        if outcome.borrow().is_some() {
-            break;
-        }
-        match vcx.as_mut() {
-            Some(vcx) => {
-                vcx.run_until_parked();
-                if frames {
-                    vcx.update(|window, cx| {
-                        window.simulate_next_frame(cx);
-                        window.draw(cx).clear(cx);
-                    });
-                }
-                vcx.executor().advance_clock(Duration::from_millis(100));
-            }
-            None => {
-                cx.run_until_parked();
-                cx.executor().advance_clock(Duration::from_millis(100));
-            }
-        }
-    }
-    match vcx.as_mut() {
-        Some(vcx) => vcx.run_until_parked(),
-        None => cx.run_until_parked(),
-    }
-    outcome.borrow_mut().take().expect("the scene finished")
 }
 
 #[test]
@@ -244,18 +175,6 @@ fn bench_scene_perf_overview_procs_shows_top_processes(cx: &mut TestAppContext) 
     let merged = vcx.update(|_, cx| cx.global::<GlobalDemand>().0.read(cx).merged());
     assert!(merged.process_top && !merged.process_table, "{merged:?}");
     engine.stop();
-}
-
-#[gpui_kit::test]
-fn static_scene_requests_no_frames(cx: &mut TestAppContext) {
-    // The run fails if the driver requested a frame; `frames` counts the window's paints.
-    let report = run_scene(cx, BenchScene::Static, 2, None, None, true).expect("static passes");
-    assert_eq!(report.scene, "static");
-    assert!(
-        (15..=25).contains(&report.frames),
-        "one paint per simulated 100 ms frame over 2 s: {}",
-        report.frames
-    );
 }
 
 #[gpui_kit::test]
