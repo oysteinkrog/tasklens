@@ -5,12 +5,16 @@
 //! metric shows in any mix of forms, Edit Widgets adds and applies, and a sample renders no page
 //! or container.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use gpui_kit::{
-    AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Render,
-    StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    App, AppContext as _, Bounds, Context, Entity, EntityId, IntoElement, Modifiers, MouseButton,
+    MouseDownEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollDelta,
+    ScrollWheelEvent, StyleRefinement, Styled as _, Subscription, TestAppContext, TouchPhase,
+    VisualTestContext, Window, div, point, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
@@ -24,14 +28,18 @@ use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
+use tl_ui_chart::chart::{ChartGridView, ChartView};
 use tl_ui_kit::components::kv_grid;
-use tl_ui_overview::widget::container::WidgetContainer;
+use tl_ui_overview::widget::container::{WidgetContainer, WidgetView};
 use tl_ui_overview::widget::details_widget::details_id;
 use tl_ui_overview::widget::edit::saved_layout;
-use tl_ui_overview::widget::metric_widget::widget_id;
+use tl_ui_overview::widget::fixed_widget::FixedWidgetView;
+use tl_ui_overview::widget::group_widget::GroupWidget;
+use tl_ui_overview::widget::metric_widget::{MetricWidget, widget_id};
 use tl_ui_overview::widget::source::Availability;
 use tl_ui_perf::performance::gpu::{GpuPage, toggle_optional};
 use tl_ui_perf::performance::gpu_views::{displays_id, engines_id};
+use tl_ui_perf::performance::menu::ClickedEngine;
 use tl_ui_perf::performance::page::{DevicePage as _, PAGE_PAD};
 use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_perf_core::core::actions::WidgetSource;
@@ -707,6 +715,70 @@ fn page_gpu_removed_shows_unavailable(cx: &mut TestAppContext) {
     }
 }
 
+/// The engine a right-press at `at` names for "Hide this engine graph".
+fn pressed_engine(r: &mut Rig, at: Point<Pixels>) -> Option<String> {
+    r.vcx.update(|_, cx| cx.set_global(ClickedEngine(None)));
+    r.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    r.vcx.simulate_event(MouseUpEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    r.vcx.run_until_parked();
+    r.vcx
+        .update(|_, cx| cx.try_global::<ClickedEngine>().and_then(|c| c.0.clone()))
+        .map(|k| k.to_string())
+}
+
+/// A right-press on a cell of an engine grid that scrolls inside its widget names the engine
+/// drawn under the pointer, at the scroll offset, for "Hide this engine graph".
+#[gpui_kit::test]
+fn page_gpu_engine_press_follows_scroll(cx: &mut TestAppContext) {
+    // Two columns wide: one cell per row, three rows of 112 px in a shorter widget.
+    let grid = WidgetSetting {
+        content: WidgetContent::Fixed(FixedWidget::GpuEngineGrid),
+        ..metric(
+            1,
+            "",
+            FormSet::empty(),
+            Some(WidgetCell {
+                col: 0,
+                row: 0,
+                cols: 2,
+                rows: 9,
+            }),
+        )
+    };
+    let mut perf = PerformanceSettings::default();
+    perf.layouts.set(grid_layout(1, vec![grid]));
+    let mut r = open(cx, perf, 1200., 900.);
+    let id = engines_id(&container(1));
+    let top = r.bounds(id.clone());
+    let at = point(top.left() + px(20.), top.top() + px(20.));
+    assert_eq!(pressed_engine(&mut r, at).as_deref(), Some("gpu"));
+
+    r.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-1000.))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    draw(r.vcx);
+    let dy = f32::from(top.top() - r.bounds(id).top());
+    // A cell and its 8 px gap take 120 px: the pointer is over a later row.
+    let row = ((20. + dy) / 120.).floor() as usize;
+    assert!(row >= 1, "the grid scrolled past its first row: {dy}");
+    let want = ["gpu", "enc", "dec"][row.min(2)];
+    assert_eq!(pressed_engine(&mut r, at).as_deref(), Some(want));
+}
+
 /// Edit Widgets on the GPU page pins the flow layout, adds VRAM and applies: the page's entry
 /// is the grid layout, the 1.3.0 parts keep their entities.
 #[gpui_kit::test]
@@ -760,9 +832,84 @@ fn page_gpu_edit_add_apply(cx: &mut TestAppContext) {
     });
 }
 
+/// Counts the widget, chart and engine grid entities made while it lives, and the drops of the
+/// entities [`shown_entities`] watched.
+struct Lifecycle {
+    made: Rc<Cell<u32>>,
+    dropped: Rc<Cell<u32>>,
+    subs: Vec<Subscription>,
+}
+
+impl Lifecycle {
+    fn new(r: &mut Rig) -> Self {
+        let made = Rc::new(Cell::new(0));
+        let count = || {
+            let made = Rc::clone(&made);
+            move || made.set(made.get() + 1)
+        };
+        let (a, b, c, d, e) = (count(), count(), count(), count(), count());
+        let subs = r.vcx.update(|_, cx| {
+            vec![
+                cx.observe_new(move |_: &mut MetricWidget, _, _| a()),
+                cx.observe_new(move |_: &mut GroupWidget, _, _| b()),
+                cx.observe_new(move |_: &mut FixedWidgetView, _, _| c()),
+                cx.observe_new(move |_: &mut ChartView, _, _| d()),
+                cx.observe_new(move |_: &mut ChartGridView, _, _| e()),
+            ]
+        });
+        Self {
+            made,
+            dropped: Rc::new(Cell::new(0)),
+            subs,
+        }
+    }
+
+    /// Counts a drop of `entity`.
+    fn watch<T: 'static>(&mut self, entity: &Entity<T>, cx: &mut App) -> EntityId {
+        let dropped = Rc::clone(&self.dropped);
+        self.subs.push(cx.observe_release(entity, move |_, _| {
+            dropped.set(dropped.get() + 1);
+        }));
+        entity.entity_id()
+    }
+
+    /// The entities made and dropped since the counter started.
+    fn counts(&self) -> (u32, u32) {
+        (self.made.get(), self.dropped.get())
+    }
+}
+
+/// The entities the page shows, in placement order: every placed widget and the chart of each
+/// metric widget, then the engine grid part and its chart grid. Each is watched for a drop.
+fn shown_entities(r: &mut Rig, life: &mut Lifecycle) -> Vec<EntityId> {
+    let (page, container) = (r.page.clone(), r.container());
+    r.vcx.update(|_, cx| {
+        let mut ids = Vec::new();
+        for id in container.read(cx).placed_ids() {
+            match container.read(cx).view(id).cloned() {
+                Some(WidgetView::Metric(w)) => {
+                    ids.push(life.watch(&w, cx));
+                    if let Some(chart) = w.read(cx).chart().cloned() {
+                        ids.push(life.watch(&chart, cx));
+                    }
+                }
+                Some(WidgetView::Group(g)) => ids.push(life.watch(&g, cx)),
+                Some(WidgetView::Fixed(f)) => ids.push(life.watch(&f, cx)),
+                None => {}
+            }
+        }
+        let engines = page.read(cx).engines_view().clone();
+        let grid = engines.read(cx).grid().clone();
+        ids.push(life.watch(&engines, cx));
+        ids.push(life.watch(&grid, cx));
+        ids
+    })
+}
+
 /// A sample that changes nothing the page shows renders no page or container and notifies no
 /// part; a sample that moves the GPU's values notifies neither the page, the container nor the
-/// engine grid part, and keeps every widget entity (ADR-019 phase 3 render contract).
+/// engine grid part. No sample makes or drops a widget, chart or engine grid entity: the page
+/// shows the same entities throughout (ADR-019 phase 3 render contract).
 #[gpui_kit::test]
 fn page_gpu_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
     let mut r = open(cx, PerformanceSettings::default(), 1200., 900.);
@@ -772,18 +919,12 @@ fn page_gpu_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
         r.vcx.update(|_, cx| {
             let p = page.read(cx);
             let c = container.read(cx);
-            let ids: Vec<_> = c
-                .placed_ids()
-                .iter()
-                .filter_map(|id| c.view(*id).map(|_| *id))
-                .collect();
             (
                 p.render_count.get(),
                 p.notify_count.get(),
                 c.render_count.get(),
                 c.notify_count.get(),
                 p.engines_view().read(cx).notify_count.get(),
-                ids,
             )
         })
     };
@@ -799,18 +940,28 @@ fn page_gpu_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
         draw(r.vcx);
     };
     publish(&mut r, 10.9, 52.);
+    let mut life = Lifecycle::new(&mut r);
+    let entities = shown_entities(&mut r, &mut life);
+    // The engine grid, Memory, Temperature, Details and Displays, and the two charts.
+    assert!(entities.len() >= 9, "{entities:?}");
     let before = counts(&mut r);
     for _ in 0..3 {
         publish(&mut r, 10.9, 52.);
     }
     assert_eq!(counts(&mut r), before, "nothing shown changed");
+    assert_eq!(life.counts(), (0, 0), "no entity made or dropped");
     publish(&mut r, 50., 60.);
     let after = counts(&mut r);
     assert_eq!(after.1, before.1, "the page never notifies");
     assert_eq!(after.3, before.3, "the container never notifies");
-    assert_eq!(after.5, before.5, "the same widgets");
     // The grid's cells draw the new samples; the part around them never notifies. Its one
     // render in that frame comes from GPUI marking the ancestors of the grid view dirty, as for
     // the page and the container (leader decision on tasklens-hzire.3).
     assert_eq!(after.4, before.4, "the engine grid part never notifies");
+    assert_eq!(life.counts(), (0, 0), "no entity made or dropped");
+    assert_eq!(
+        shown_entities(&mut r, &mut life),
+        entities,
+        "the same entities"
+    );
 }
