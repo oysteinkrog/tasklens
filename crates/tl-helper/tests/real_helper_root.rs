@@ -57,7 +57,7 @@ fn needs_root() -> bool {
     if rustix::process::geteuid().is_root() {
         return false;
     }
-    println!("skipped: needs root");
+    eprintln!("skipped: needs root");
     true
 }
 
