@@ -183,8 +183,10 @@ fn open(cx: &mut TestAppContext, perf: PerformanceSettings, w: f32, h: f32) -> R
         init_strings(cx, "en-US");
         kv_grid::init(cx);
         cx.set_global(EngineGlobal(Arc::clone(&client)));
-        let mut settings = Settings::default();
-        settings.performance = perf;
+        let mut settings = Settings {
+            performance: perf,
+            ..Settings::default()
+        };
         settings.motion.smooth_graphs = false;
         cx.set_global(BootSettings {
             settings,
