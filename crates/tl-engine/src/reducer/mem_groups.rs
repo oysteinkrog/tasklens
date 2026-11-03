@@ -130,8 +130,9 @@ pub struct MemGroups {
     pub devices: FxHashMap<Arc<str>, (DeviceIdx, Arc<str>)>,
     /// The top-group devices that got a sample in the last sweep. One that drops out gets a gap.
     pub shown: Vec<DeviceIdx>,
-    /// The same for the CPU top 20 (`CPU_GROUP`).
-    pub cpu_shown: Vec<DeviceIdx>,
+    /// The same for the CPU top 20 (`CPU_GROUP`), with each group's key. A sweep without a
+    /// window gaps these and keeps them, so the next one gaps them again.
+    pub cpu_shown: Vec<(Arc<str>, DeviceIdx)>,
     pub other_key: Arc<str>,
     pub other_name: Arc<str>,
     pub shared_key: Arc<str>,

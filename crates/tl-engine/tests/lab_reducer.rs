@@ -4499,24 +4499,35 @@ fn cpu_group_top20_by_cpu() {
         .map(|s| s.samples.len());
     assert_eq!(series, Some(2), "one valid sample, then one gap");
 
-    // A sweep without a window gives every CPU band a gap and keeps the band list.
+    // Two sweeps in a row without a window: each gives every CPU band a gap, the app bands
+    // too, and both keep the band list. p01 to p04 are in the CPU top 20 only.
     let list = Arc::clone(&rig.latest().system.cpu.groups);
-    let mut no_window = cpu_sweep(4 * SEC, &second, 500);
-    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut no_window {
-        s.cpu = None;
-    }
-    rig.run(vec![no_window]).expect("no invariant violation");
-    let snap = rig.latest();
-    assert_eq!(snap.system.cpu.groups, list);
-    for band in snap.system.cpu.groups.iter() {
-        let s = cpu_group_sample(&rig, band.device);
-        assert!(!s.is_valid() && s.t_ns == 4 * SEC, "{} is a gap", band.key);
+    for t in [4 * SEC, 5 * SEC] {
+        let mut no_window = cpu_sweep(t, &second, 500);
+        if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut no_window {
+            s.cpu = None;
+        }
+        rig.run(vec![no_window]).expect("no invariant violation");
+        let snap = rig.latest();
+        assert_eq!(snap.system.cpu.groups, list);
+        for band in snap.system.cpu.groups.iter() {
+            let s = cpu_group_sample(&rig, band.device);
+            assert!(!s.is_valid() && s.t_ns == t, "{} is a gap at {t}", band.key);
+        }
     }
 
     // A CPU worker sample keeps the reducer's list.
-    rig.run(vec![cpu_msg(5 * SEC, 50.0, true)])
+    rig.run(vec![cpu_msg(6 * SEC, 50.0, true)])
         .expect("no invariant violation");
     assert_eq!(rig.latest().system.cpu.groups, list);
+
+    // The window comes back: the app bands get values again.
+    rig.run(vec![cpu_sweep(7 * SEC, &second, 500)])
+        .expect("no invariant violation");
+    let p01 = rig.latest().system.cpu.groups[0].clone();
+    assert_eq!(&*p01.key, "comm:p01");
+    let s = cpu_group_sample(&rig, p01.device);
+    assert!(s.is_valid() && s.t_ns == 7 * SEC, "p01 has a value again");
 }
 
 #[test]

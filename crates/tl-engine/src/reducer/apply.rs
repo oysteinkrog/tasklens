@@ -1663,7 +1663,7 @@ impl Reducer {
             let idx = self.mem_group_device(&g.group.key, &g.group.name)?;
             self.push(idx, MetricId::MEM_GROUP, t, g.bytes as f32, true, period);
             keep.insert(Arc::clone(&g.group.key));
-            shown.push(idx);
+            shown.push((Arc::clone(&g.group.key), idx));
             published.push(MemGroupBand {
                 key: Arc::clone(&g.group.key),
                 name: Arc::clone(&g.group.name),
@@ -1740,8 +1740,8 @@ impl Reducer {
     /// Pushes the CPU top 20, "Other apps" and the five system bands as `CPU_GROUP` series and
     /// fills `Snapshot.system.cpu.groups` (D-042, UI-PRF-062 "Data binding"). A group that leaves
     /// the CPU top 20 gets one gap sample. Without a window (`cpu` is `None`) every CPU band with
-    /// a device gets a gap, no device is added and the band list stays as it was. Adds the keys
-    /// it publishes to `keep`.
+    /// a device gets a gap, no device is added, and the band list and the CPU top 20 stay as they
+    /// were. Adds the keys it publishes or gaps to `keep`.
     fn apply_cpu_groups(
         &mut self,
         t: TimeNs,
@@ -1756,9 +1756,14 @@ impl Reducer {
         );
         let cpu_keys = groups.cpu_keys.clone();
         let Some(cpu) = cpu else {
-            for idx in std::mem::take(&mut self.apply_state.mem_groups.cpu_shown) {
-                self.gaps(idx, &[MetricId::CPU_GROUP], t);
+            // The CPU top 20 stays as it was: the next sweep without a window gaps it again,
+            // and the next sweep with one finds the groups that left.
+            let shown = std::mem::take(&mut self.apply_state.mem_groups.cpu_shown);
+            for (key, idx) in &shown {
+                self.gaps(*idx, &[MetricId::CPU_GROUP], t);
+                keep.insert(Arc::clone(key));
             }
+            self.apply_state.mem_groups.cpu_shown = shown;
             // Only bands that have a device: a band that never had a value has no series.
             for (key, _) in std::iter::once(other).chain(cpu_keys) {
                 let Some(&(idx, _)) = self.apply_state.mem_groups.devices.get(&key) else {
@@ -1776,7 +1781,7 @@ impl Reducer {
             let idx = self.mem_group_device(&g.group.key, &g.group.name)?;
             self.push(idx, MetricId::CPU_GROUP, t, g.pct as f32, true, period);
             keep.insert(Arc::clone(&g.group.key));
-            shown.push(idx);
+            shown.push((Arc::clone(&g.group.key), idx));
             published.push(MemGroupBand {
                 key: Arc::clone(&g.group.key),
                 name: Arc::clone(&g.group.name),
@@ -1811,7 +1816,8 @@ impl Reducer {
         let groups = &mut self.apply_state.mem_groups;
         let left: Vec<DeviceIdx> = std::mem::replace(&mut groups.cpu_shown, shown)
             .into_iter()
-            .filter(|idx| !groups.cpu_shown.contains(idx))
+            .filter(|(_, idx)| !groups.cpu_shown.iter().any(|(_, now)| now == idx))
+            .map(|(_, idx)| idx)
             .collect();
         for idx in left {
             self.gaps(idx, &[MetricId::CPU_GROUP], t);
