@@ -978,3 +978,21 @@ fn page_gpu_look_survives_edit_and_apply(cx: &mut TestAppContext) {
     };
     super::page_look::sweep(r.vcx, &container, &editor, "gpu");
 }
+
+/// A gpu that goes away with the default flow layout writes no entry; when it comes back the
+/// page places the same widgets as before (tasklens-hzire.10, hotplug).
+#[gpui_kit::test]
+fn page_gpu_hotplug_default_flow_keeps_settings(cx: &mut TestAppContext) {
+    let mut r = open(cx, PerformanceSettings::default(), 1200., 900.);
+    let container = r.container();
+    let placed = |r: &mut Rig| r.vcx.update(|_, cx| container.read(cx).placed_ids());
+    let before = placed(&mut r);
+    assert!(!before.is_empty());
+    publish_gpus(&r.engine, false);
+    draw(r.vcx);
+    assert!(r.saved(1).is_none(), "a hotplug writes no entry");
+    publish_gpus(&r.engine, true);
+    draw(r.vcx);
+    assert_eq!(placed(&mut r), before, "the same widgets come back");
+    assert!(r.saved(1).is_none(), "a hotplug writes no entry");
+}

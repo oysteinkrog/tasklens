@@ -888,3 +888,21 @@ fn page_net_look_survives_edit_and_apply(cx: &mut TestAppContext) {
     };
     super::page_look::sweep(r.vcx, &container, &editor, "net");
 }
+
+/// A net that goes away with the default flow layout writes no entry; when it comes back the
+/// page places the same widgets as before (tasklens-hzire.10, hotplug).
+#[gpui_kit::test]
+fn page_net_hotplug_default_flow_keeps_settings(cx: &mut TestAppContext) {
+    let mut r = open(cx, PerformanceSettings::default(), None);
+    let container = r.container();
+    let placed = |r: &mut Rig| r.vcx.update(|_, cx| container.read(cx).placed_ids());
+    let before = placed(&mut r);
+    assert!(!before.is_empty());
+    publish(&r.engine, false, 12.);
+    draw(r.vcx);
+    assert!(r.saved(1).is_none(), "a hotplug writes no entry");
+    publish(&r.engine, true, 12.);
+    draw(r.vcx);
+    assert_eq!(placed(&mut r), before, "the same widgets come back");
+    assert!(r.saved(1).is_none(), "a hotplug writes no entry");
+}
