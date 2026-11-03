@@ -24,11 +24,12 @@ pub mod runtime;
 pub mod session;
 pub mod source;
 pub mod supervise;
+mod time_util;
 pub mod update;
 pub mod workers;
 // Chain-edit lines added by later beads: dbus (E08-A2); session, reducer, bridge (E09);
 // actions (E11); gpu (E13); launcher, opener (E14); helper (E29); history_query (E30);
-// client_session (q4x76.4); desktop (q4x76.12).
+// client_session (q4x76.4); desktop (q4x76.12); time_util (25fwy).
 
 pub use bridge::{Engine, EngineHandle, EngineHooks, SessionPeer, SessionPort, ShutdownReport};
 pub use config::{EngineConfig, EngineMode};

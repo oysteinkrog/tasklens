@@ -5,8 +5,8 @@
 //! the `DbusConn` or its region is cancelled, the task closes the connection (`release`), so the
 //! socket is closed on every path out of a generation. zbus futures do not
 //! see `Cx` cancellation, so every call goes through `DbusConn::call` or `DbusConn::read`: a
-//! `time::timeout` followed by a checkpoint. Proxies built on a connection must not outlive the
-//! worker generation that made it.
+//! `time_util::timeout` followed by a checkpoint. Proxies built on a connection must not outlive
+//! the worker generation that made it.
 //!
 //! Log D-Bus error names only. Error messages can carry unit or window names; never log them
 //! above `debug`.
@@ -19,7 +19,6 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use asupersync::Cx;
 use asupersync::runtime::TaskHandle;
-use asupersync::time;
 use futures_lite::{Stream, StreamExt};
 
 use crate::update::WorkerError;
@@ -94,7 +93,7 @@ pub async fn connect(cx: &Cx, bus: Bus) -> Result<DbusConn, DbusError> {
     }
     .map_err(|e| DbusError::Connect(e.to_string().into()))?;
     let build = builder.internal_executor(false).build();
-    let conn = match time::timeout(cx.now(), CONNECT_TIMEOUT, build).await {
+    let conn = match crate::time_util::timeout(cx, CONNECT_TIMEOUT, build).await {
         Ok(Ok(conn)) => conn,
         Ok(Err(e)) => return Err(DbusError::Connect(e.to_string().into())),
         Err(_) => return Err(DbusError::Timeout(CONNECT_TIMEOUT)),
@@ -113,7 +112,8 @@ fn drive(cx: &Cx, conn: zbus::Connection) -> Result<DbusConn, DbusError> {
     let tick = cx
         .spawn(move |cx| async move {
             loop {
-                let _ = time::timeout(cx.now(), EXECUTOR_TICK, driven.executor().tick()).await;
+                let _ =
+                    crate::time_util::timeout(&cx, EXECUTOR_TICK, driven.executor().tick()).await;
                 if cx.checkpoint().is_err() {
                     break;
                 }
@@ -148,7 +148,7 @@ async fn release(cx: &Cx, conn: &zbus::Connection, dropped: &AtomicBool) {
     // nothing would close it later.
     while !dropped.load(Ordering::Acquire) && !left().is_zero() {
         let step = RELEASE_STEP.min(left());
-        let _ = time::timeout(cx.now(), step, conn.executor().tick()).await;
+        let _ = crate::time_util::timeout(cx, step, conn.executor().tick()).await;
     }
     let close = async {
         let _ = conn.clone().close().await;
@@ -156,7 +156,7 @@ async fn release(cx: &Cx, conn: &zbus::Connection, dropped: &AtomicBool) {
             conn.executor().tick().await;
         }
     };
-    let _ = time::timeout(cx.now(), CLOSE_WAIT, close).await;
+    let _ = crate::time_util::timeout(cx, CLOSE_WAIT, close).await;
 }
 
 impl DbusConn {
@@ -171,7 +171,7 @@ impl DbusConn {
         &self.conn
     }
 
-    /// `time::timeout(cx.now(), d, fut)` then `cx.checkpoint()`. `Elapsed` becomes
+    /// `time_util::timeout(cx, d, fut)` then `cx.checkpoint()`. `Elapsed` becomes
     /// `DbusError::Timeout(d)`; a failed checkpoint becomes `DbusError::Closed`.
     pub async fn call<T>(
         &self,
@@ -200,7 +200,7 @@ impl DbusConn {
         s: &mut S,
         d: Duration,
     ) -> Result<Option<S::Item>, DbusError> {
-        let next = time::timeout(cx.now(), d, s.next()).await;
+        let next = crate::time_util::timeout(cx, d, s.next()).await;
         if cx.checkpoint().is_err() {
             return Err(DbusError::Closed);
         }
@@ -229,7 +229,7 @@ async fn timed<T>(
     d: Duration,
     fut: impl Future<Output = zbus::Result<T>>,
 ) -> Result<T, DbusError> {
-    let result = time::timeout(cx.now(), d, fut).await;
+    let result = crate::time_util::timeout(cx, d, fut).await;
     if cx.checkpoint().is_err() {
         return Err(DbusError::Closed);
     }
@@ -330,6 +330,7 @@ mod tests {
     use std::sync::Mutex;
     use std::task::{Context, Poll, Waker};
 
+    use asupersync::time;
     use asupersync::types::Budget;
     use asupersync::{LabConfig, LabRuntime};
 
