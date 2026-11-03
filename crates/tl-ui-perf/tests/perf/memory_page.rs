@@ -586,20 +586,24 @@ mod composition {
         });
     }
 
-    /// A segment that passes the 72 px rule still hides its name when the name is wider
-    /// than the segment minus sp3 padding on both sides (tasklens-frt94).
-    #[gpui_kit::test]
-    fn composition_label_hidden_when_name_does_not_fit(cx: &mut TestAppContext) {
-        let comp = |compressed: u64| Composition {
+    /// In use 400 px, Compressed `compressed` px, Modified 20 px, Standby 200 px, rest Free.
+    fn with_compressed(compressed: u64) -> Composition {
+        Composition {
             in_use: 400 * MIB,
             compressed,
             modified: 20 * MIB,
             standby: 200 * MIB,
             free: 1024 * MIB - 620 * MIB - compressed,
             total: 1024 * MIB,
-        };
-        let (bar, vcx) = bar(cx, Some(comp(100 * MIB)));
-        vcx.read_entity(&bar, |b, _| {
+        }
+    }
+
+    /// A segment that passes the 72 px rule still hides its name when the name is wider
+    /// than the segment minus sp3 padding on both sides (tasklens-frt94).
+    #[gpui_kit::test]
+    fn composition_label_hidden_when_name_does_not_fit(cx: &mut TestAppContext) {
+        let (view, vcx) = bar(cx, Some(with_compressed(100 * MIB)));
+        vcx.read_entity(&view, |b, _| {
             let l = b.painted_labels.borrow();
             assert!(
                 !l.contains(&SegmentKind::Compressed),
@@ -608,8 +612,12 @@ mod composition {
             assert!(l.contains(&SegmentKind::InUse));
             assert!(l.contains(&SegmentKind::Free));
         });
-        let (bar, vcx) = bar(cx, Some(comp(160 * MIB)));
-        vcx.read_entity(&bar, |b, _| {
+    }
+
+    #[gpui_kit::test]
+    fn composition_label_shown_when_name_fits(cx: &mut TestAppContext) {
+        let (view, vcx) = bar(cx, Some(with_compressed(160 * MIB)));
+        vcx.read_entity(&view, |b, _| {
             assert!(b.painted_labels.borrow().contains(&SegmentKind::Compressed));
         });
     }
