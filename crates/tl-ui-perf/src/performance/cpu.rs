@@ -18,7 +18,8 @@
 //! `page.cpu` converts `cpu_graph_mode` and `cpu_secondary_graph` once, at load
 //! (`Settings::clamp`). The header buttons and the page menu edit the page's flow layout and
 //! never write those keys; a page without an entry gets one. With a grid layout the mode items
-//! ask "Replace your widgets?" first and "Secondary graph >" is hidden. The kernel toggle stays
+//! ask "Replace your widgets?" first and "Secondary graph >" is hidden. The mode button then
+//! names the mode whose graph widgets the layout holds exactly, else "Graph". The kernel toggle stays
 //! `performance.cpu_kernel`, which every CPU chart follows.
 //!
 //! Render contract: the page renders on a header change, a header button change, a range
@@ -443,6 +444,48 @@ pub fn layout_mode(layout: &ContainerLayout) -> Option<CpuGraphMode> {
     layout.preset.as_ref().and_then(|p| preset_mode(&p.id))
 }
 
+/// The mode name the CPU mode button shows for `layout`. A flow layout: its preset's mode. A
+/// grid layout: the first enabled mode whose preset widgets are exactly the layout's graph
+/// widgets (a total or all cores widget counts only when it shows a chart); `None` otherwise.
+pub fn layout_label_mode(layout: &ContainerLayout) -> Option<CpuGraphMode> {
+    if layout.preset.is_some() {
+        return layout_mode(layout);
+    }
+    let key = |c: &WidgetContent| match c {
+        WidgetContent::Metric(s) => format!("metric {}", s.metric.as_str()),
+        other => format!("{other:?}"),
+    };
+    let norm = |mut v: Vec<String>| {
+        v.sort();
+        v.dedup();
+        v
+    };
+    let shown = norm(
+        layout
+            .widgets
+            .iter()
+            .filter(|w| is_mode_widget(w))
+            .filter(|w| {
+                !matches!(w.content, WidgetContent::Metric(_)) || w.forms.contains(FormSet::CHART)
+            })
+            .map(|w| key(&w.content))
+            .collect(),
+    );
+    mode_items()
+        .into_iter()
+        .filter(|i| i.enabled)
+        .map(|i| i.mode)
+        .find(|&m| {
+            let want = norm(
+                cpu_mode_widgets(cpu_preset(m))
+                    .iter()
+                    .map(|(c, _)| key(c))
+                    .collect(),
+            );
+            want == shown
+        })
+}
+
 /// Whether `w` is a metric widget of `metric`.
 fn is_metric(w: &WidgetSetting, metric: &str) -> bool {
     matches!(&w.content, WidgetContent::Metric(s) if s.metric.as_str() == metric)
@@ -675,6 +718,10 @@ pub struct CpuPage {
     avail_cell: Rc<Cell<SecondaryAvail>>,
     /// The preset of the layout the page shows; `None` for a grid layout.
     mode: Option<CpuGraphMode>,
+    /// The mode name the mode button shows: `mode`, or with a grid layout the mode whose
+    /// graph widgets the layout holds exactly. Only the label follows it, not the Kernel
+    /// toggle.
+    label_mode: Option<CpuGraphMode>,
     /// The layout places the core board, so its sort toggle joins the focus order.
     board_placed: bool,
     kernel: bool,
@@ -780,6 +827,7 @@ impl CpuPage {
         };
         let layout = page_layout(&container_id, cx);
         let mode = layout_mode(&layout);
+        let label_mode = layout_label_mode(&layout);
         let container = {
             let store = Rc::new(RefCell::new(SourceStore::for_page(&hub)));
             let id = container_id.clone();
@@ -843,6 +891,7 @@ impl CpuPage {
             avail,
             avail_cell,
             mode,
+            label_mode,
             board_placed: false,
             kernel: settings.kernel,
             #[cfg(feature = "bench")]
@@ -878,6 +927,11 @@ impl CpuPage {
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
         this.on_container_changed(cx);
         this
+    }
+
+    /// The mode the mode button names ([`layout_label_mode`]).
+    pub fn label_mode(&self) -> Option<CpuGraphMode> {
+        self.label_mode
     }
 
     /// The preset of the layout the page shows: its graph mode, `None` with a grid layout.
@@ -1279,9 +1333,11 @@ impl CpuPage {
         }
         let layout = self.shown_layout(cx);
         let mode = layout_mode(&layout);
+        let label_mode = layout_label_mode(&layout);
         self.container.update(cx, |c, cx| c.set_layout(layout, cx));
-        if mode != self.mode {
+        if mode != self.mode || label_mode != self.label_mode {
             self.mode = mode;
+            self.label_mode = label_mode;
             self.notify(cx);
         }
     }
@@ -1503,11 +1559,12 @@ impl DevicePage for CpuPage {
         self.header.clone()
     }
 
-    /// The mode button (the preset's name; "Graph" with a grid layout) and the kernel toggle.
+    /// The mode button (the preset's name; with a grid layout the name of the mode whose graph
+    /// widgets the layout holds exactly, else "Graph") and the kernel toggle.
     fn toggles(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 2]> {
         let m = *metrics(cx);
         let w = &self.words;
-        let mode = self.mode;
+        let mode = self.label_mode;
         let menu_focus = self.focus.clone();
         let (labels, later) = (w.modes.clone(), w.later.clone());
         let bounds = Rc::clone(&self.mode_button_bounds);
@@ -1579,7 +1636,7 @@ impl DevicePage for CpuPage {
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
         let layout = page_layout(&self.container_id, cx);
         let w = &self.words;
-        let mode = layout_mode(&layout);
+        let mode = layout_label_mode(&layout);
         let (labels, later) = (w.modes.clone(), w.later.clone());
         let menu = if self.placed(&FixedWidget::CpuByApp, cx) {
             let top_n = TlSettings::settings(cx).performance.cpu_by_app.top_n;

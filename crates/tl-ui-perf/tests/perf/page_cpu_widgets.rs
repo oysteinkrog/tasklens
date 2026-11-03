@@ -1651,3 +1651,74 @@ fn page_cpu_by_app_render_contract(cx: &mut TestAppContext) {
         "the same entities"
     );
 }
+
+/// With a grid layout the mode button names the mode whose graph widgets the layout holds
+/// exactly, else it reads "Graph". The Kernel toggle still follows the preset only.
+#[gpui_kit::test]
+fn page_cpu_grid_layout_mode_label(cx: &mut TestAppContext) {
+    let chart = FormSet::CHART | FormSet::VALUE | FormSet::LABEL;
+    let fixed = |f: FixedWidget, row: u16| WidgetSetting {
+        content: WidgetContent::Fixed(f),
+        ..metric("cpu", "total", FormSet::empty(), cell(0, row, 12, 6))
+    };
+    let total = |forms: FormSet, row: u16| metric("cpu", "total", forms, cell(0, row, 12, 6));
+    let cases: Vec<(&str, Vec<WidgetSetting>, Option<CpuGraphMode>)> = vec![
+        (
+            "core grid and Details",
+            vec![
+                fixed(FixedWidget::CpuCoreGrid, 0),
+                fixed(FixedWidget::Details, 6),
+            ],
+            Some(CpuGraphMode::PerCore),
+        ),
+        (
+            "total chart and Details",
+            vec![total(chart, 0), fixed(FixedWidget::Details, 6)],
+            Some(CpuGraphMode::Overall),
+        ),
+        (
+            "total without a chart",
+            vec![total(FormSet::VALUE | FormSet::LABEL, 0)],
+            None,
+        ),
+        (
+            "core grid and total chart",
+            vec![fixed(FixedWidget::CpuCoreGrid, 0), total(chart, 6)],
+            None,
+        ),
+        (
+            "total chart and core board",
+            vec![total(chart, 0), fixed(FixedWidget::CpuCoreBoard, 6)],
+            Some(CpuGraphMode::Board),
+        ),
+        (
+            "CPU by app",
+            vec![fixed(FixedWidget::CpuByApp, 0)],
+            Some(CpuGraphMode::Apps),
+        ),
+    ];
+    for (name, widgets, want) in cases {
+        let mut perf = PerformanceSettings::default();
+        perf.layouts.set(grid_layout(widgets));
+        let r = open(cx, perf);
+        let page = r.page.clone();
+        let (label_mode, mode, shown) = r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            let shown = want.map_or_else(
+                || p.words().menu_graph.to_string(),
+                |m| p.words().mode(m).to_string(),
+            );
+            (p.label_mode(), p.mode(), shown)
+        });
+        assert_eq!(label_mode, want, "{name}");
+        assert_eq!(mode, None, "{name}: the preset stays none");
+        let expect = match want {
+            Some(CpuGraphMode::PerCore) => "Per core",
+            Some(CpuGraphMode::Overall) => "Overall",
+            Some(CpuGraphMode::Board) => "Core board",
+            Some(CpuGraphMode::Apps) => "By app",
+            _ => "Graph",
+        };
+        assert_eq!(shown, expect, "{name}");
+    }
+}
