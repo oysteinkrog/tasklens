@@ -500,6 +500,26 @@ fn close_up(cells: &mut [WidgetCell], held: usize, blocks: bool) {
     }
 }
 
+/// Removes the rows above all widgets of the grid layout `layout` (tasklens-j9x6u). Every
+/// widget with a cell moves up by the smallest row. Gaps between widgets stay. Returns whether
+/// anything moved.
+pub fn close_top(layout: &mut ContainerLayout) -> bool {
+    let top = layout
+        .widgets
+        .iter()
+        .filter_map(|w| w.cell)
+        .map(|c| c.row)
+        .min()
+        .unwrap_or(0);
+    if top == 0 {
+        return false;
+    }
+    for c in layout.widgets.iter_mut().filter_map(|w| w.cell.as_mut()) {
+        c.row -= top;
+    }
+    true
+}
+
 /// Shrinks the widgets of the grid layout `layout` until they end at or above row `rows`
 /// (tasklens-mo5t5: a flow layout pinned for Edit Widgets fits the body under the toolbar).
 /// Each step takes one row from the widget with the most rows above its minimum span on
@@ -827,6 +847,19 @@ mod tests {
         let before = cells_of(&tight);
         fit_rows(&mut tight, 1, &g);
         assert_eq!(cells_of(&tight), before);
+    }
+
+    #[test]
+    fn inner_grid_close_top_removes_empty_rows_above() {
+        let mut l = grid_layout(&[(1, ROW, cell(0, 3, 6, 1)), (2, ROW, cell(0, 9, 6, 1))]);
+        l.widgets.push(widget(3, ROW, None));
+        assert!(close_top(&mut l));
+        assert_eq!(l.widgets[0].cell, Some(cell(0, 0, 6, 1)));
+        assert_eq!(l.widgets[1].cell, Some(cell(0, 6, 6, 1)), "the gap stays");
+        assert_eq!(l.widgets[2].cell, None);
+        let again = l.clone();
+        assert!(!close_top(&mut l));
+        assert_eq!(l, again);
     }
 
     #[test]

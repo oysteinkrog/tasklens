@@ -710,6 +710,52 @@ fn page_widget_no_fill_on_short_page(cx: &mut TestAppContext) {
     assert_eq!(grid.cols, 12);
 }
 
+/// Apply removes the rows above all widgets: a move up that leaves a band on top does not keep
+/// it (tasklens-j9x6u).
+#[gpui_kit::test]
+fn page_widget_apply_leaves_no_empty_rows_on_top(cx: &mut TestAppContext) {
+    let mut r = open(cx, 1200., 900.);
+    let io = r.metric_id(METRIC_DISK_IO);
+    let active = r.metric_id(METRIC_DISK_ACTIVE);
+    let active_before = r.bounds_of(widget_id(PAGE, active));
+    let editor = r.edit();
+    assert!(r.vcx.update(|_, cx| editor.update(cx, |e, cx| {
+        e.select(io, cx);
+        e.move_selected(0, -1, cx)
+    })));
+    let working = r
+        .vcx
+        .update(|_, cx| editor.read(cx).working_layout(cx))
+        .expect("a working layout");
+    let top = |l: &tl_ui_settings::layout::ContainerLayout| {
+        l.widgets.iter().filter_map(|w| w.cell).map(|c| c.row).min()
+    };
+    assert!(top(&working) > Some(0), "the move leaves a band on top");
+    assert!(r.vcx.update(|_, cx| editor.update(cx, |e, cx| e.apply(cx))));
+    draw(r.vcx);
+    let saved = r
+        .vcx
+        .update(|_, cx| saved_layout(PAGE, cx))
+        .expect("the page's entry");
+    let cell_of = |id: u32| {
+        saved
+            .widgets
+            .iter()
+            .find(|w| w.id == id)
+            .and_then(|w| w.cell)
+            .expect("a cell")
+    };
+    let (io_cell, active_cell) = (cell_of(io), cell_of(active));
+    assert_eq!(io_cell.row, 0);
+    assert_eq!(active_cell.row, io_cell.rows);
+    assert_eq!(top(&saved), Some(0));
+    let io_after = r.bounds_of(widget_id(PAGE, io));
+    assert!(
+        near(io_after.top(), active_before.top()),
+        "{io_after:?} {active_before:?}"
+    );
+}
+
 /// Edit Widgets on the page: the flow layout pins to the 12-column grid, a widget is added
 /// and moved, and Apply saves the page's entry, which the page then shows.
 #[gpui_kit::test]

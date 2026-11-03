@@ -764,15 +764,21 @@ impl WidgetEditor {
             return false;
         };
         let saves = edit.saves();
+        // The rows above all widgets go (tasklens-j9x6u). The checks above use the edit as it is.
+        let compact = |edit: &LayoutEdit| {
+            let mut layout = edit
+                .working
+                .clone()
+                .unwrap_or_else(|| default_layout(&edit.container));
+            grid::close_top(&mut layout);
+            layout
+        };
         let shown = if saves {
-            save(&edit.container, edit.working.as_ref(), cx);
-            edit.working
-                .clone()
-                .unwrap_or_else(|| default_layout(&edit.container))
+            let layout = compact(&edit);
+            save(&edit.container, edit.working.as_ref().map(|_| &layout), cx);
+            layout
         } else if edit.changed() {
-            edit.working
-                .clone()
-                .unwrap_or_else(|| default_layout(&edit.container))
+            compact(&edit)
         } else {
             self.shown_before
                 .take()
