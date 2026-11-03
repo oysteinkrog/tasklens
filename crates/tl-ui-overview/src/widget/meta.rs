@@ -1004,7 +1004,8 @@ impl MetricMeta {
     }
 
     /// Appends the value form's text: `value` in the metric's format; for
-    /// [`ValueText::OfTotal`] " / " and `total` when known; for a pair, both values with
+    /// [`ValueText::OfTotal`] " / " and `total` when known (watts and MHz with the unit once,
+    /// "31.9 / 300 W"); for a pair, both values with
     /// their marks ("R 1.2 MB/s  W 340 KB/s", "↓ 1.4 Mbps  ↑ 220 kbps"), `second` being the
     /// second line's value. Nothing for [`ValueText::None`].
     pub fn write_value(
@@ -1035,13 +1036,19 @@ impl MetricMeta {
             ValueText::WholePercent => {
                 let _ = write!(out, "{}%", tl_ui_kit::components::progress::bucket(value));
             }
-            ValueText::OfTotal => {
-                one(value, out);
-                if let Some(total) = total {
-                    out.push_str(" / ");
-                    one(total, out);
+            // Watts and MHz name their unit once, as the 1.3.0 GPU page's Power and Clocks
+            // charts do: "31.9 / 300 W", "1905 / 3105 MHz" (UI-PRF-032).
+            ValueText::OfTotal => match (self.format, total) {
+                (ValueFormat::Watts, Some(total)) => tl_model::units::watts_pair(out, value, total),
+                (ValueFormat::Mhz, Some(total)) => tl_model::units::mhz_pair(out, value, total),
+                _ => {
+                    one(value, out);
+                    if let Some(total) = total {
+                        out.push_str(" / ");
+                        one(total, out);
+                    }
                 }
-            }
+            },
             ValueText::ReadWrite | ValueText::DownUp => {
                 let (a, b) = if self.value_text == ValueText::ReadWrite {
                     ("R ", "  W ")
