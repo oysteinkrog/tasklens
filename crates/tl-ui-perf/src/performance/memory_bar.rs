@@ -33,7 +33,8 @@ use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 pub const BAR_H: f32 = 24.;
 /// A non-zero segment is at least this wide, logical px.
 pub const MIN_SEGMENT_W: f32 = 2.;
-/// A segment shows its name only from this width, × ui_scale.
+/// A segment shows its name only from this width, × ui_scale, and only when the name
+/// also fits inside it with sp3 padding on both sides.
 pub const LABEL_MIN_W: f32 = 72.;
 /// Hatch line spacing, × ui_scale.
 const HATCH_STEP: f32 = 4.;
@@ -676,7 +677,8 @@ fn paint_bar(
         }
     }
 
-    // Labels: a segment at least 72 px wide shows its name, left-aligned and centred.
+    // Labels: a segment at least 72 px wide, and wide enough for its name plus sp3
+    // padding on both sides, shows its name, left-aligned and centred.
     let label_min = LABEL_MIN_W * m.ui_scale;
     let row = px(labels::LABEL_ROW * m.ui_scale);
     let pad = m.sp[3];
@@ -696,6 +698,9 @@ fn paint_bar(
         };
         let line = &mut st.labels[seg.kind.index()];
         line.sync(window, &view.words.names[seg.kind.index()], style);
+        if f32::from(line.width()) + 2.0 * f32::from(pad) > seg.width() {
+            continue;
+        }
         let origin = point(
             bounds.left() + px(seg.x0) + pad,
             bounds.top() + (bounds.size.height - row) / 2.0,

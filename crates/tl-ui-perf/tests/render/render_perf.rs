@@ -34,6 +34,7 @@ use tl_ui_overview::overview::timeline::set_test_clock;
 use tl_ui_overview::overview::{OVERVIEW_KEY, OverviewPage};
 use tl_ui_pagehost::render::{RenderHarness, run_on_lavapipe};
 use tl_ui_perf::performance::cpu::CpuPage;
+use tl_ui_perf::performance::memory::MemoryPage;
 use tl_ui_perf::performance::page::PerfSidebar;
 use tl_ui_perf::performance::sidebar::DeviceSidebar;
 use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
@@ -71,6 +72,8 @@ enum Page {
     Cpu,
     /// The CPU page in graph mode `mode`.
     CpuMode(CpuGraphMode),
+    /// The Memory page, with a narrow compressed segment on the composition bar.
+    Memory,
 }
 
 /// The page, with the entities that keep it fed alive.
@@ -216,6 +219,10 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
         sys.memory.used = 9 * GIB;
         sys.memory.available = 6 * GIB;
         sys.memory.cached = 4 * GIB;
+        sys.memory.free = 2 * GIB;
+        sys.memory.dirty = GIB / 4;
+        sys.memory.writeback = 0;
+        sys.memory.zswap = 5 << 28;
         sys.memory.swap_total = 8 * GIB;
         sys.memory.swap_free = 7 * GIB;
         sys.memory.committed = 12 * GIB;
@@ -267,6 +274,19 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
                 fan_connected: None,
             };
             let page = cx.new(|cx| CpuPage::new(key, row, hub.clone(), demand.clone(), cx));
+            (page.clone().into(), vec![page.into_any()])
+        }
+        Page::Memory => {
+            let key = DeviceKey(Arc::from(DeviceKey::MEMORY));
+            let row = DeviceRow {
+                key: key.clone(),
+                kind: DeviceKind::Memory,
+                idx: DeviceIdx(1),
+                generation: 0,
+                net_class: None,
+                fan_connected: None,
+            };
+            let page = cx.new(|cx| MemoryPage::new(key, row, hub.clone(), demand.clone(), cx));
             (page.clone().into(), vec![page.into_any()])
         }
     };
@@ -375,6 +395,14 @@ fn overview_1920_light() {
 fn cpu_page_dark() {
     run_pinned("render_perf::cpu_page_dark", || {
         check(Page::Cpu, "Default Dark", "perf_cpu_dark")
+    });
+}
+
+/// The composition bar labels do not overlap at the default window size (tasklens-frt94).
+#[test]
+fn memory_page_dark() {
+    run_pinned("render_perf::memory_page_dark", || {
+        check(Page::Memory, "Default Dark", "perf_memory_dark")
     });
 }
 

@@ -586,6 +586,34 @@ mod composition {
         });
     }
 
+    /// A segment that passes the 72 px rule still hides its name when the name is wider
+    /// than the segment minus sp3 padding on both sides (tasklens-frt94).
+    #[gpui_kit::test]
+    fn composition_label_hidden_when_name_does_not_fit(cx: &mut TestAppContext) {
+        let comp = |compressed: u64| Composition {
+            in_use: 400 * MIB,
+            compressed,
+            modified: 20 * MIB,
+            standby: 200 * MIB,
+            free: 1024 * MIB - 620 * MIB - compressed,
+            total: 1024 * MIB,
+        };
+        let (bar, vcx) = bar(cx, Some(comp(100 * MIB)));
+        vcx.read_entity(&bar, |b, _| {
+            let l = b.painted_labels.borrow();
+            assert!(
+                !l.contains(&SegmentKind::Compressed),
+                "100 px is too narrow"
+            );
+            assert!(l.contains(&SegmentKind::InUse));
+            assert!(l.contains(&SegmentKind::Free));
+        });
+        let (bar, vcx) = bar(cx, Some(comp(160 * MIB)));
+        vcx.read_entity(&bar, |b, _| {
+            assert!(b.painted_labels.borrow().contains(&SegmentKind::Compressed));
+        });
+    }
+
     #[gpui_kit::test]
     fn composition_warming_up_outline_only(cx: &mut TestAppContext) {
         let (bar, vcx) = bar(cx, None);

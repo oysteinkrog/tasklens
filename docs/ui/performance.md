@@ -979,7 +979,7 @@ Memory composition      t_sm 400 text_secondary (caption above the bar, chosen)
                 @0.8      @0.8
 ```
 
-  - Segment widths are proportional to bytes over MemTotal; a non-zero segment is at least 2 px wide (chosen). Segment labels (`t_xs` 400 `text_selected_primary` on dark segments, `text_secondary` on Free) are drawn only when the segment is at least 72 px wide; otherwise the tooltip carries the name.
+  - Segment widths are proportional to bytes over MemTotal; a non-zero segment is at least 2 px wide (chosen). Segment labels (`t_xs` 400 `text_selected_primary` on dark segments, `text_secondary` on Free) are drawn only when the segment is at least 72 px wide and the name fits inside it with sp3 padding on both sides; otherwise the tooltip carries the name.
   - Hatching for compressed: 1 px diagonal lines every 4 px in `window_bg` at alpha 0.5 painted with `paint_path` once per rebuild (chosen, matches "In use (compressed)" being a sub-state of In use).
   - Tooltips (`TlTooltip`, exact one-liners, PERF-042):
     - "In use: 20.11 GiB. Memory used by running programs and the kernel."
