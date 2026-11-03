@@ -1001,8 +1001,9 @@ impl CpuPage {
     }
 
     /// This page's demand part while it is active: per-core samples while the grid, the board,
-    /// an all-cores chart, Core clocks or a core widget shows, 10 Hz samples while the grid or
-    /// the board shows (R-126), the sensors for the temperature, the device metric history at
+    /// an all-cores chart, Core clocks or a core widget shows, 10 Hz samples while any CPU chart
+    /// shows (the grid, the board, or a CPU or core widget drawn as a chart), in every mode, as
+    /// 1.3.0 (R-126, hzire.12), the sensors for the temperature, the device metric history at
     /// 1 h, 24 h and 7 d, and what the placed widgets read. With the default layout it equals
     /// 1.3.0's.
     pub fn demand_part(&self, cx: &App) -> Demand {
@@ -1012,6 +1013,12 @@ impl CpuPage {
             let Some(w) = c.layout().widgets.iter().find(|w| w.id == id) else {
                 continue;
             };
+            let chart_device = w.content.device().is_some_and(|d| {
+                matches!(SourceKind::of(d), SourceKind::Cpu | SourceKind::CpuLogical)
+            });
+            if chart_device && w.forms.contains(FormSet::CHART) {
+                fast = true;
+            }
             match &w.content {
                 WidgetContent::Fixed(FixedWidget::CpuCoreGrid | FixedWidget::CpuCoreBoard) => {
                     per_core = true;

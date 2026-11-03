@@ -8,6 +8,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::{
     App, AppContext as _, Bounds, Context, Entity, EntityId, IntoElement, ParentElement as _,
@@ -1166,4 +1167,98 @@ fn page_cpu_all_cores_look_survives_edit_and_apply(cx: &mut TestAppContext) {
         .vcx
         .update(|_, cx| chart.read(cx).painted_value_text().map(str::to_owned));
     assert_eq!(painted.as_deref(), Some("21.6%"), "placed widget");
+}
+
+/// True when the engine got `cpu_fast` in its latest demand, after the page's send delay.
+fn fast_sent(r: &mut Rig) -> bool {
+    r.vcx.executor().advance_clock(Duration::from_millis(200));
+    draw(r.vcx);
+    r.engine
+        .demands()
+        .last()
+        .expect("a demand was sent")
+        .cpu_fast
+}
+
+/// The page asks for 10 Hz samples in `mode` while it shows, and not when it is hidden
+/// (R-126, hzire.12).
+fn check_fast_mode(cx: &mut TestAppContext, mode: CpuGraphMode) {
+    let mut r = open(cx, perf(mode, CpuSecondaryGraph::default()));
+    let page = r.page.clone();
+    assert!(
+        r.vcx.update(|_, cx| page.read(cx).demand_part(cx).cpu_fast),
+        "{mode:?}: demand part"
+    );
+    assert!(fast_sent(&mut r), "{mode:?}: shown");
+    r.vcx
+        .update(|_, cx| page.update(cx, |p, cx| p.set_active(false, cx)));
+    assert!(!fast_sent(&mut r), "{mode:?}: hidden");
+    r.vcx
+        .update(|_, cx| page.update(cx, |p, cx| p.set_active(true, cx)));
+    assert!(fast_sent(&mut r), "{mode:?}: shown again");
+}
+
+#[gpui_kit::test]
+fn page_cpu_fast_overall(cx: &mut TestAppContext) {
+    check_fast_mode(cx, CpuGraphMode::Overall);
+}
+
+#[gpui_kit::test]
+fn page_cpu_fast_per_core(cx: &mut TestAppContext) {
+    check_fast_mode(cx, CpuGraphMode::PerCore);
+}
+
+#[gpui_kit::test]
+fn page_cpu_fast_all_cores_overlaid(cx: &mut TestAppContext) {
+    check_fast_mode(cx, CpuGraphMode::AllCoresOverlaid);
+}
+
+#[gpui_kit::test]
+fn page_cpu_fast_all_cores_stacked(cx: &mut TestAppContext) {
+    check_fast_mode(cx, CpuGraphMode::AllCoresStacked);
+}
+
+#[gpui_kit::test]
+fn page_cpu_fast_board(cx: &mut TestAppContext) {
+    check_fast_mode(cx, CpuGraphMode::Board);
+}
+
+/// A page with a value widget only asks for no 10 Hz samples. A CPU chart widget added by
+/// Edit Widgets turns them on, with no core grid on the page.
+#[gpui_kit::test]
+fn page_cpu_fast_chart_widget_added(cx: &mut TestAppContext) {
+    let mut perf = PerformanceSettings::default();
+    perf.layouts.set(grid_layout(vec![metric(
+        "cpu",
+        "total",
+        FormSet::VALUE,
+        cell(0, 0, 4, 2),
+    )]));
+    let mut r = open(cx, perf);
+    assert!(!fast_sent(&mut r), "a value widget alone");
+    let editor = {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| page.read(cx).editor().clone())
+    };
+    r.vcx
+        .update(|window, cx| editor.update(cx, |e, cx| e.start(window, cx)));
+    draw(r.vcx);
+    let source = WidgetSource {
+        device: Arc::from("cpu"),
+        metric: Arc::from("kernel"),
+    };
+    r.vcx
+        .update(|_, cx| editor.update(cx, |e, cx| e.add(&source, cx)))
+        .expect("added");
+    assert!(r.vcx.update(|_, cx| editor.update(cx, |e, cx| e.apply(cx))));
+    draw(r.vcx);
+    let saved = r.saved().expect("the page's entry");
+    assert!(
+        !saved
+            .widgets
+            .iter()
+            .any(|w| matches!(w.content, WidgetContent::Fixed(FixedWidget::CpuCoreGrid))),
+        "no core grid"
+    );
+    assert!(fast_sent(&mut r), "a CPU chart widget");
 }
