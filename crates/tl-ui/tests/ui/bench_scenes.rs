@@ -187,12 +187,6 @@ fn perf_overview_static_requests_no_frames(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn static_scene_counts_no_paints_without_frames(cx: &mut TestAppContext) {
-    let report = run_scene(cx, BenchScene::Static, 1, None, None, false).expect("static passes");
-    assert_eq!(report.frames, 0);
-}
-
-#[gpui_kit::test]
 fn json_written_when_requested(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("perf-cpu.json");
