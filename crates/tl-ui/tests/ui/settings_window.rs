@@ -2420,9 +2420,9 @@ fn fans_remove_entry(cx: &mut TestAppContext) {
     assert!(fans(cx).is_empty());
 }
 
-// Settings window P4 rows: column separators, Ctrl+Esc, TaskSlinger import (E21-041).
+// Settings window P4 rows: column separators, Meta+Esc, TaskSlinger import (E21-041).
 
-const CTRL_ESC_LABEL: &str = "Open with Ctrl+Esc";
+const META_ESC_LABEL: &str = "Open with Meta+Esc";
 const IMPORT_LABEL: &str = "Import from TaskSlinger…";
 
 #[gpui_kit::test]
@@ -2461,61 +2461,61 @@ fn fake_shortcut(
 }
 
 #[gpui_kit::test]
-fn ctrl_esc_row_reads_shortcut(cx: &mut TestAppContext) {
+fn meta_esc_row_reads_shortcut(cx: &mut TestAppContext) {
     setup(cx);
-    let calls = fake_shortcut(cx, Some("Ctrl+Esc"), Ok(()), true);
+    let calls = fake_shortcut(cx, Some("Meta+Esc"), Ok(()), true);
     let startup = page(cx, PageId::StartupWindow);
-    assert!(startup.local_on(CTRL_ESC_LABEL));
-    assert!(!startup.local_disabled(CTRL_ESC_LABEL));
-    assert_eq!(startup.local_description(CTRL_ESC_LABEL), None);
-    cx.update(|cx| startup.set_local(CTRL_ESC_LABEL, false, cx));
-    assert!(!startup.local_on(CTRL_ESC_LABEL));
-    cx.update(|cx| startup.set_local(CTRL_ESC_LABEL, true, cx));
-    assert!(startup.local_on(CTRL_ESC_LABEL));
+    assert!(startup.local_on(META_ESC_LABEL));
+    assert!(!startup.local_disabled(META_ESC_LABEL));
+    assert_eq!(startup.local_description(META_ESC_LABEL), None);
+    cx.update(|cx| startup.set_local(META_ESC_LABEL, false, cx));
+    assert!(!startup.local_on(META_ESC_LABEL));
+    cx.update(|cx| startup.set_local(META_ESC_LABEL, true, cx));
+    assert!(startup.local_on(META_ESC_LABEL));
     assert_eq!(
         *calls.lock().expect("lock"),
-        [None, Some("Ctrl+Esc".to_owned())],
-        "off clears the shortcut, on sets Ctrl+Esc"
+        [None, Some("Meta+Esc".to_owned())],
+        "off clears the shortcut, on sets Meta+Esc"
     );
-    assert_eq!(startup.local_description(CTRL_ESC_LABEL), None);
+    assert_eq!(startup.local_description(META_ESC_LABEL), None);
 }
 
 #[gpui_kit::test]
-fn ctrl_esc_not_available_without_api(cx: &mut TestAppContext) {
+fn meta_esc_not_available_without_api(cx: &mut TestAppContext) {
     setup(cx);
     let startup = page(cx, PageId::StartupWindow);
-    assert!(startup.local_disabled(CTRL_ESC_LABEL));
-    assert!(!startup.local_on(CTRL_ESC_LABEL));
+    assert!(startup.local_disabled(META_ESC_LABEL));
+    assert!(!startup.local_on(META_ESC_LABEL));
     assert_eq!(
-        startup.local_description(CTRL_ESC_LABEL).as_deref(),
+        startup.local_description(META_ESC_LABEL).as_deref(),
         Some("Not available")
     );
 }
 
 #[gpui_kit::test]
-fn ctrl_esc_relogin_description(cx: &mut TestAppContext) {
+fn meta_esc_relogin_description(cx: &mut TestAppContext) {
     setup(cx);
     fake_shortcut(cx, None, Ok(()), false);
     let startup = page(cx, PageId::StartupWindow);
-    assert!(!startup.local_on(CTRL_ESC_LABEL));
-    cx.update(|cx| startup.set_local(CTRL_ESC_LABEL, true, cx));
-    assert!(startup.local_on(CTRL_ESC_LABEL));
+    assert!(!startup.local_on(META_ESC_LABEL));
+    cx.update(|cx| startup.set_local(META_ESC_LABEL, true, cx));
+    assert!(startup.local_on(META_ESC_LABEL));
     assert_eq!(
-        startup.local_description(CTRL_ESC_LABEL).as_deref(),
+        startup.local_description(META_ESC_LABEL).as_deref(),
         Some("Log out and back in to apply")
     );
 }
 
 #[gpui_kit::test]
-fn ctrl_esc_write_error_reverts(cx: &mut TestAppContext) {
+fn meta_esc_write_error_reverts(cx: &mut TestAppContext) {
     setup(cx);
     fake_shortcut(cx, None, Err("no kglobalaccel".to_owned()), false);
     let (_, mut vcx) = open(cx, 1);
     let startup = page(cx, PageId::StartupWindow);
-    vcx.update(|_, cx| startup.set_local(CTRL_ESC_LABEL, true, cx));
+    vcx.update(|_, cx| startup.set_local(META_ESC_LABEL, true, cx));
     vcx.run_until_parked();
-    assert!(!startup.local_on(CTRL_ESC_LABEL));
-    assert_eq!(startup.local_description(CTRL_ESC_LABEL), None);
+    assert!(!startup.local_on(META_ESC_LABEL));
+    assert_eq!(startup.local_description(META_ESC_LABEL), None);
     assert!(window_toasts(&mut vcx).is_empty(), "no toast");
 }
 

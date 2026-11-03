@@ -357,7 +357,7 @@ pub struct PageBuilder {
     tooltips: Vec<(SettingKey, SharedString)>,
 }
 
-/// A switch bound to no setting (Open with Ctrl+Esc). The owner keeps its value; `set` does not
+/// A switch bound to no setting (Open with Meta+Esc). The owner keeps its value; `set` does not
 /// write settings. The page redraws after `set` runs, so `get` and `description` show the
 /// new state.
 #[derive(Clone)]

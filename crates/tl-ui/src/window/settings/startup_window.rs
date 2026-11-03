@@ -24,8 +24,8 @@ use tl_ui_base::registry::WindowKey;
 use tl_ui_base::settings_global::{SettingKey, TlSettings};
 use tl_ui_kit::components::window_frame::ToggleAlwaysOnTop;
 
-/// The key combination "Open with Ctrl+Esc" reads and writes.
-const CTRL_ESC: &str = "Ctrl+Esc";
+/// The key combination "Open with Meta+Esc" reads and writes.
+const META_ESC: &str = "Meta+Esc";
 
 /// "Start minimized" sits under "Start at login", indented by 16 before the UI scale.
 const START_MINIMIZED_INDENT: f32 = 16.;
@@ -98,8 +98,8 @@ pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     )
     .local_switch(
         login,
-        tr(cx, "shell-settings-ctrl-esc"),
-        ctrl_esc_switch(cx),
+        tr(cx, "shell-settings-meta-esc"),
+        meta_esc_switch(cx),
     )
     // Turning it on asks through the public IP notice first (R-058).
     .action_switch(
@@ -118,10 +118,10 @@ pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     page
 }
 
-/// The "Open with Ctrl+Esc" switch (UI-SHL-069, APP-051). It has no settings key: the value is
+/// The "Open with Meta+Esc" switch (UI-SHL-069, APP-051). It has no settings key: the value is
 /// the KDE global shortcut, read once when the page is built. With no `global_shortcut` it is
 /// off and disabled.
-fn ctrl_esc_switch(cx: &App) -> LocalSwitch {
+fn meta_esc_switch(cx: &App) -> LocalSwitch {
     let on = Rc::new(Cell::new(false));
     let note: Rc<RefCell<Option<SharedString>>> = Rc::new(RefCell::new(None));
     let Some(api) = cx
@@ -137,24 +137,24 @@ fn ctrl_esc_switch(cx: &App) -> LocalSwitch {
         };
     };
     let (get, set) = (api.get.clone(), api.set.clone());
-    on.set(get().as_deref() == Some(CTRL_ESC));
-    let relogin = tr(cx, "shell-settings-ctrl-esc-relogin");
+    on.set(get().as_deref() == Some(META_ESC));
+    let relogin = tr(cx, "shell-settings-meta-esc-relogin");
     let (shown, shown_note) = (on.clone(), note.clone());
     LocalSwitch {
         get: Rc::new(move || shown.get()),
         description: Rc::new(move || shown_note.borrow().clone()),
         set: Rc::new(move |want, _| {
-            match set(want.then_some(CTRL_ESC)) {
+            match set(want.then_some(META_ESC)) {
                 Ok(()) => {
                     on.set(want);
                     // U-16: when the shortcut does not show the requested state, KDE applies
                     // it at the next login. The switch keeps the requested state.
-                    let applied = get().as_deref() == Some(CTRL_ESC);
+                    let applied = get().as_deref() == Some(META_ESC);
                     *note.borrow_mut() = (applied != want).then(|| relogin.clone());
                 }
                 // The switch keeps its old state. No toast.
                 Err(error) => {
-                    warn!(target: "tasklens::ui", %error, "Ctrl+Esc shortcut write failed");
+                    warn!(target: "tasklens::ui", %error, "Meta+Esc shortcut write failed");
                 }
             }
         }),

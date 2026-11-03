@@ -3556,8 +3556,8 @@ shell-settings-public-ip-notice = Do not ask again for public IP fetches
 shell-settings-show-fps = Show FPS
 # Settings window, P4 rows (tasklens-bj6.45, UI-SHL-065, UI-SHL-069, UI-SHL-071).
 shell-settings-column-separators = Show column separators
-shell-settings-ctrl-esc = Open with Ctrl+Esc
-shell-settings-ctrl-esc-relogin = Log out and back in to apply
+shell-settings-meta-esc = Open with Meta+Esc
+shell-settings-meta-esc-relogin = Log out and back in to apply
 shell-settings-not-available = Not available
 shell-settings-import-taskslinger = Import from TaskSlinger…
 shell-toast-ts-import = Imported { $settings } settings and { $themes } themes

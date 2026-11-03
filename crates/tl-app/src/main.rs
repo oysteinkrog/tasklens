@@ -21,6 +21,7 @@ mod gallery_main;
 mod host_file;
 mod host_manager;
 mod import_ts;
+mod kglobalaccel;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod logging;
 #[allow(dead_code, reason = "E32-004 calls it")]
@@ -276,7 +277,7 @@ fn main() -> ExitCode {
         write_settings_now: Arc::new(move |s| write_store.write_settings_now(s)),
         keep_pre_layouts_copy: Arc::new(move || copy_store.keep_pre_layouts_copy()),
         set_autostart: Arc::new(|_, _| Ok(())),
-        global_shortcut: None,
+        global_shortcut: global_shortcut(&paths, &args),
         import_taskslinger: Arc::new(import_ts::import_file),
         read_ts_themes: Arc::new(import_ts::read_themes_file),
         list_adapters: Arc::new(adapters::list_adapters),
@@ -560,6 +561,39 @@ fn start_tray() -> Option<tl_model::tray::TrayUiEnd> {
     }
 }
 
+/// "Open with Meta+Esc" (APP-051): only on KDE, never for a test instance (`--app-id`) or the
+/// rescue window. No D-Bus call here: an unreachable kglobalaccel shows when the row is used.
+fn global_shortcut(
+    paths: &paths::Paths,
+    args: &args::Args,
+) -> Option<tl_ui::app::GlobalShortcutApi> {
+    if args.app_id.is_some()
+        || args.low_memory
+        || !lists_kde(std::env::var_os("XDG_CURRENT_DESKTOP"))
+    {
+        return None;
+    }
+    let rc_file = paths.kglobalshortcutsrc_file();
+    Some(tl_ui::app::GlobalShortcutApi {
+        get: Arc::new(|| {
+            matches!(kglobalaccel::is_enabled(), Ok(true))
+                .then(|| kglobalaccel::META_ESC_TEXT.to_owned())
+        }),
+        set: Arc::new(move |keys| {
+            kglobalaccel::set_enabled(keys.is_some(), &rc_file)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }),
+    })
+}
+
+/// True when `XDG_CURRENT_DESKTOP` lists `KDE`.
+fn lists_kde(current_desktop: Option<OsString>) -> bool {
+    current_desktop
+        .and_then(|v| v.into_string().ok())
+        .is_some_and(|v| v.split(':').any(|d| d == "KDE"))
+}
+
 /// The engine mode for the flags. `--force-full-memory-mode` only has an effect together with
 /// `--low-memory` (D-015): the rescue window stays, the engine runs in full mode.
 fn engine_mode(low_memory: bool, force_full: bool) -> EngineMode {
@@ -704,6 +738,15 @@ mod tests {
         let icon = main_tray_icon();
         assert_eq!(icon.argb_22.len(), 1_936);
         assert_eq!(icon.argb_44.len(), 7_744);
+    }
+
+    #[test]
+    fn kglobalaccel_only_on_kde() {
+        assert!(lists_kde(Some("KDE".into())));
+        assert!(lists_kde(Some("ubuntu:KDE".into())));
+        assert!(!lists_kde(Some("GNOME".into())));
+        assert!(!lists_kde(Some("KDEX".into())));
+        assert!(!lists_kde(None));
     }
 
     /// ADR-018 Rescue mode: the rescue window writes no history, also with

@@ -114,6 +114,11 @@ impl Paths {
         self.cache_dir.join("icons.toml")
     }
 
+    /// `$XDG_CONFIG_HOME/kglobalshortcutsrc`, the KDE global shortcuts file (U-16 fallback).
+    pub fn kglobalshortcutsrc_file(&self) -> PathBuf {
+        self.config_root.join("kglobalshortcutsrc")
+    }
+
     /// `$XDG_CONFIG_HOME/autostart/io.github.oysteinkrog.Tasklens.desktop`, or
     /// `<app_id>.desktop` with `--app-id`, so a test instance never replaces the real entry.
     pub fn autostart_file(&self) -> PathBuf {
