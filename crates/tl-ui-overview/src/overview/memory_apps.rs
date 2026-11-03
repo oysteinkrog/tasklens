@@ -691,6 +691,43 @@ fn value_at(view: &SeriesView, t_ns: u64) -> f64 {
     }
 }
 
+/// The index into [`AppsWords::kind_names`] for a group key: `exe:` 0, `comm:` 1, `wine:` 2;
+/// `None` for an app (`app:`) and anything else.
+fn kind_index(key: &str) -> Option<usize> {
+    if key.starts_with("exe:") {
+        Some(0)
+    } else if key.starts_with("comm:") {
+        Some(1)
+    } else if key.starts_with("wine:") {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Gives a group band a suffix from its kind when another group band has the same name
+/// (tasklens-02dhy). An app keeps its plain name, and other bands are never changed.
+pub fn name_clashes(bands: &mut [Band], kinds: &[Option<Template>; 3]) {
+    let mut counts: std::collections::HashMap<SharedString, usize> = Default::default();
+    for b in bands
+        .iter()
+        .filter(|b| matches!(b.kind, BandKind::Group(_)))
+    {
+        *counts.entry(b.name.clone()).or_default() += 1;
+    }
+    for b in bands.iter_mut() {
+        if !matches!(b.kind, BandKind::Group(_)) || counts.get(&b.name).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        if let Some(t) = kind_index(&b.key).and_then(|i| kinds[i].as_ref()) {
+            let mut text = String::new();
+            if t.write(&mut text, &[&b.name]).is_ok() {
+                b.name = SharedString::from(text);
+            }
+        }
+    }
+}
+
 /// The page's words.
 #[derive(Clone, Debug, Default)]
 pub struct AppsWords {
@@ -710,6 +747,9 @@ pub struct AppsWords {
     pub fixed_names: SmallVec<[SharedString; 6]>,
     pub wine_images: Option<Template>,
     pub wine_prefix: Option<Template>,
+    /// The suffixed names for groups whose name clashes: program, command, Wine
+    /// ([`kind_index`] order).
+    pub kind_names: [Option<Template>; 3],
 }
 
 impl AppsWords {
@@ -743,6 +783,12 @@ impl AppsWords {
                 .collect(),
             wine_images: Some(Template::new(cx, "perf-mem-apps-wine-images", &["names"])),
             wine_prefix: Some(Template::new(cx, "perf-mem-apps-wine-prefix", &["path"])),
+            kind_names: [
+                "perf-mem-apps-name-program",
+                "perf-mem-apps-name-command",
+                "perf-mem-apps-name-wine",
+            ]
+            .map(|k| Some(Template::new(cx, k, &["name"]))),
         };
         true
     }
@@ -1359,6 +1405,7 @@ impl AppsChart {
                 value: 0.,
             });
         }
+        name_clashes(&mut bands, &self.words.kind_names);
         let name_of = |key: &str, device: Option<DeviceIdx>| -> SharedString {
             device
                 .and_then(|d| self.hub.read(cx).current().devices.get(d))
@@ -1603,9 +1650,15 @@ impl AppsChart {
                         band.name = name.clone();
                     }
                 }
-                BandKind::Group(_) | BandKind::Other => {}
+                BandKind::Group(_) => {
+                    if let Some(g) = self.groups.iter().find(|g| g.key == band.key) {
+                        band.name = SharedString::from(g.name.to_string());
+                    }
+                }
+                BandKind::Other => {}
             }
         }
+        name_clashes(&mut self.bands, &self.words.kind_names);
         let labels = Self::labels_of(self.metric, self.place, &self.words);
         self.chart.update(cx, |v, cx| v.set_labels(labels, cx));
         cx.notify();
@@ -2024,6 +2077,56 @@ mod tests {
 
     fn key(s: &str) -> Arc<str> {
         Arc::from(s)
+    }
+
+    fn group_band(k: &str, name: &str) -> Band {
+        Band {
+            key: key(k),
+            name: SharedString::from(name.to_owned()),
+            kind: BandKind::Group(0),
+            color: Hsla::default(),
+            line: Hsla::default(),
+            series: SmallVec::new(),
+            minus: Arc::from([]),
+            processes: None,
+            wine: None,
+            value: 0.,
+        }
+    }
+
+    fn kinds() -> [Option<Template>; 3] {
+        [
+            Some(Template::en("perf-mem-apps-name-program", &["name"])),
+            Some(Template::en("perf-mem-apps-name-command", &["name"])),
+            Some(Template::en("perf-mem-apps-name-wine", &["name"])),
+        ]
+    }
+
+    fn names(bands: &[Band]) -> Vec<String> {
+        bands.iter().map(|b| b.name.to_string()).collect()
+    }
+
+    #[test]
+    fn name_clashes_suffix_by_kind() {
+        let mut other = group_band("memgroup:other", "Other apps");
+        other.kind = BandKind::Other;
+        let mut bands = vec![
+            group_band("app:io.x.Tasklens", "tasklens"),
+            group_band("exe:tasklens", "tasklens"),
+            group_band("exe:p2", "p2"),
+            other,
+        ];
+        name_clashes(&mut bands, &kinds());
+        assert_eq!(
+            names(&bands),
+            ["tasklens", "tasklens (program)", "p2", "Other apps"]
+        );
+        let mut bands = vec![group_band("exe:x", "x"), group_band("comm:x", "x")];
+        name_clashes(&mut bands, &kinds());
+        assert_eq!(names(&bands), ["x (program)", "x (command)"]);
+        let mut bands = vec![group_band("app:a", "x"), group_band("app:b", "x")];
+        name_clashes(&mut bands, &kinds());
+        assert_eq!(names(&bands), ["x", "x"]);
     }
 
     #[test]

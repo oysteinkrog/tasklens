@@ -4679,18 +4679,31 @@ mod mem_by_app_box {
     /// A Memory box in "By app" mode, `w` × `h`, at the 1 min range. Groups p0 to p3 hold 4 to
     /// 1 MiB live with 3 processes each, "Other apps" 1 MiB and "Shared and kernel" 2 MiB.
     fn open(cx: &mut TestAppContext, w: f32, h: f32) -> Rig<'_> {
+        let groups: Vec<(String, String)> = (0..GROUPS)
+            .map(|i| (format!("exe:p{i}"), format!("p{i}")))
+            .collect();
+        open_named(cx, w, h, &groups)
+    }
+
+    /// [`open`] with the (key, name) of each group.
+    fn open_named<'a>(
+        cx: &'a mut TestAppContext,
+        w: f32,
+        h: f32,
+        names: &[(String, String)],
+    ) -> Rig<'a> {
         let engine = FakeEngine::new();
         engine.publish_with(|s| {
             let mut entries = vec![entry(MEMORY, DeviceIdentity::Memory, "Memory")];
             let mut views = Vec::new();
             let mut bands = Vec::new();
             for i in 0..GROUPS {
-                let key = format!("exe:p{i}");
-                entries.push(mem_group(group_dev(i), &key, &format!("p{i}")));
+                let (key, name) = &names[usize::from(i)];
+                entries.push(mem_group(group_dev(i), key, name));
                 views.push(flat(group_dev(i), f32::from(GROUPS - i) * MIB));
                 bands.push(MemGroupBand {
-                    key: Arc::from(key),
-                    name: Arc::from(format!("p{i}")),
+                    key: Arc::from(key.as_str()),
+                    name: Arc::from(name.as_str()),
                     process_count: 3,
                     device: group_dev(i),
                     wine: None,
@@ -4767,6 +4780,33 @@ mod mem_by_app_box {
     fn kinds(r: &mut Rig) -> Vec<BandKind> {
         r.vcx
             .read_entity(&r.apps, |a, _| a.bands().iter().map(|b| b.kind).collect())
+    }
+
+    /// Two groups with one name get a suffix from their kind (tasklens-02dhy).
+    #[gpui_kit::test]
+    fn overview_memory_by_app_same_name_gets_kind_suffix(cx: &mut TestAppContext) {
+        let mut groups: Vec<(String, String)> = (0..GROUPS)
+            .map(|i| (format!("exe:p{i}"), format!("p{i}")))
+            .collect();
+        groups[0] = ("app:io.x.Tasklens".into(), "tasklens".into());
+        groups[1] = ("exe:tasklens".into(), "tasklens".into());
+        let r = open_named(cx, 700., 400., &groups);
+        let names: Vec<(String, String)> = r.vcx.read_entity(&r.apps, |a, _| {
+            a.bands()
+                .iter()
+                .map(|b| (b.key.to_string(), b.name.to_string()))
+                .collect()
+        });
+        let name_of = |key: &str| {
+            names
+                .iter()
+                .find(|n| n.0 == key)
+                .map(|n| n.1.as_str())
+                .expect(key)
+        };
+        assert_eq!(name_of("app:io.x.Tasklens"), "tasklens");
+        assert_eq!(name_of("exe:tasklens"), "tasklens (program)");
+        assert_eq!(name_of("exe:p2"), "p2");
     }
 
     /// The legend sits at the right of the chart in a body 480 px or wider, and below it in a

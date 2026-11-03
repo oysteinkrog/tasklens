@@ -68,6 +68,7 @@ fn mem_group(idx: DeviceIdx, key: &str, name: &str) -> DeviceEntry {
 /// One band of the fixture: its key, device and samples, one a second, the newest now.
 struct Line {
     key: String,
+    name: String,
     device: DeviceIdx,
     samples: Vec<Sample>,
 }
@@ -92,6 +93,7 @@ impl Fixture {
     ) -> Self {
         let t = |k: u64| base + k * S;
         let line = |key: String, device: DeviceIdx, value: &dyn Fn(u64) -> Option<Sample>| Line {
+            name: key.rsplit(':').next().unwrap_or_default().to_owned(),
             key,
             device,
             samples: (0..STEPS).filter_map(value).collect(),
@@ -136,8 +138,8 @@ impl Fixture {
             let mut entries = Vec::new();
             let mut views = Vec::new();
             let mut published = Vec::new();
-            for (i, l) in self.groups.iter().enumerate() {
-                let name = format!("p{i}");
+            for l in &self.groups {
+                let name = l.name.clone();
                 entries.push(mem_group(l.device, &l.key, &name));
                 published.push(MemGroupBand {
                     key: Arc::from(l.key.as_str()),
@@ -550,4 +552,33 @@ fn cpu_by_app_legend_click(cx: &mut TestAppContext) {
     assert_eq!(name.as_deref(), Some("p3"));
     r.click(format!("{LEGEND_ID}-4"));
     assert_eq!(r.last_open().as_deref(), Some("exe:p0"));
+}
+
+/// Two groups with one name get a suffix from their kind; an app keeps its plain name, and the
+/// Processes chip gets the same name (tasklens-02dhy).
+#[gpui_kit::test]
+fn cpu_by_app_same_name_gets_kind_suffix(cx: &mut TestAppContext) {
+    let mut fixture = flat(&[8., 6., 4.], [0.5, 0.25, 0.75, 0.125, 0.375]);
+    fixture.groups[0].key = "app:io.x.Tasklens".into();
+    fixture.groups[0].name = "tasklens".into();
+    fixture.groups[1].key = "exe:tasklens".into();
+    fixture.groups[1].name = "tasklens".into();
+    let mut r = open(cx, &fixture, |_| {});
+    let name_of = |r: &mut Rig<'_>, key: &str| {
+        r.bands()
+            .into_iter()
+            .find(|b| b.0 == key)
+            .map(|b| b.2)
+            .expect(key)
+    };
+    assert_eq!(name_of(&mut r, "app:io.x.Tasklens"), "tasklens");
+    assert_eq!(name_of(&mut r, "exe:tasklens"), "tasklens (program)");
+    assert_eq!(name_of(&mut r, "exe:p2"), "p2");
+    // Rows: Other, p2, the program, the app.
+    r.click(format!("{LEGEND_ID}-2"));
+    assert_eq!(r.last_open().as_deref(), Some("exe:tasklens"));
+    let name = r.vcx.read_entity(&r.apps, |a, _| {
+        a.last_open.as_ref().map(|o| o.1.to_string())
+    });
+    assert_eq!(name.as_deref(), Some("tasklens (program)"));
 }
