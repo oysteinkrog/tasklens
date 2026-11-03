@@ -1723,6 +1723,9 @@ pub struct MemoryPage {
     pub render_count: Cell<u32>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
+    /// How many times the page asked the container to place its widgets again.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub place_count: Cell<u32>,
 }
 
 impl MemoryPage {
@@ -1909,6 +1912,8 @@ impl MemoryPage {
             render_count: Cell::new(0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            place_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
         this.sync_parts(cx);
@@ -2095,6 +2100,8 @@ impl MemoryPage {
     /// A part's height, the swap or a block's shown state changed: the flow layout places the
     /// parts again.
     fn place_again(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.place_count.set(self.place_count.get() + 1);
         self.container.update(cx, |c, cx| {
             c.place_again(cx);
         });
@@ -2116,9 +2123,12 @@ impl MemoryPage {
     }
 
     /// Brings Details, the blocks, the bar and the swap state up to date with the components in
-    /// `mask`. The page itself does not render; each part notifies for its own change.
+    /// `mask`. The page itself does not render; each part notifies for its own change. A sample
+    /// that changes what exists (SwapTotal crossing 0, a block starting or stopping to show)
+    /// places the widgets once, after both are up to date.
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
         let mut parts = false;
+        let mut moved = false;
         if mask.intersects(
             ComponentMask::SYSTEM | ComponentMask::HEALTH | ComponentMask::DEVICE_DETAILS,
         ) {
@@ -2133,11 +2143,14 @@ impl MemoryPage {
             let swap = snap.system.memory.swap_total > 0;
             if swap != self.parts.swap.get() {
                 self.parts.swap.set(swap);
-                self.place_again(cx);
+                moved = true;
             }
         }
         if parts {
-            self.sync_parts(cx);
+            moved |= self.update_parts(cx);
+        }
+        if moved {
+            self.place_again(cx);
         }
         // Memory went away: an edit ends as Cancel does.
         if mask.contains(ComponentMask::DEVICES)
@@ -2213,10 +2226,18 @@ impl MemoryPage {
         self.details_view.update(cx, |v, cx| v.set_shown(shown, cx));
     }
 
-    /// Hands every part what it shows; each renders only when that changed. When a block
-    /// starts or stops having something to show, the flow places the parts again and Add Widget
-    /// lists it or not.
+    /// Hands every part what it shows (see `update_parts`) and places the parts again when a
+    /// block starts or stops having something to show.
     fn sync_parts(&mut self, cx: &mut Context<Self>) {
+        if self.update_parts(cx) {
+            self.place_again(cx);
+        }
+    }
+
+    /// Hands every part what it shows; each renders only when that changed. Add Widget lists a
+    /// block or not by whether it has something to show. True when a block started or stopped
+    /// having something to show, so the flow must place the parts again; the caller places.
+    fn update_parts(&mut self, cx: &mut Context<Self>) -> bool {
         let strings = strings_version(cx);
         let shown = [
             !self.compressed.is_hidden(),
@@ -2246,9 +2267,7 @@ impl MemoryPage {
         self.switch_view.update(cx, |v, cx| v.set_shown(switch, cx));
         let parts = page_parts(shown);
         self.editor.update(cx, |e, _| e.set_page_parts(parts));
-        if moved {
-            self.place_again(cx);
-        }
+        moved
     }
 
     /// What the Compressed memory block draws.

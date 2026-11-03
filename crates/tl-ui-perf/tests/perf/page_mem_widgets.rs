@@ -18,7 +18,9 @@ use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::snapshot::{ComponentHeader, SeriesSet};
+use tl_model::snapshot::{
+    ComponentHeader, InvField, MemoryDetails, SeriesSet, SwapDevice, SwapKindModel,
+};
 use tl_model::system::MemGroupBand;
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -983,11 +985,49 @@ fn publish_swap(engine: &FakeEngine, used: u64, swap: u64) {
     });
 }
 
-/// Repeated samples with the same SwapTotal make and drop no entity and notify neither the
-/// page nor the container. The one sample where SwapTotal crosses 0 places the widgets once,
-/// as 1.3.0 did: the Swap chart goes or comes back in that sample, and the next samples with
-/// the same SwapTotal change nothing (leader-notes 2026-11-03 hzire.6; ADR-019 phase 3,
-/// "A listed `swap` takes no space while SwapTotal is 0").
+/// One sample that sets SwapTotal to `swap` bytes and lists one swap device when `device`,
+/// none otherwise: the system and the memory details change in the same sample.
+fn publish_swap_and_devices(engine: &FakeEngine, swap: u64, device: bool) {
+    engine.publish_with(move |s| {
+        let sys = Arc::make_mut(&mut s.system);
+        sys.header.version += 1;
+        let m = &mut sys.memory;
+        m.swap_total = swap;
+        m.swap_free = swap;
+        let swaps: Vec<SwapDevice> = if device {
+            vec![SwapDevice {
+                name: Arc::from("/dev/nvme0n1p3"),
+                kind: SwapKindModel::Partition,
+                size_bytes: swap,
+                used_bytes: 0,
+                priority: -2,
+            }]
+        } else {
+            Vec::new()
+        };
+        let details = Arc::make_mut(&mut s.device_details);
+        details.header.version += 1;
+        details.memory = Arc::new(MemoryDetails {
+            swaps: InvField {
+                value: Arc::from(swaps),
+                validity: Validity::Valid,
+            },
+            ..MemoryDetails::default()
+        });
+    });
+}
+
+/// How many times the page asked its container to place the widgets again.
+fn place_count(r: &mut Rig) -> u32 {
+    let page = r.page.clone();
+    r.vcx.update(|_, cx| page.read(cx).place_count.get())
+}
+
+/// Repeated samples with the same SwapTotal make and drop no entity, notify neither the page
+/// nor the container and place nothing. The one sample where SwapTotal crosses 0 places the
+/// widgets exactly once, as 1.3.0 did: the Swap chart goes or comes back in that sample, and the
+/// next samples with the same SwapTotal change nothing (leader-notes 2026-11-03 hzire.6;
+/// ADR-019 phase 3, "A listed `swap` takes no space while SwapTotal is 0").
 #[gpui_kit::test]
 fn page_mem_swap_crossing_places_once(cx: &mut TestAppContext) {
     let mut r = open(cx, PerformanceSettings::default());
@@ -1005,10 +1045,11 @@ fn page_mem_swap_crossing_places_once(cx: &mut TestAppContext) {
             (
                 page.read(cx).notify_count.get(),
                 container.read(cx).notify_count.get(),
+                page.read(cx).place_count.get(),
             )
         })
     };
-    // Samples that keep SwapTotal: no notify, no entity made or dropped.
+    // Samples that keep SwapTotal: no notify, no placement, no entity made or dropped.
     let steady = |r: &mut Rig, life: &Lifecycle, swap_bytes: u64, what: &str| {
         let before = (counts(r), life.counts());
         for used in [24 * GIB, 25 * GIB, 23 * GIB] {
@@ -1018,7 +1059,7 @@ fn page_mem_swap_crossing_places_once(cx: &mut TestAppContext) {
         assert_eq!(
             (counts(r), life.counts()),
             before,
-            "{what}: no page or container notify, no entity made or dropped"
+            "{what}: no page or container notify, no placement, no entity made or dropped"
         );
     };
     assert!(placed(&mut r), "8 GiB of swap: the Swap chart is placed");
@@ -1027,8 +1068,14 @@ fn page_mem_swap_crossing_places_once(cx: &mut TestAppContext) {
     steady(&mut r, &life, 8 * GIB, "with swap");
     assert_eq!(shown_entities(&mut r, &mut life), entities);
 
+    let before = place_count(&mut r);
     publish_swap(&r.engine, 24 * GIB, 0);
     draw(r.vcx);
+    assert_eq!(
+        place_count(&mut r),
+        before + 1,
+        "swapoff: placed exactly once"
+    );
     assert!(!placed(&mut r), "swapoff: the sample drops the Swap chart");
     assert!(r.try_bounds(widget_id(PAGE, swap)).is_none());
     let (made, dropped) = life.counts();
@@ -1037,8 +1084,14 @@ fn page_mem_swap_crossing_places_once(cx: &mut TestAppContext) {
     steady(&mut r, &life, 0, "without swap");
     assert!(!placed(&mut r));
 
+    let before = place_count(&mut r);
     publish_swap(&r.engine, 23 * GIB, 8 * GIB);
     draw(r.vcx);
+    assert_eq!(
+        place_count(&mut r),
+        before + 1,
+        "swapon: placed exactly once"
+    );
     assert!(placed(&mut r), "swapon: the sample places the Swap chart");
     assert!(r.try_bounds(widget_id(PAGE, swap)).is_some(), "drawn");
     let (made_on, dropped_on) = life.counts();
@@ -1046,6 +1099,56 @@ fn page_mem_swap_crossing_places_once(cx: &mut TestAppContext) {
     assert_eq!(dropped_on, dropped, "swapon: no entity dropped");
     steady(&mut r, &life, 8 * GIB, "with swap again");
     assert!(placed(&mut r));
+}
+
+/// A sample where SwapTotal crosses 0 and the swap devices block starts or stops showing in
+/// the same sample places the widgets exactly once, with both changes applied.
+#[gpui_kit::test]
+fn page_mem_swap_and_block_change_places_once(cx: &mut TestAppContext) {
+    let mut r = open(cx, PerformanceSettings::default());
+    publish_memory(&r.engine, 23 * GIB);
+    publish_swap_and_devices(&r.engine, 8 * GIB, true);
+    draw(r.vcx);
+    let container = r.container();
+    let page = r.page.clone();
+    let swap = r.metric_id("swap");
+    let state = |r: &mut Rig| {
+        r.vcx.update(|_, cx| {
+            (
+                container.read(cx).placed_ids().contains(&swap),
+                page.read(cx).block_shown(&FixedWidget::SwapDevices),
+            )
+        })
+    };
+    assert_eq!(state(&mut r), (true, true), "swap and one swap device");
+
+    let before = place_count(&mut r);
+    publish_swap_and_devices(&r.engine, 0, false);
+    draw(r.vcx);
+    assert_eq!(
+        place_count(&mut r),
+        before + 1,
+        "swapoff: placed exactly once"
+    );
+    assert_eq!(
+        state(&mut r),
+        (false, false),
+        "swapoff: chart and block both go"
+    );
+
+    let before = place_count(&mut r);
+    publish_swap_and_devices(&r.engine, 8 * GIB, true);
+    draw(r.vcx);
+    assert_eq!(
+        place_count(&mut r),
+        before + 1,
+        "swapon: placed exactly once"
+    );
+    assert_eq!(
+        state(&mut r),
+        (true, true),
+        "swapon: chart and block both come back"
+    );
 }
 
 /// A sample that changes nothing the page shows renders no page or container; a sample that
