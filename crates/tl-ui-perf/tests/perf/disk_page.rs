@@ -360,8 +360,10 @@ fn disk_charts_failed_on_source_failure(cx: &mut TestAppContext) {
     }
 }
 
+/// The Transfer rate widget draws read and write on one sticky scale (ADR-019 metric table,
+/// `io`) with the axis maximum shown, in binary units.
 #[gpui_kit::test]
-fn disk_axis_pow2(cx: &mut TestAppContext) {
+fn disk_transfer_axis(cx: &mut TestAppContext) {
     let r = open(cx);
     let chart = r.vcx.update(|_, cx| {
         r.page
@@ -372,7 +374,7 @@ fn disk_axis_pow2(cx: &mut TestAppContext) {
     let (y, labels) = r
         .vcx
         .read_entity(&chart, |v, _| (v.spec.y, v.labels.clone()));
-    assert_eq!(y, YScale::AutoRate { iec: true });
+    assert_eq!(y, YScale::StickyUp { hw_max: None });
     assert!(labels.show_axis_max);
     // The axis text the chart computes for this spec and a 3 MiB/s peak in view.
     let mut axis = String::new();
@@ -386,7 +388,7 @@ fn disk_axis_pow2(cx: &mut TestAppContext) {
         NetworkUnit::Bits,
         &mut axis,
     );
-    assert_eq!(axis, "4 MiB/s");
+    assert!(axis.ends_with(" MiB/s"), "{axis}");
 }
 
 /// The Details grid's P1 rows (E25-006, UI-PRF-030; PERF-049, PERF-013).

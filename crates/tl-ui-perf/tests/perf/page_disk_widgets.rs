@@ -176,6 +176,16 @@ fn publish(engine: &FakeEngine, a_present: bool, active: f32, partitions: bool) 
     });
 }
 
+/// Publishes a sample that carries only new values: the disk records, A's Active time at
+/// `active`. The catalog and the details stay as they are.
+fn publish_values(engine: &FakeEngine, active: f32) {
+    engine.publish_with(|s| {
+        let sys = Arc::make_mut(&mut s.system);
+        sys.header.version += 1;
+        sys.disks = Arc::from(vec![(DISK_A, record(1, active)), (DISK_B, record(2, 3.))]);
+    });
+}
+
 /// The page, cached, so it renders only when it notifies.
 struct Host(Entity<DiskPage>);
 
@@ -771,7 +781,7 @@ fn page_disk_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
             )
         })
     };
-    publish(&r.engine, true, 12., true);
+    publish_values(&r.engine, 12.);
     draw(r.vcx);
     let mut life = Lifecycle::new(&mut r);
     let entities = shown_entities(&mut r, &mut life);
@@ -779,12 +789,12 @@ fn page_disk_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
     assert_eq!(entities.len(), 6, "{entities:?}");
     let before = counts(&mut r);
     for _ in 0..3 {
-        publish(&r.engine, true, 12., true);
+        publish_values(&r.engine, 12.);
         draw(r.vcx);
     }
     assert_eq!(counts(&mut r), before, "nothing shown changed");
     assert_eq!(life.counts(), (0, 0), "no entity made or dropped");
-    publish(&r.engine, true, 57., true);
+    publish_values(&r.engine, 57.);
     draw(r.vcx);
     let after = counts(&mut r);
     assert_eq!(after.1, before.1, "the page never notifies");
