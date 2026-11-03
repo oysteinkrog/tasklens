@@ -463,7 +463,7 @@ fn page_net_flow_matches_1_3_0(cx: &mut TestAppContext) {
 /// Widget does not offer it.
 #[gpui_kit::test]
 fn page_net_no_settings_tool_no_link(cx: &mut TestAppContext) {
-    let mut r = open(cx, PerformanceSettings::default(), None);
+    let r = open(cx, PerformanceSettings::default(), None);
     let c = container(1);
     assert!(
         r.vcx
