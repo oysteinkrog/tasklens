@@ -587,7 +587,7 @@ fn cpu_by_app_same_name_gets_kind_suffix(cx: &mut TestAppContext) {
 /// move when the pointer leaves it, and the hover goes with it.
 #[gpui_kit::test]
 fn cpu_by_app_hover_clears_on_exit(cx: &mut TestAppContext) {
-    let mut r = open(
+    let r = open(
         cx,
         &flat(&[8., 6.], [0.5, 0.25, 0.75, 0.125, 0.375]),
         |_| {},
