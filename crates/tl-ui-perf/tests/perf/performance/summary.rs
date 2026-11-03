@@ -835,6 +835,10 @@ fn page_menu_common_order(cx: &mut TestAppContext) {
             (MenuEntryKind::Item, "Graph Summary View"),
             (MenuEntryKind::Submenu, "Time range"),
             (MenuEntryKind::Separator, ""),
+            // The CPU page is a widget container (tasklens-hzire.5).
+            (MenuEntryKind::Item, "Edit Widgets…"),
+            (MenuEntryKind::Disabled, "Reset Page"),
+            (MenuEntryKind::Separator, ""),
             (MenuEntryKind::Submenu, "Graph"),
             (MenuEntryKind::Submenu, "Secondary graph"),
             (MenuEntryKind::Item, "Kernel times"),

@@ -17,9 +17,11 @@ use gpui_kit::{
 use smallvec::smallvec;
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
-use tl_model::ids::DeviceIdx;
-use tl_model::snapshot::{CpuStaticInfo, RaplState};
+use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::series::{Sample, SeriesView};
+use tl_model::snapshot::{ComponentHeader, CpuStaticInfo, RaplState, SeriesSet};
 use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology, Metric};
+use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::app_env::{BootSettings, EngineGlobal};
@@ -27,8 +29,8 @@ use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
-use tl_ui_chart::chart::grid_element::{grid_height, grid_layout};
-use tl_ui_chart::chart::{ChartGridView, ChartView};
+use tl_ui_chart::chart::grid_element::{grid_height, grid_layout as cell_layout};
+use tl_ui_chart::chart::{ChartGridView, ChartView, ValueAlign};
 use tl_ui_kit::components::kv_grid;
 use tl_ui_overview::widget::container::{WidgetContainer, WidgetView};
 use tl_ui_overview::widget::details_widget::details_id;
@@ -227,6 +229,9 @@ fn open_with(
     });
     let page = vcx.read_entity(&host, |h, _| h.0.clone());
     vcx.update(|_, cx| page.update(cx, |p, cx| p.set_active(true, cx)));
+    // The header buttons and menu items reach the page as actions, as in the window.
+    let focus = vcx.update(|_, cx| gpui_kit::Focusable::focus_handle(page.read(cx), cx));
+    vcx.update(|window, cx| focus.focus(window, cx));
     draw(vcx);
     Rig {
         engine,
@@ -404,7 +409,7 @@ fn page_cpu_flow_matches_1_3_0(cx: &mut TestAppContext) {
     let page = r.page.clone();
     let (cell_h, natural) = r.vcx.update(|_, cx| {
         let spec = page.read(cx).grid().view.read(cx).spec.clone();
-        let layout = grid_layout(spec.cells.len(), px(body_w), spec.cell_min_w, spec.gap);
+        let layout = cell_layout(spec.cells.len(), px(body_w), spec.cell_min_w, spec.gap);
         (spec.cell_h, grid_height(&layout, px(112.), spec.gap))
     });
     assert!(near(cell_h, 112.), "{cell_h:?}");
@@ -439,7 +444,11 @@ fn page_cpu_flow_matches_1_3_0(cx: &mut TestAppContext) {
         let chart = page.read(cx).overall(cx).expect("overall chart");
         let chart = chart.read(cx);
         assert_eq!(chart.labels.heading.as_deref(), Some("Utilization"));
-        assert!(chart.value_text().is_some(), "the utilization value");
+        assert_ne!(
+            chart.labels.value_align,
+            ValueAlign::Hidden,
+            "the utilization value"
+        );
     });
 
     // Core board: the total chart at 40% of the width, the board after a 16 px gutter.
@@ -456,7 +465,7 @@ fn page_cpu_flow_matches_1_3_0(cx: &mut TestAppContext) {
         board.left() - chart.left(),
         (body_w * 0.4).round() + 16.
     ));
-    assert!(near(board.right(), chart.left() + px(body_w)));
+    assert!(near(board.right() - chart.left(), body_w));
     assert!(near(chart.size.height, 300.) && near(board.size.height, 300.));
     assert!(r.vcx.debug_bounds(BOARD_ID).is_some(), "the board's rows");
 }
@@ -640,7 +649,7 @@ fn page_cpu_core_grid_fills_widget(cx: &mut TestAppContext) {
     let rows_at = |r: &mut Rig, width: Pixels| {
         r.vcx.update(|_, cx| {
             let spec = page.read(cx).grid().view.read(cx).spec.clone();
-            let layout = grid_layout(spec.cells.len(), width, spec.cell_min_w, spec.gap);
+            let layout = cell_layout(spec.cells.len(), width, spec.cell_min_w, spec.gap);
             (layout.rows, spec.gap, spec.cell_h)
         })
     };
@@ -674,6 +683,64 @@ fn page_cpu_core_grid_fills_widget(cx: &mut TestAppContext) {
     );
 }
 
+/// One `CPU_TOTAL` and one `CPU_FREQ` sample per logical CPU and the package's
+/// `CPU_CLOCK_MAX`: these values come from the series, not the system snapshot. Also the
+/// highest clock, which a clock bar fills to.
+fn publish_cores(engine: &FakeEngine) {
+    let newest = now_boot_ns();
+    let one = |id: u16, metric: MetricId, v: f32| {
+        Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(100 + id),
+                metric,
+            },
+            version: 1,
+            period_ns: 100_000_000,
+            samples: Arc::from([Sample::valid(newest, v)]),
+        })
+    };
+    // The package's fastest core clock.
+    let one_pkg = |metric: MetricId, v: f32| {
+        Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(0),
+                metric,
+            },
+            version: 1,
+            period_ns: 100_000_000,
+            samples: Arc::from([Sample::valid(newest, v)]),
+        })
+    };
+    let mut views: Vec<Arc<SeriesView>> = (0..16u16)
+        .flat_map(|id| {
+            [
+                one(id, MetricId::CPU_TOTAL, 20. + f32::from(id)),
+                one(id, MetricId::CPU_FREQ, 4000. + f32::from(id)),
+            ]
+        })
+        .chain([one_pkg(MetricId::CPU_CLOCK_MAX, 5050.)])
+        .collect();
+    // The set is looked up by id, in order.
+    views.sort_by_key(|v| v.id);
+    engine.publish_with(|s| {
+        s.series = Arc::new(SeriesSet {
+            header: ComponentHeader {
+                version: 1,
+                ..ComponentHeader::default()
+            },
+            series: views.into(),
+            slow: Arc::from([]),
+        });
+        // The clock bars' full scale, `cpuinfo_max_freq`.
+        let inv = Arc::make_mut(&mut s.inventory);
+        inv.header.version += 1;
+        inv.processor.max_mhz = tl_model::snapshot::InvField {
+            value: 5050,
+            validity: Validity::Valid,
+        };
+    });
+}
+
 /// The forms of each widget of [`page_cpu_every_metric_any_form`], in list order.
 fn any_form_widgets() -> Vec<WidgetSetting> {
     let (c, b, v, s, l) = (
@@ -694,7 +761,12 @@ fn any_form_widgets() -> Vec<WidgetSetting> {
                 arrange: None,
             },
         }),
-        ..metric("cpu", "total", FormSet::empty(), cell(0, 38, 12, 16))
+        ..metric(
+            "cpu",
+            "total",
+            FormSet::BAR | FormSet::VALUE | FormSet::LABEL,
+            cell(0, 38, 12, 16),
+        )
     };
     vec![
         metric("cpu", "total", c | v | l, cell(0, 0, 6, 7)),
@@ -706,8 +778,8 @@ fn any_form_widgets() -> Vec<WidgetSetting> {
         metric("cpu", "cores_overlaid", c | l, cell(0, 16, 6, 7)),
         metric("cpu", "cores_stacked", c, cell(6, 16, 6, 7)),
         metric("cpu", "clock", c | v, cell(0, 23, 6, 7)),
-        metric("cpu", "freq_max", b | v | l, cell(6, 23, 6, 2)),
-        metric("cpu:9", "freq", v | l, cell(6, 25, 6, 2)),
+        metric("cpu", "freq_max", b | v | l, cell(6, 23, 6, 3)),
+        metric("cpu:9", "freq", v | l, cell(6, 26, 6, 2)),
         WidgetSetting {
             content: WidgetContent::Fixed(FixedWidget::CpuCoreGrid),
             ..metric("cpu", "total", FormSet::empty(), cell(0, 30, 12, 8))
@@ -725,6 +797,8 @@ fn page_cpu_every_metric_any_form(cx: &mut TestAppContext) {
     let mut perf = PerformanceSettings::default();
     perf.layouts.set(grid_layout(any_form_widgets()));
     let mut r = open(cx, perf);
+    publish_cores(&r.engine);
+    draw(r.vcx);
     let container = r.container();
     let want = any_form_widgets();
     r.vcx.update(|_, cx| {
