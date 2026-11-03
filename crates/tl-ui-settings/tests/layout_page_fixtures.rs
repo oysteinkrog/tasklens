@@ -12,7 +12,7 @@ use tl_ui_settings::layout_boxes::DeviceKind;
 use tl_ui_settings::layout_pages::{
     PAGE_DEVICE_KINDS, convert_old_page_settings_for, convert_page, page_needs_conversion_for,
 };
-use tl_ui_settings::settings::Settings;
+use tl_ui_settings::settings::{LAYOUTS_CONVERTED_KEY, Settings};
 
 const ALL: &[DeviceKind] = &PAGE_DEVICE_KINDS;
 const GPU: &str = "page.gpu:GPU-0a1b2c3d";
@@ -28,13 +28,14 @@ fn fixture(name: &str) -> String {
 
 /// Loads `text` as a build with every page kind would: `Settings::clamp`, the layouts read
 /// with every page kind, then the CPU and Memory page conversion. Returns whether any page
-/// converted.
+/// converted. The kinds of this build already convert in `Settings::clamp` (the CPU page since
+/// tasklens-hzire.5), which reports it.
 fn load(text: &str) -> (Settings, bool) {
     let mut s: Settings = toml::from_str(text).expect("valid TOML");
-    s.clamp();
+    let by_clamp = s.clamp().contains(&LAYOUTS_CONVERTED_KEY);
     s.performance.layouts.load_for(ALL);
     let converted = convert_old_page_settings_for(&mut s.performance, ALL);
-    (s, converted)
+    (s, by_clamp || converted)
 }
 
 /// Builds the GPU page `GPU` as the window does the first time: converts it when it must.

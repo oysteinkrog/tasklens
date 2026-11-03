@@ -1769,7 +1769,7 @@ mod tests {
 
     #[test]
     fn newer_version_and_unknown_container_kept() {
-        let text = "[[performance.layouts]]\ncontainer = \"overview.gpu\"\nversion = 3\nshape = \"hex\"\nwidgets = [{ id = 1, wobble = true }]\n\n[[performance.layouts]]\ncontainer = \"page.cpu\"\nversion = 1\nwidgets = [{ id = 9, slot = 4 }]\n";
+        let text = "[[performance.layouts]]\ncontainer = \"overview.gpu\"\nversion = 3\nshape = \"hex\"\nwidgets = [{ id = 1, wobble = true }]\n\n[[performance.layouts]]\ncontainer = \"page.sensors\"\nversion = 1\nwidgets = [{ id = 9, slot = 4 }]\n";
         let (s, changed) = load(&format!("{}{text}", gpu_entry("mode = \"chart\"")));
         assert!(changed.is_empty(), "{changed:?}");
         let entries = &s.performance.layouts.0;

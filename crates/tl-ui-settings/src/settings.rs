@@ -3158,7 +3158,11 @@ mod tests {
         assert!(first(&s).clocks);
 
         let (s, changed) = load_toml("[performance]\ncpu_secondary_graph = \"clocks\"\n");
-        assert!(changed.is_empty(), "{changed:?}");
+        // The CPU page converts the key once (tasklens-hzire.5) and keeps it as loaded.
+        assert!(
+            changed.iter().all(|k| *k == LAYOUTS_CONVERTED_KEY),
+            "{changed:?}"
+        );
         assert_eq!(s.performance.cpu_secondary_graph, CpuSecondaryGraph::Clocks);
         let text = toml::to_string(&s).expect("serializes");
         assert!(text.contains("cpu_secondary_graph = \"clocks\""), "{text}");
