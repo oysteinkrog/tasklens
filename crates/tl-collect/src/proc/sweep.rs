@@ -13,6 +13,13 @@
 //! first sweep, when a counter of the `cpu` line goes down, across a suspend and after
 //! `reset_baselines`.
 //!
+//! Right after that read, `ProcessSampler` reads `cpu.stat` `usage_usec` once for each cgroup
+//! that holds a live process in the sweep (`ProcessMeta.cgroup`, never the root cgroup), in
+//! normal and memory-only mode. It keeps one baseline per cgroup, rebuilt from the cgroups read
+//! in each sweep, so the map never holds more entries than there are live cgroups.
+//! `SweepOutput.cgroup_cpu` is the delta of each cgroup in percent of all CPUs over the window
+//! (D-042, UI-PRF-062 "Exited processes", "Engine state").
+//!
 //! In memory-only mode (`set_mem_only`, while only the memory and CPU group history needs the
 //! sweep: D-036, D-042, UI-PRF-060, UI-PRF-062) each process gets `stat` and `status` read every
 //! sweep and no `statm`. `stat` gives the key (pid, start_ticks) and the utime and stime
@@ -861,6 +868,12 @@ pub struct SweepOutput {
     pub coverage: Coverage,
     /// The `/proc/stat` window of this sweep, `None` when it has none (see the module doc).
     pub cpu_window: Option<CpuWindow>,
+    /// Per cgroup path (relative to `/sys/fs/cgroup`, as in `ProcessMeta.cgroup`): the
+    /// `cpu.stat` `usage_usec` delta in percent of all CPUs over `cpu_window`,
+    /// `100 × Δusage_usec × USER_HZ / 1e6 / Δtotal`. Only for a cgroup with a live process in
+    /// this sweep that also had a good read in the last sweep, and only when this read worked,
+    /// the counter did not go down and there is a window. Never the root cgroup.
+    pub cgroup_cpu: FxHashMap<Arc<str>, f64>,
 }
 
 /// What the engine passes to `ProcessSampler::sweep` besides `SweepCtx`.
@@ -898,6 +911,14 @@ struct AppPrev {
     wbytes: u64,
 }
 
+/// The `cpu.stat` `usage_usec` of one cgroup at its last read, and the clock right before the
+/// reads of that sweep.
+#[derive(Clone, Copy)]
+struct CgroupCpuBase {
+    usage_usec: u64,
+    at: Clock,
+}
+
 /// Buffers reused across sweeps.
 #[derive(Default)]
 struct Scratch {
@@ -930,6 +951,17 @@ const APP_WANT: CgroupWant = CgroupWant {
     events: true,
 };
 
+/// Wanted cgroup files of each live process cgroup in the sweep: `cpu.stat` only (D-042).
+const CPU_WANT: CgroupWant = CgroupWant {
+    memory_stat: false,
+    swap: false,
+    memory_current: false,
+    cpu_stat: true,
+    io_stat: false,
+    pids: false,
+    events: false,
+};
+
 /// Wanted cgroup files of a unit cgroup in the sweep: `cgroup.events` only (tasklens-8q0.42).
 const UNIT_WANT: CgroupWant = CgroupWant {
     memory_stat: false,
@@ -954,6 +986,11 @@ pub struct ProcessSampler {
     interner: Interner,
     metas: FxHashMap<ProcessKey, MetaSlot>,
     app_prev: FxHashMap<u64, AppPrev>,
+    /// The `usage_usec` baseline of each cgroup read in the last sweep; `None` when its read
+    /// failed. Only cgroups that held a live process then.
+    cg_cpu: FxHashMap<Arc<str>, Option<CgroupCpuBase>>,
+    /// Filled during a sweep, then swapped with `cg_cpu`.
+    cg_cpu_next: FxHashMap<Arc<str>, Option<CgroupCpuBase>>,
     /// The flags of each key and the sweep time they were first seen with.
     flag_since: FxHashMap<ProcessKey, (ProcFlags, TimeNs)>,
     bufs: ReadBufs,
@@ -983,6 +1020,8 @@ impl ProcessSampler {
             interner,
             metas: FxHashMap::default(),
             app_prev: FxHashMap::default(),
+            cg_cpu: FxHashMap::default(),
+            cg_cpu_next: FxHashMap::default(),
             flag_since: FxHashMap::default(),
             bufs: ReadBufs::default(),
             empty,
@@ -1010,10 +1049,24 @@ impl ProcessSampler {
         self
     }
 
-    /// Forgets every process and app unit baseline, so the next sweep gives no rates.
+    /// Forgets every process, app unit and cgroup CPU baseline, so the next sweep gives no
+    /// rates.
     pub fn reset_baselines(&mut self) {
         self.core.reset_baselines();
         self.app_prev.clear();
+        self.cg_cpu.clear();
+    }
+
+    /// Test hook: true when cgroup `rel` has a `usage_usec` baseline for the next sweep.
+    #[doc(hidden)]
+    pub fn has_cgroup_baseline(&self, rel: &str) -> bool {
+        matches!(self.cg_cpu.get(rel), Some(Some(_)))
+    }
+
+    /// Test hook: how many cgroups the `usage_usec` map holds, failed reads included.
+    #[doc(hidden)]
+    pub fn cgroup_baselines(&self) -> usize {
+        self.cg_cpu.len()
     }
 
     /// Memory-only mode (see the module doc): for the memory and CPU group series alone. The
@@ -1023,6 +1076,7 @@ impl ProcessSampler {
         if self.core.mem_only != on {
             self.core.set_mem_only(on);
             self.app_prev.clear();
+            self.cg_cpu.clear();
         }
     }
 
@@ -1033,6 +1087,7 @@ impl ProcessSampler {
         out.side.clear();
         out.extras_p2.clear();
         out.apps.clear();
+        out.cgroup_cpu.clear();
         out.coverage = Coverage::default();
         // P2 columns only for the visible rows; nothing per record when there are none.
         let p2_root = (!inp.detail_keys.is_empty()).then(|| self.core.root.clone());
@@ -1097,6 +1152,7 @@ impl ProcessSampler {
         out.observed_start = start;
         out.observed_end = end;
         out.cpu_window = self.core.cpu_window();
+        self.sample_cgroup_cpu(ctx, out);
 
         self.set_flags(ctx, inp, out);
         if !self.core.mem_only {
@@ -1124,6 +1180,50 @@ impl ProcessSampler {
         self.metas.retain(|k, _| live.contains(k));
         self.flag_since.retain(|k, _| live.contains(k));
         self.p2.retain_live(live);
+    }
+
+    /// Right after the `/proc/stat` read: `cpu.stat` `usage_usec` of each distinct cgroup that
+    /// holds a live process, the root cgroup left out, into `out.cgroup_cpu` (see the module
+    /// doc). The baseline map is rebuilt from this sweep's reads, so the cgroup of a process that
+    /// exited, and a cgroup whose read failed, has no baseline at the next sweep.
+    fn sample_cgroup_cpu(&mut self, ctx: &SweepCtx, out: &mut SweepOutput) {
+        let (boot_ns, mono_ns) = (self.core.clock)();
+        let at = Clock { boot_ns, mono_ns };
+        let ticks = ctx.ticks_per_sec.max(1) as f64;
+        let next = &mut self.cg_cpu_next;
+        next.clear();
+        let mut stats = CgroupStats::default();
+        for r in &out.records {
+            let Some(rel) = r.meta.cgroup.as_ref().filter(|rel| !rel.is_empty()) else {
+                continue;
+            };
+            if next.contains_key(rel) {
+                continue;
+            }
+            let read = self
+                .cg
+                .read_stats(rel, CPU_WANT, &mut self.scratch.stat_buf, &mut stats)
+                .ok()
+                .and_then(|()| stats.usage_usec);
+            let Some(usage_usec) = read else {
+                next.insert(rel.clone(), None);
+                continue;
+            };
+            next.insert(rel.clone(), Some(CgroupCpuBase { usage_usec, at }));
+            let Some(w) = out.cpu_window else {
+                continue;
+            };
+            if let Some(Some(old)) = self.cg_cpu.get(rel)
+                && usage_usec >= old.usage_usec
+                && !resumed_between(old.at, at)
+            {
+                let d_usec = (usage_usec - old.usage_usec) as f64;
+                let pct = 100.0 * d_usec * ticks / 1e6 / w.total_ticks as f64;
+                out.cgroup_cpu.insert(rel.clone(), pct);
+            }
+        }
+        std::mem::swap(&mut self.cg_cpu, next);
+        next.clear();
     }
 
     /// Step 5: the protected set from this sweep's processes, then the flags of each record.

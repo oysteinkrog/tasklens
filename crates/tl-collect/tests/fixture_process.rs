@@ -2331,6 +2331,161 @@ fn index_of(out: &SweepOutput, pid: u32) -> usize {
         .unwrap_or_else(|| panic!("pid {pid} not swept"))
 }
 
+/// Writes `cpu.stat` of cgroup `rel` under `root_dir`, creating the directory.
+fn write_cpu_stat(root_dir: &Path, rel: &str, usage_usec: u64) {
+    let dir = root_dir.join("sys/fs/cgroup").join(rel);
+    fs::create_dir_all(&dir).expect("create cgroup");
+    fs::write(
+        dir.join("cpu.stat"),
+        format!("usage_usec {usage_usec}\nuser_usec 0\nsystem_usec 0\nnr_periods 0\n"),
+    )
+    .expect("write cpu.stat");
+}
+
+const CG_FIREFOX: &str =
+    "user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox@3a1b.service";
+const CG_SESSION: &str = "user.slice/user-1000.slice/session-2.scope";
+const CG_PIPEWIRE: &str = "system.slice/pipewire.service";
+
+sweep_clock!(cgroup_cpu_clock);
+
+/// Sweep `i` of `cgroup_cpu_baselines_pruned`: the cpu line grows by 1000 ticks per sweep (100
+/// user, 900 idle), so with USER_HZ 100 a `usage_usec` delta of 100 000 is 1%.
+fn cgroup_cpu_sweep(s: &mut ProcessSampler, root: &SysRoot, i: u64, out: &mut SweepOutput) {
+    fs::write(root.proc_path("stat"), stat_text(100 * i, 900 * i)).expect("write stat");
+    cgroup_cpu_clock::set(i * SEC, i * SEC);
+    let protect = ProtectInputs::default();
+    s.sweep(&sweep_ctx(false), &no_inputs(&protect), out);
+}
+
+/// The distinct non-root cgroups of the live processes in `out`.
+fn live_cgroups(out: &SweepOutput) -> std::collections::BTreeSet<Arc<str>> {
+    out.records
+        .iter()
+        .filter_map(|r| r.meta.cgroup.clone())
+        .filter(|rel| !rel.is_empty())
+        .collect()
+}
+
+/// `out.cgroup_cpu` holds `want` percent for cgroup `rel`.
+fn assert_pct(out: &SweepOutput, rel: &str, want: f64) {
+    let got = out.cgroup_cpu.get(rel).copied();
+    assert!(
+        got.is_some_and(|g| (g - want).abs() < 1e-9),
+        "{rel}: {got:?}, want {want}"
+    );
+}
+
+/// D-042, UI-PRF-062 "Exited processes" and "Engine state": the sweep reads `cpu.stat`
+/// `usage_usec` once per cgroup with a live process, in normal and memory-only mode, and gives
+/// its delta in percent of all CPUs over the `/proc/stat` window. The baseline map holds only
+/// the cgroups of this sweep's processes: a cgroup whose last process exits loses its baseline
+/// in that sweep. An unreadable `cpu.stat`, a counter that went down and the root cgroup give
+/// no delta.
+#[test]
+fn cgroup_cpu_baselines_pruned() {
+    for mem_only in [false, true] {
+        let (tmp, root) = merged_root();
+        let cache = tempfile::tempdir().expect("tempdir");
+        let mut s = sampler(root.clone(), cache.path()).with_clock(cgroup_cpu_clock::now);
+        s.set_mem_only(mem_only);
+        let mut out = SweepOutput::default();
+        // process-edge: 4201 alone in the firefox unit, 4209 in session-2.scope, 57 in the root
+        // cgroup. 4202 joins session-2.scope, so it is read once for two processes, and 4203
+        // goes to pipewire.service, whose cpu.stat has no usage_usec line. init.scope
+        // (owner-desktop) and the chrome unit have no cgroup directory.
+        fs::write(root.proc_path("4202/cgroup"), format!("0::/{CG_SESSION}\n")).expect("write");
+        fs::write(
+            root.proc_path("4203/cgroup"),
+            format!("0::/{CG_PIPEWIRE}\n"),
+        )
+        .expect("write");
+        write_cpu_stat(tmp.path(), CG_FIREFOX, 1_000_000);
+        write_cpu_stat(tmp.path(), CG_SESSION, 2_000_000);
+        let pipewire = tmp.path().join("sys/fs/cgroup").join(CG_PIPEWIRE);
+        fs::create_dir_all(&pipewire).expect("create cgroup");
+        fs::write(pipewire.join("cpu.stat"), "user_usec 5\nsystem_usec 5\n").expect("write");
+        fs::write(tmp.path().join("sys/fs/cgroup/cpu.stat"), "usage_usec 1\n").expect("write");
+
+        // Sweep 1: no window yet, so no deltas; the baselines are set.
+        cgroup_cpu_sweep(&mut s, &root, 1, &mut out);
+        let live = live_cgroups(&out);
+        assert!(
+            live.contains(CG_FIREFOX) && live.contains(CG_SESSION),
+            "{mem_only}"
+        );
+        assert!(live.contains(CG_PIPEWIRE), "{mem_only}");
+        let in_session = |out: &SweepOutput| {
+            out.records
+                .iter()
+                .filter(|r| r.meta.cgroup.as_deref() == Some(CG_SESSION))
+                .count()
+        };
+        assert_eq!(in_session(&out), 2);
+        assert!(
+            out.records
+                .iter()
+                .any(|r| r.meta.cgroup.as_deref() == Some(""))
+        );
+        assert!(out.cpu_window.is_none());
+        assert!(out.cgroup_cpu.is_empty(), "{:?}", out.cgroup_cpu);
+        assert!(s.has_cgroup_baseline(CG_FIREFOX));
+        assert!(s.has_cgroup_baseline(CG_SESSION));
+        assert!(!s.has_cgroup_baseline(CG_PIPEWIRE), "no usage_usec");
+        assert!(!s.has_cgroup_baseline(""), "root cgroup not read");
+        assert_eq!(
+            s.cgroup_baselines(),
+            live.len(),
+            "one entry per live cgroup"
+        );
+
+        // Sweep 2: firefox +500 000 us (5%), session-2 +1 200 000 us (12%), read once for its
+        // two processes.
+        write_cpu_stat(tmp.path(), CG_FIREFOX, 1_500_000);
+        write_cpu_stat(tmp.path(), CG_SESSION, 3_200_000);
+        cgroup_cpu_sweep(&mut s, &root, 2, &mut out);
+        assert_eq!(out.cpu_window.map(|w| w.total_ticks), Some(1000));
+        assert_pct(&out, CG_FIREFOX, 5.0);
+        assert_pct(&out, CG_SESSION, 12.0);
+        assert_eq!(out.cgroup_cpu.len(), 2, "{:?}", out.cgroup_cpu);
+        assert!(!out.cgroup_cpu.contains_key(""));
+
+        // Sweep 3: firefox's last process exits; session-2's counter goes down.
+        fs::remove_dir_all(root.proc_path("4201")).expect("remove 4201");
+        write_cpu_stat(tmp.path(), CG_FIREFOX, 9_000_000);
+        write_cpu_stat(tmp.path(), CG_SESSION, 100);
+        cgroup_cpu_sweep(&mut s, &root, 3, &mut out);
+        assert!(!live_cgroups(&out).contains(CG_FIREFOX));
+        assert!(
+            !s.has_cgroup_baseline(CG_FIREFOX),
+            "pruned with its last process"
+        );
+        assert!(out.cgroup_cpu.is_empty(), "{:?}", out.cgroup_cpu);
+        assert!(
+            s.has_cgroup_baseline(CG_SESSION),
+            "the new value is the baseline"
+        );
+        assert_eq!(s.cgroup_baselines(), live_cgroups(&out).len());
+
+        // Sweep 4: firefox comes back with no baseline, so no delta; session-2 +600 000 us
+        // from the value after the drop (6%).
+        overlay(
+            &fixture_dir("process-edge").join("proc/4201"),
+            &root.proc_path("4201"),
+        );
+        write_cpu_stat(tmp.path(), CG_SESSION, 600_100);
+        cgroup_cpu_sweep(&mut s, &root, 4, &mut out);
+        assert!(live_cgroups(&out).contains(CG_FIREFOX));
+        assert!(!out.cgroup_cpu.contains_key(CG_FIREFOX));
+        assert!(s.has_cgroup_baseline(CG_FIREFOX));
+        assert_pct(&out, CG_SESSION, 6.0);
+
+        // reset_baselines forgets every cgroup baseline.
+        s.reset_baselines();
+        assert_eq!(s.cgroup_baselines(), 0);
+    }
+}
+
 sweep_clock!(full_snapshot_clock);
 
 #[test]
@@ -3010,6 +3165,81 @@ fn mem_only_sweep_within_budget() {
     times.sort_unstable();
     let (median, max) = (times[times.len() / 2], times[times.len() - 1]);
     eprintln!("memory-only sweep CPU time: median {median:?}, max {max:?}");
+    assert!(median <= MEDIAN, "median {median:?} over {MEDIAN:?}");
+    assert!(max <= MAX, "max {max:?} over {MAX:?}");
+}
+
+/// The D-036 budget with the cgroup `cpu.stat` reads of D-042 (UI-PRF-062 "Engine state"): the
+/// 2,000-process root (more than the 1,500 of the budget) with its pids spread over 200 app
+/// scopes, each with a `cpu.stat`. The memory-only sweep reads 200 `cpu.stat` files and keeps
+/// 200 baselines; the median CPU time of 50 sweeps is at most 60 ms and the longest at most
+/// 100 ms. Owner machine:
+/// `cargo test -p tl-collect --test fixture_process mem_only_cgroup_cpu_within_budget -- --ignored`.
+#[test]
+#[ignore = "perf gate: owner machine"]
+fn mem_only_cgroup_cpu_within_budget() {
+    use rustix::time::{ClockId, clock_gettime};
+    const MEDIAN: std::time::Duration = std::time::Duration::from_millis(60);
+    const MAX: std::time::Duration = std::time::Duration::from_millis(100);
+    const CGROUPS: usize = 200;
+    let root_dir = tempfile::Builder::new()
+        .prefix("sweep-cgcpu-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("create scaled root dir");
+    scaled_root::build_scaled_root(root_dir.path());
+    let dir = root_dir.path();
+    fs::write(
+        dir.join("proc/stat"),
+        fixture_bytes("owner-desktop", "proc/stat"),
+    )
+    .expect("write stat");
+    let scope =
+        |i: usize| format!("user.slice/user-1000.slice/user@1000.service/app.slice/app-t{i}.scope");
+    for i in 0..CGROUPS {
+        write_cpu_stat(dir, &scope(i), 123_456_789);
+    }
+    let mut pids: Vec<u32> = fs::read_dir(dir.join("proc"))
+        .expect("read proc")
+        .filter_map(|e| e.expect("proc entry").file_name().to_str()?.parse().ok())
+        .collect();
+    pids.sort_unstable();
+    for (k, pid) in pids.iter().enumerate() {
+        fs::write(
+            dir.join(format!("proc/{pid}/cgroup")),
+            format!("0::/{}\n", scope(k % CGROUPS)),
+        )
+        .expect("write cgroup");
+    }
+
+    let cache = tempfile::Builder::new()
+        .prefix("sweep-cgcpu-icons-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("create icon cache dir");
+    let mut s = sampler(SysRoot::at(dir), cache.path());
+    s.set_mem_only(true);
+    let protect = ProtectInputs::default();
+    let mut out = SweepOutput::default();
+    let ctx = scaled_root::sweep_ctx(false);
+    for _ in 0..2 {
+        s.sweep(&ctx, &no_inputs(&protect), &mut out);
+    }
+    assert_eq!(out.records.len(), scaled_root::SCALED_PIDS);
+    assert_eq!(s.cgroup_baselines(), CGROUPS);
+    let cpu_time = || {
+        let t = clock_gettime(ClockId::ThreadCPUTime);
+        std::time::Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+    };
+    let mut times: Vec<std::time::Duration> = (0..50)
+        .map(|_| {
+            let t = cpu_time();
+            s.sweep(&ctx, &no_inputs(&protect), &mut out);
+            cpu_time() - t
+        })
+        .collect();
+    assert_eq!(s.cgroup_baselines(), CGROUPS);
+    times.sort_unstable();
+    let (median, max) = (times[times.len() / 2], times[times.len() - 1]);
+    eprintln!("memory-only sweep with cgroup cpu.stat CPU time: median {median:?}, max {max:?}");
     assert!(median <= MEDIAN, "median {median:?} over {MEDIAN:?}");
     assert!(max <= MAX, "max {max:?} over {MAX:?}");
 }
