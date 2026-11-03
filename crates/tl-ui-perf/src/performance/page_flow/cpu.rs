@@ -2,8 +2,9 @@
 //! UI-PRF-025; `tasklens-hzire.5`).
 //!
 //! The 1.3.0 page in one column: the mode's part (the per-core grid as tall as its rows at the
-//! page width, or a 300 px chart, or the total chart at 40% of the width beside the core board),
-//! the secondary chart (120 px), then Details.
+//! page width, or a 300 px chart, or the total chart at 40% of the width beside the core board,
+//! or CPU by app at 300 px with its legend at the right, UI-PRF-062), the secondary chart
+//! (120 px), then Details.
 //!
 //! The secondary graph is a list of widgets: `power` lists Power draw and its two fallbacks,
 //! Temperature and Clock speed. Of the secondary widgets only the first that the CPU can show
@@ -112,6 +113,7 @@ pub fn cpu_part(w: &WidgetSetting, parts: &CpuParts, secondary: Option<u32>) -> 
         WidgetContent::Fixed(FixedWidget::CpuCoreBoard) => {
             Some(fixed(GRAPH_H_OVERALL, Some(ROW_BOARD)))
         }
+        WidgetContent::Fixed(FixedWidget::CpuByApp) => Some(fixed(GRAPH_H_OVERALL, None)),
         WidgetContent::Metric(source) if w.forms.contains(FormSet::CHART) => {
             Some(match source.metric.as_str() {
                 METRIC_CPU_TOTAL => fixed(GRAPH_H_OVERALL, Some(ROW_BOARD)),
@@ -285,13 +287,14 @@ mod tests {
         );
     }
 
-    /// Overall, all cores overlaid and stacked: one 300 px chart.
+    /// Overall, all cores overlaid and stacked, and By app: one 300 px chart.
     #[test]
     fn single_chart_modes_are_300_px() {
         for mode in [
             CpuGraphMode::Overall,
             CpuGraphMode::AllCoresOverlaid,
             CpuGraphMode::AllCoresStacked,
+            CpuGraphMode::Apps,
         ] {
             let l = layout(mode, CpuSecondaryGraph::None);
             let p = placed(&l, &parts(ALL));

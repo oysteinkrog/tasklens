@@ -3,7 +3,8 @@
 //! and `cpu_secondary_graph` value converts once to the widgets it stood for, the header
 //! buttons edit the page's entry and leave the old keys, the core grid fills its widget in a
 //! grid layout, every CPU metric shows in any mix of forms, Edit Widgets adds, removes, moves
-//! and applies, and a sample renders no page or container.
+//! and applies, and a sample renders no page or container. The By app mode and the
+//! `cpu_by_app` widget (UI-PRF-062, `tasklens-qkvs0.10`) are at the end.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -21,7 +22,7 @@ use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::snapshot::{ComponentHeader, CpuStaticInfo, RaplState, SeriesSet};
-use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology, Metric};
+use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology, MemGroupBand, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui_base::anim::AnimationDriver;
@@ -33,6 +34,7 @@ use tl_ui_base::settings_global::TlSettings;
 use tl_ui_chart::chart::grid_element::{grid_height, grid_layout as cell_layout};
 use tl_ui_chart::chart::{ChartGridView, ChartView, ValueAlign};
 use tl_ui_kit::components::kv_grid;
+use tl_ui_overview::overview::memory_apps::{AppsChart, CPU_BANDS, LEGEND_ID};
 use tl_ui_overview::widget::container::{WidgetContainer, WidgetView};
 use tl_ui_overview::widget::details_widget::details_id;
 use tl_ui_overview::widget::edit::saved_layout;
@@ -1261,4 +1263,391 @@ fn page_cpu_fast_chart_widget_added(cx: &mut TestAppContext) {
         "no core grid"
     );
     assert!(fast_sent(&mut r), "a CPU chart widget");
+}
+
+// ---- CPU by app (UI-PRF-062, D-042, tasklens-qkvs0.10) ----
+
+/// The device of memory group `exe:p<i>`.
+fn group_dev(i: u16) -> DeviceIdx {
+    DeviceIdx(20 + i)
+}
+
+/// "Other apps".
+const OTHER_DEV: DeviceIdx = DeviceIdx(30);
+
+/// The device of system band `b` of [`CPU_BANDS`].
+fn band_dev(b: usize) -> DeviceIdx {
+    DeviceIdx(31 + b as u16)
+}
+
+/// The CPU catalog of [`publish_cpu`] plus memory groups `exe:p0` to `exe:p3`, "Other apps"
+/// and the five system bands. The version stays 2, so a repeated sample changes no device.
+fn group_catalog() -> DeviceCatalog {
+    let group = |idx: DeviceIdx, key: &str, name: &str| DeviceEntry {
+        display_name: Arc::from(name),
+        ..entry(
+            idx.0,
+            DeviceIdentity::MemGroup {
+                key: Arc::from(key),
+            },
+            &format!("memgroup:{key}"),
+        )
+    };
+    let mut entries = vec![entry(0, DeviceIdentity::CpuPackage, "cpu")];
+    entries.extend((0..16u16).map(|id| {
+        entry(
+            100 + id,
+            DeviceIdentity::CpuLogical { id },
+            &format!("cpu:{id}"),
+        )
+    }));
+    for i in 0..4u16 {
+        entries.push(group(group_dev(i), &format!("exe:p{i}"), &format!("p{i}")));
+    }
+    entries.push(group(OTHER_DEV, "other", "Other apps"));
+    for (b, (key, _, _)) in CPU_BANDS.iter().enumerate() {
+        entries.push(group(band_dev(b), key, key));
+    }
+    DeviceCatalog {
+        version: 2,
+        entries: Arc::from(entries),
+    }
+}
+
+/// One `CPU_GROUP` sample a second for the last minute: groups `exe:p<i>` at `groups[i]`
+/// percent (a group past the list has no series), "Other apps" 1.5% and the system bands
+/// 1, 0.5, 0.5, 0 and 0.2%.
+fn publish_cpu_groups(engine: &FakeEngine, groups: &[f32]) {
+    const PERIOD: u64 = 1_000_000_000;
+    let now = now_boot_ns();
+    let bands = [1., 0.5, 0.5, 0., 0.2];
+    engine.publish_with(|s| {
+        if s.devices.version != 2 {
+            s.devices = Arc::new(group_catalog());
+        }
+        let version = s.series.header.version + 1;
+        let line = |device: DeviceIdx, value: f32| {
+            Arc::new(SeriesView {
+                id: SeriesId {
+                    device,
+                    metric: MetricId::CPU_GROUP,
+                },
+                version,
+                period_ns: PERIOD,
+                samples: (0..60u64)
+                    .map(|k| Sample::valid(now - (59 - k) * PERIOD, value))
+                    .collect::<Vec<_>>()
+                    .into(),
+            })
+        };
+        let mut views: Vec<Arc<SeriesView>> = groups
+            .iter()
+            .enumerate()
+            .map(|(i, v)| line(group_dev(i as u16), *v))
+            .collect();
+        views.push(line(OTHER_DEV, 1.5));
+        views.extend(bands.iter().enumerate().map(|(b, v)| line(band_dev(b), *v)));
+        views.sort_by_key(|v| v.id);
+        s.series = Arc::new(SeriesSet {
+            header: ComponentHeader {
+                version,
+                ..ComponentHeader::default()
+            },
+            series: views.into(),
+            slow: Arc::from([]),
+        });
+        let sys = Arc::make_mut(&mut s.system);
+        sys.header.version += 1;
+        sys.cpu.groups = Arc::new(
+            (0..groups.len() as u16)
+                .map(|i| MemGroupBand {
+                    key: Arc::from(format!("exe:p{i}")),
+                    name: Arc::from(format!("p{i}")),
+                    process_count: 2,
+                    device: group_dev(i),
+                    wine: None,
+                })
+                .collect(),
+        );
+    });
+}
+
+/// The ids of the widgets Add Widget offers as fixed widgets.
+fn fixed_adds(
+    r: &mut Rig,
+    editor: &Entity<tl_ui_overview::widget::edit::WidgetEditor>,
+) -> Vec<String> {
+    r.vcx.update(|_, cx| {
+        editor
+            .read(cx)
+            .fixed_adds(cx)
+            .iter()
+            .map(|a| a.name.to_string())
+            .collect()
+    })
+}
+
+/// The mode button set to By app: the page shows CPU by app at 300 px with the legend at its
+/// right, the secondary graph and Details under it, asks for the process sweep, and the Kernel
+/// toggle is disabled and keeps its state and label (UI-PRF-062 "Where").
+#[gpui_kit::test]
+fn page_cpu_by_app_mode(cx: &mut TestAppContext) {
+    let mut r = open(cx, PerformanceSettings::default());
+    let page = r.page.clone();
+    let kernel = r.vcx.update(|_, cx| page.read(cx).kernel());
+    r.vcx.dispatch_action(PerfSetCpuGraphMode {
+        mode: CpuGraphMode::Apps,
+    });
+    draw(r.vcx);
+    publish_cpu_groups(&r.engine, &[20., 10., 5.]);
+    draw(r.vcx);
+    let saved = r.saved().expect("an entry");
+    assert_eq!(layout_mode(&saved), Some(CpuGraphMode::Apps));
+    assert_eq!(
+        shape(&saved),
+        [
+            "fixed cpu_by_app",
+            "power_draw [chart,value,label]",
+            "temp [chart,value,label]",
+            "clock [chart,value,label]",
+            "fixed details"
+        ]
+    );
+    assert_eq!(
+        r.old_keys(),
+        (CpuGraphMode::PerCore, CpuSecondaryGraph::Power),
+        "the old key stays"
+    );
+    let (mode, label, enabled, kernel_now, demand) = r.vcx.update(|_, cx| {
+        let p = page.read(cx);
+        (
+            p.mode(),
+            p.words().mode(CpuGraphMode::Apps).to_string(),
+            p.kernel_enabled(),
+            p.kernel(),
+            p.demand_part(cx).process_top,
+        )
+    });
+    assert_eq!(mode, Some(CpuGraphMode::Apps));
+    assert_eq!(label, "By app");
+    assert!(!enabled, "the Kernel toggle is disabled");
+    assert_eq!(kernel_now, kernel, "the Kernel toggle keeps its state");
+    assert!(
+        r.try_bounds("TlButton-perf-cpu-kernel".to_owned())
+            .is_some(),
+        "the Kernel toggle still shows"
+    );
+    assert!(demand, "CPU by app asks for the process sweep");
+
+    // The widget draws the page's chart.
+    let container = r.container();
+    let id = r.fixed_id(FixedWidget::CpuByApp);
+    let (chart, content) = r.vcx.update(|_, cx| {
+        let chart = page.read(cx).apps().expect("the chart");
+        let fixed = container.read(cx).fixed(id).cloned().expect("the widget");
+        let content = fixed.read(cx).content().map(|v| v.entity_id());
+        (chart, content)
+    });
+    assert_eq!(content, Some(chart.entity_id()), "the widget draws it");
+    assert!(
+        r.vcx.update(|_, cx| chart.read(cx).bands().len()) >= 4,
+        "three groups and Other apps at least"
+    );
+    let apps = r.bounds(widget_id(PAGE, id));
+    assert!(near(apps.size.height, 300.), "{apps:?}");
+    let row = r.bounds(format!("{LEGEND_ID}-0"));
+    assert!(apps.contains(&row.center()), "{row:?} in {apps:?}");
+    assert!(
+        row.left() > apps.center().x,
+        "the legend is at the right: {row:?} in {apps:?}"
+    );
+    // Power draw 8 px under it, then Details.
+    let power = r.metric_id("power_draw");
+    let power = r.bounds(widget_id(PAGE, power));
+    assert!(near(power.top() - apps.bottom(), 8.), "{power:?}");
+    assert!(near(power.size.height, 120.), "{power:?}");
+    let details = r.fixed_id(FixedWidget::Details);
+    let details = r.bounds(widget_id(PAGE, details));
+    assert!(details.top() > power.bottom(), "{details:?}");
+
+    // Back to Per core: the grid takes the chart's place and the Kernel toggle works again.
+    r.vcx.dispatch_action(PerfSetCpuGraphMode {
+        mode: CpuGraphMode::PerCore,
+    });
+    draw(r.vcx);
+    assert!(
+        r.id_of(|c| *c == WidgetContent::Fixed(FixedWidget::CpuByApp))
+            .is_none()
+    );
+    assert!(r.vcx.update(|_, cx| page.read(cx).kernel_enabled()));
+    assert!(
+        !r.vcx
+            .update(|_, cx| page.read(cx).demand_part(cx).process_top)
+    );
+}
+
+/// Edit Widgets on the CPU page lists "CPU by app" while the page has none; added and applied
+/// it saves, reloads from the saved settings and draws the chart, and a second copy is not
+/// offered (UI-PRF-062 "Edit Widgets", ADR-019 "Fixed widgets").
+#[gpui_kit::test]
+fn page_cpu_by_app_add_widget(cx: &mut TestAppContext) {
+    let mut r = open(cx, PerformanceSettings::default());
+    let page = r.page.clone();
+    let editor = r.vcx.update(|_, cx| page.read(cx).editor().clone());
+    r.vcx
+        .update(|window, cx| editor.update(cx, |e, cx| e.start(window, cx)));
+    draw(r.vcx);
+    let label = r.vcx.update(|_, cx| {
+        editor
+            .read(cx)
+            .fixed_adds(cx)
+            .iter()
+            .find(|a| &*a.name == "cpu_by_app")
+            .map(|a| a.label.to_string())
+    });
+    assert_eq!(label.as_deref(), Some("CPU by app"));
+    let added = r
+        .vcx
+        .update(|_, cx| editor.update(cx, |e, cx| e.add_fixed("cpu_by_app", cx)))
+        .expect("CPU by app added");
+    draw(r.vcx);
+    assert!(
+        !fixed_adds(&mut r, &editor).contains(&"cpu_by_app".to_owned()),
+        "a second copy is not offered"
+    );
+    assert!(
+        r.vcx
+            .update(|_, cx| editor.update(cx, |e, cx| e.add_fixed("cpu_by_app", cx)))
+            .is_none(),
+        "a second copy is not added"
+    );
+    assert!(r.vcx.update(|_, cx| editor.update(cx, |e, cx| e.apply(cx))));
+    draw(r.vcx);
+    let saved = r.saved().expect("the page's entry");
+    assert!(saved.preset.is_none(), "a grid layout");
+    let widget = saved
+        .widgets
+        .iter()
+        .find(|w| w.id == added)
+        .expect("the widget saved");
+    assert_eq!(widget.content, WidgetContent::Fixed(FixedWidget::CpuByApp));
+    assert!(widget.cell.is_some(), "it has its cells");
+    assert!(
+        r.vcx
+            .update(|_, cx| page.read(cx).demand_part(cx).process_top)
+    );
+
+    // Reload: the settings go through JSON and the load's clamp, and the page shows them again.
+    let perf = r
+        .vcx
+        .update(|_, cx| TlSettings::settings(cx).performance.clone());
+    let json = serde_json::to_string(&perf).expect("serialize");
+    let mut reloaded = Settings {
+        performance: serde_json::from_str(&json).expect("deserialize"),
+        ..Settings::default()
+    };
+    reloaded.clamp();
+    let entry = reloaded
+        .performance
+        .layouts
+        .known(PAGE)
+        .cloned()
+        .expect("the entry reloads");
+    assert_eq!(entry, saved, "the same layout after a reload");
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| {
+            d.settings.performance.layouts.remove(PAGE);
+        });
+    });
+    draw(r.vcx);
+    assert!(
+        r.id_of(|c| *c == WidgetContent::Fixed(FixedWidget::CpuByApp))
+            .is_none()
+    );
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| d.settings.performance.layouts.set(entry.clone()));
+    });
+    draw(r.vcx);
+    let container = r.container();
+    let content = r.vcx.update(|_, cx| {
+        let fixed = container.read(cx).fixed(added).cloned()?;
+        fixed.read(cx).content().map(|v| v.entity_id())
+    });
+    let chart = r
+        .vcx
+        .update(|_, cx| page.read(cx).apps().map(|a| a.entity_id()));
+    assert!(
+        chart.is_some() && content == chart,
+        "the reloaded widget draws the chart"
+    );
+    assert!(r.try_bounds(widget_id(PAGE, added)).is_some(), "it draws");
+
+    // In Edit Widgets again it is not offered while the page holds it.
+    r.vcx
+        .update(|window, cx| editor.update(cx, |e, cx| e.start(window, cx)));
+    draw(r.vcx);
+    assert!(!fixed_adds(&mut r, &editor).contains(&"cpu_by_app".to_owned()));
+}
+
+/// Render contract (ADR-019, leader note 2026-11-03 hzire.6): repeated samples with the same
+/// bands never notify the page or its container and make or drop no entity; a sample in which a
+/// group enters the top N notifies only the CPU by app chart, once.
+#[gpui_kit::test]
+fn page_cpu_by_app_render_contract(cx: &mut TestAppContext) {
+    let mut r = open(cx, perf(CpuGraphMode::Apps, CpuSecondaryGraph::Power));
+    let container = r.container();
+    let page = r.page.clone();
+    publish_cpu_groups(&r.engine, &[20., 10., 5.]);
+    draw(r.vcx);
+    let chart: Entity<AppsChart> = r
+        .vcx
+        .update(|_, cx| page.read(cx).apps())
+        .expect("the chart");
+    let bands = |r: &mut Rig| r.vcx.update(|_, cx| chart.read(cx).bands().len());
+    let shown_bands = bands(&mut r);
+    let notified = Rc::new(Cell::new(0u32));
+    let _watch = {
+        let notified = Rc::clone(&notified);
+        r.vcx
+            .update(|_, cx| cx.observe(&chart, move |_, _| notified.set(notified.get() + 1)))
+    };
+    let counts = |r: &mut Rig| {
+        r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            let c = container.read(cx);
+            (p.notify_count.get(), c.notify_count.get())
+        })
+    };
+    let mut life = Lifecycle::new(&mut r);
+    let entities = shown_entities(&mut r, &mut life);
+    let before = counts(&mut r);
+    for _ in 0..3 {
+        publish_cpu_groups(&r.engine, &[20., 10., 5.]);
+        draw(r.vcx);
+    }
+    assert_eq!(
+        counts(&mut r),
+        before,
+        "the page and container never notify"
+    );
+    assert_eq!(life.counts(), (0, 0), "no entity made or dropped");
+    assert_eq!(bands(&mut r), shown_bands, "the same bands");
+
+    // p3 gets CPU: it enters the top N.
+    notified.set(0);
+    publish_cpu_groups(&r.engine, &[20., 10., 5., 4.]);
+    draw(r.vcx);
+    assert_eq!(bands(&mut r), shown_bands + 1, "p3 has its own band");
+    assert_eq!(notified.get(), 1, "the chart notifies once");
+    assert_eq!(
+        counts(&mut r),
+        before,
+        "the page and container never notify"
+    );
+    assert_eq!(life.counts(), (0, 0), "no entity made or dropped");
+    assert_eq!(
+        shown_entities(&mut r, &mut life),
+        entities,
+        "the same entities"
+    );
 }

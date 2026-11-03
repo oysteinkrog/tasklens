@@ -9,8 +9,9 @@
 //! ([`CpuCoreGridView`] as the fixed widget `cpu_core_grid`), the secondary chart (Power draw
 //! with its two fallbacks, Temperature and Clock speed) and the Details widget. The mode button
 //! and "Graph >" pick the page's preset: `overall` (the total chart), `per_core`,
-//! `all_cores_overlaid`, `all_cores_stacked` and `board` (the total chart beside the core board,
-//! [`CpuBoard`] as the fixed widget `cpu_core_board`). "Secondary graph >" replaces the
+//! `all_cores_overlaid`, `all_cores_stacked`, `apps` (CPU by app, [`AppsChart`] in its `Cpu`
+//! kind as the fixed widget `cpu_by_app`, UI-PRF-062) and `board` (the total chart beside the
+//! core board, [`CpuBoard`] as the fixed widget `cpu_core_board`). "Secondary graph >" replaces the
 //! secondary widgets. Edit Widgets adds the total, the kernel time, each core or all cores, the
 //! clock speed, the temperature and the power as chart, bar, value, stats or any mix.
 //!
@@ -53,14 +54,14 @@ use tl_ui_settings::layout_boxes::{
 };
 use tl_ui_settings::layout_pages::{
     METRIC_CLOCK, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED, PRESET_ALL_CORES_OVERLAID,
-    PRESET_ALL_CORES_STACKED, PRESET_BOARD, PRESET_OVERALL, PRESET_PER_CORE, convert_cpu_page,
-    cpu_mode_widgets, cpu_preset, cpu_secondary_widgets, page_container,
+    PRESET_ALL_CORES_STACKED, PRESET_APPS, PRESET_BOARD, PRESET_OVERALL, PRESET_PER_CORE,
+    convert_cpu_page, cpu_mode_widgets, cpu_preset, cpu_secondary_widgets, page_container,
 };
 use tl_ui_settings::settings::{CpuGraphMode, CpuSecondaryGraph, PerformanceSettings};
 
 use super::actions::{
-    PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel, PerfWidgetEditStart,
-    PerfWidgetResetPage,
+    PerfSetCpuByAppTopN, PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel,
+    PerfWidgetEditStart, PerfWidgetResetPage,
 };
 use super::aggregate::{add_demand, page_layout, reset_page, start_page_edit, strings_version};
 pub(crate) use super::core::logical_devices;
@@ -75,6 +76,7 @@ use super::cpu_details::{
 use super::cpu_grid::{CpuCoreGridView, CpuGrid};
 use super::details::KeyValueModel;
 use super::gpu_views::PartResized;
+use super::overview::memory_apps::{AppsChart, AppsMetric, GROUPS_SHOWN};
 use super::page::{
     DevicePage, DevicePageFrame, details_draw, header_text, page_history_request, page_range_ns,
     page_words,
@@ -111,6 +113,7 @@ const KEY_PER_CORE: &str = "perf-cpu-mode-per-core";
 const KEY_OVERLAID: &str = "perf-cpu-mode-overlaid";
 const KEY_STACKED: &str = "perf-cpu-mode-stacked";
 const KEY_BOARD: &str = "perf-cpu-mode-board";
+const KEY_APPS: &str = "perf-cpu-mode-apps";
 const KEY_KERNEL_ON: &str = "perf-cpu-kernel-on";
 const KEY_KERNEL_OFF: &str = "perf-cpu-kernel-off";
 const KEY_TIP_MODE: &str = "perf-cpu-tip-mode";
@@ -131,6 +134,8 @@ const KEY_SECONDARY_TEMP: &str = "perf-cpu-secondary-temp";
 const KEY_SECONDARY_FALLBACK: &str = "perf-cpu-secondary-fallback";
 const KEY_SETUP_POWER: &str = "perf-cpu-setup-power";
 const KEY_NEEDS_SETUP: &str = "perf-tip-needs-setup";
+/// The "Groups shown" submenu of CPU by app; the same word as Memory by app's.
+const KEY_GROUPS_SHOWN: &str = "perf-mem-apps-groups-shown";
 
 /// One entry of the mode menu. `label` and `tooltip` are `en-US.ftl` keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,9 +147,9 @@ pub struct ModeItem {
     pub tooltip: Option<&'static str>,
 }
 
-/// The five mode items in menu order. Overlaid and stacked are disabled until
-/// [`CPU_EXTRA_MODES_ENABLED`].
-pub const fn mode_items() -> [ModeItem; 5] {
+/// The six mode items in menu order, "By app" after "All cores stacked" (UI-PRF-062).
+/// Overlaid and stacked are disabled until [`CPU_EXTRA_MODES_ENABLED`].
+pub const fn mode_items() -> [ModeItem; 6] {
     const fn item(mode: CpuGraphMode, extra: bool) -> ModeItem {
         let enabled = !extra || CPU_EXTRA_MODES_ENABLED;
         ModeItem {
@@ -159,6 +164,7 @@ pub const fn mode_items() -> [ModeItem; 5] {
         item(CpuGraphMode::PerCore, false),
         item(CpuGraphMode::AllCoresOverlaid, true),
         item(CpuGraphMode::AllCoresStacked, true),
+        item(CpuGraphMode::Apps, false),
         item(CpuGraphMode::Board, false),
     ]
 }
@@ -171,8 +177,7 @@ pub const fn mode_key(mode: CpuGraphMode) -> &'static str {
         CpuGraphMode::AllCoresOverlaid => KEY_OVERLAID,
         CpuGraphMode::AllCoresStacked => KEY_STACKED,
         CpuGraphMode::Board => KEY_BOARD,
-        // Stand-in until tasklens-qkvs0.7 adds the "By app" mode item and name.
-        CpuGraphMode::Apps => KEY_PER_CORE,
+        CpuGraphMode::Apps => KEY_APPS,
     }
 }
 
@@ -183,9 +188,8 @@ const fn mode_index(mode: CpuGraphMode) -> usize {
         CpuGraphMode::PerCore => 1,
         CpuGraphMode::AllCoresOverlaid => 2,
         CpuGraphMode::AllCoresStacked => 3,
-        CpuGraphMode::Board => 4,
-        // Stand-in until tasklens-qkvs0.7 adds the "By app" mode item.
-        CpuGraphMode::Apps => 1,
+        CpuGraphMode::Apps => 4,
+        CpuGraphMode::Board => 5,
     }
 }
 
@@ -273,7 +277,7 @@ pub struct Words {
     /// `None` before the first refresh; then the strings version, `None` without strings.
     version: Option<Option<u64>>,
     /// In [`mode_items`] order.
-    pub modes: [SharedString; 5],
+    pub modes: [SharedString; 6],
     pub kernel_on: SharedString,
     pub kernel_off: SharedString,
     pub tip_mode: SharedString,
@@ -289,6 +293,8 @@ pub struct Words {
     pub secondary: [SharedString; 5],
     pub setup_power: SharedString,
     pub needs_setup: SharedString,
+    /// "Groups shown", the CPU by app submenu of the page menu.
+    pub groups_shown: SharedString,
     /// "Power draw is not available. Showing Temperature." and "… Showing Clock speed."
     pub fallback_temp: SharedString,
     pub fallback_clock: SharedString,
@@ -325,6 +331,7 @@ impl Words {
         .map(|c| t(secondary_key(c)));
         self.setup_power = t(KEY_SETUP_POWER);
         self.needs_setup = t(KEY_NEEDS_SETUP);
+        self.groups_shown = t(KEY_GROUPS_SHOWN);
         let fallback = |shown: &SharedString| {
             tr_args(
                 cx,
@@ -354,12 +361,12 @@ impl Words {
     }
 }
 
-/// Adds the five mode radios, `current` checked (none with a grid layout); a mode not yet
+/// Adds the six mode radios, `current` checked (none with a grid layout); a mode not yet
 /// available is a disabled item with its tooltip.
 fn mode_menu(
     mut menu: TlMenu,
     current: Option<CpuGraphMode>,
-    labels: &[SharedString; 5],
+    labels: &[SharedString; 6],
     later: &SharedString,
 ) -> TlMenu {
     for (item, label) in mode_items().into_iter().zip(labels) {
@@ -426,6 +433,7 @@ pub fn preset_mode(id: &str) -> Option<CpuGraphMode> {
         PRESET_ALL_CORES_OVERLAID => CpuGraphMode::AllCoresOverlaid,
         PRESET_ALL_CORES_STACKED => CpuGraphMode::AllCoresStacked,
         PRESET_BOARD => CpuGraphMode::Board,
+        PRESET_APPS => CpuGraphMode::Apps,
         _ => return None,
     })
 }
@@ -440,13 +448,14 @@ fn is_metric(w: &WidgetSetting, metric: &str) -> bool {
     matches!(&w.content, WidgetContent::Metric(s) if s.metric.as_str() == metric)
 }
 
-/// Whether `w` is one of a graph mode's widgets: the grid, the board, the total chart or an
-/// all-cores chart.
+/// Whether `w` is one of a graph mode's widgets: the grid, the board, CPU by app, the total
+/// chart or an all-cores chart.
 fn is_mode_widget(w: &WidgetSetting) -> bool {
     match &w.content {
-        WidgetContent::Fixed(f) => {
-            matches!(f, FixedWidget::CpuCoreGrid | FixedWidget::CpuCoreBoard)
-        }
+        WidgetContent::Fixed(f) => matches!(
+            f,
+            FixedWidget::CpuCoreGrid | FixedWidget::CpuCoreBoard | FixedWidget::CpuByApp
+        ),
         WidgetContent::Metric(_) => [
             METRIC_CPU_TOTAL,
             METRIC_CORES_OVERLAID,
@@ -628,6 +637,22 @@ fn board_of(
     board
 }
 
+/// The CPU by app chart (fixed widget `cpu_by_app`, UI-PRF-062), made the first time a layout
+/// places it.
+type AppsSlot = Rc<RefCell<Option<Entity<AppsChart>>>>;
+
+/// The chart of `slot`, made now when it has none. It is the Memory by app chart in its `Cpu`
+/// kind, as on the Memory page.
+fn apps_of(slot: &AppsSlot, hub: &Entity<SnapshotHub>, cx: &mut App) -> Entity<AppsChart> {
+    if let Some(apps) = &*slot.borrow() {
+        return apps.clone();
+    }
+    let hub = hub.clone();
+    let apps = cx.new(|cx| AppsChart::new(hub, AppsMetric::Cpu, cx));
+    *slot.borrow_mut() = Some(apps.clone());
+    apps
+}
+
 /// The CPU device page.
 pub struct CpuPage {
     key: DeviceKey,
@@ -639,6 +664,8 @@ pub struct CpuPage {
     grid_view: Entity<CpuCoreGridView>,
     /// The core board (fixed widget `cpu_core_board`), once a layout placed it.
     board: BoardSlot,
+    /// CPU by app (fixed widget `cpu_by_app`), once a layout placed it.
+    apps: AppsSlot,
     details: KeyValueModel,
     details_view: Entity<DetailsView>,
     container: Entity<WidgetContainer>,
@@ -737,14 +764,17 @@ impl CpuPage {
             avail: Rc::clone(&avail_cell),
         };
         let board: BoardSlot = Rc::default();
+        let apps: AppsSlot = Rc::default();
         let content: FixedContent = {
             let details: AnyView = details_view.clone().into();
             let grid: AnyView = grid_view.clone().into();
             let (slot, hub, page) = (Rc::clone(&board), hub.clone(), cx.weak_entity());
+            let apps = Rc::clone(&apps);
             Rc::new(move |kind: &FixedWidget, cx: &mut App| match kind {
                 FixedWidget::Details => Some(details.clone()),
                 FixedWidget::CpuCoreGrid => Some(grid.clone()),
                 FixedWidget::CpuCoreBoard => Some(board_of(&slot, &hub, &page, cx).into()),
+                FixedWidget::CpuByApp => Some(apps_of(&apps, &hub, cx).into()),
                 _ => None,
             })
         };
@@ -770,6 +800,7 @@ impl CpuPage {
                     FixedWidget::Details,
                     FixedWidget::CpuCoreGrid,
                     FixedWidget::CpuCoreBoard,
+                    FixedWidget::CpuByApp,
                 ]);
                 e
             })
@@ -804,6 +835,7 @@ impl CpuPage {
             grid,
             grid_view,
             board,
+            apps,
             details,
             details_view,
             container,
@@ -857,11 +889,14 @@ impl CpuPage {
         self.kernel
     }
 
-    /// The kernel toggle does nothing in the all-cores modes (UI-PRF-023).
+    /// The kernel toggle does nothing in the all-cores modes (UI-PRF-023) and in By app
+    /// (UI-PRF-062).
     pub fn kernel_enabled(&self) -> bool {
         !matches!(
             self.mode,
-            Some(CpuGraphMode::AllCoresOverlaid | CpuGraphMode::AllCoresStacked)
+            Some(
+                CpuGraphMode::AllCoresOverlaid | CpuGraphMode::AllCoresStacked | CpuGraphMode::Apps
+            )
         )
     }
 
@@ -877,6 +912,20 @@ impl CpuPage {
     /// The core board, once a layout has placed it.
     pub fn board(&self) -> Option<Entity<CpuBoard>> {
         self.board.borrow().as_ref().map(|(b, _)| b.clone())
+    }
+
+    /// The CPU by app chart, once a layout has placed it.
+    pub fn apps(&self) -> Option<Entity<AppsChart>> {
+        self.apps.borrow().clone()
+    }
+
+    /// Whether the page places a fixed widget of `kind`.
+    fn placed(&self, kind: &FixedWidget, cx: &App) -> bool {
+        let c = self.container.read(cx);
+        let placed = c.placed_ids();
+        c.layout().widgets.iter().any(|w| {
+            placed.contains(&w.id) && matches!(&w.content, WidgetContent::Fixed(k) if k == kind)
+        })
     }
 
     pub fn words(&self) -> &Words {
@@ -1008,11 +1057,12 @@ impl CpuPage {
     /// an all-cores chart, Core clocks or a core widget shows, 10 Hz samples while any CPU chart
     /// shows (the grid, the board, or a CPU or core widget drawn as a chart), in every mode, as
     /// 1.3.0 (R-126, hzire.12), the sensors for the temperature, the device metric history at
-    /// 1 h, 24 h and 7 d, and what the placed widgets read. With the default layout it equals
-    /// 1.3.0's.
+    /// 1 h, 24 h and 7 d, and what the placed widgets read. CPU by app asks for the process
+    /// sweep (`process_top`): the engine sums the groups on each sweep (UI-PRF-062). With the
+    /// default layout it equals 1.3.0's.
     pub fn demand_part(&self, cx: &App) -> Demand {
         let c = self.container.read(cx);
-        let (mut per_core, mut fast, mut sensors) = (false, false, false);
+        let (mut per_core, mut fast, mut sensors, mut apps) = (false, false, false, false);
         for id in c.placed_ids() {
             let Some(w) = c.layout().widgets.iter().find(|w| w.id == id) else {
                 continue;
@@ -1028,6 +1078,7 @@ impl CpuPage {
                     per_core = true;
                     fast = true;
                 }
+                WidgetContent::Fixed(FixedWidget::CpuByApp) => apps = true,
                 WidgetContent::Metric(s) => match SourceKind::of(&s.device) {
                     SourceKind::CpuLogical => per_core = true,
                     SourceKind::Cpu => match s.metric.as_str() {
@@ -1052,6 +1103,7 @@ impl CpuPage {
             },
             cpu_fast: fast,
             sensors,
+            process_top: apps,
             device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
         };
@@ -1395,6 +1447,15 @@ impl CpuPage {
         self.sync_settings(cx);
     }
 
+    /// "Groups shown" of CPU by app: sets `performance.cpu_by_app.top_n`.
+    fn on_groups_shown(&mut self, a: &PerfSetCpuByAppTopN, _: &mut Window, cx: &mut Context<Self>) {
+        if !cx.has_global::<TlSettings>() {
+            return;
+        }
+        AppsMetric::Cpu.set_top_n(a.count, cx);
+        self.sync_settings(cx);
+    }
+
     fn on_toggle_kernel(
         &mut self,
         _: &PerfToggleCpuKernel,
@@ -1511,13 +1572,30 @@ impl DevicePage for CpuPage {
         SmallVec::new()
     }
 
-    /// "Graph >" (the presets, the current one checked from the flow layout), "Secondary graph
-    /// >" with a flow layout only, and "Kernel times" (UI-PRF-023, ADR-019 phase 3).
+    /// "Groups shown" while the page shows CPU by app (UI-PRF-062, as Memory by app on the
+    /// Memory page), "Graph >" (the presets, the current one checked from the flow layout),
+    /// "Secondary graph >" with a flow layout only, and "Kernel times" (UI-PRF-023, ADR-019
+    /// phase 3).
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
         let layout = page_layout(&self.container_id, cx);
         let w = &self.words;
         let mode = layout_mode(&layout);
         let (labels, later) = (w.modes.clone(), w.later.clone());
+        let menu = if self.placed(&FixedWidget::CpuByApp, cx) {
+            let top_n = TlSettings::settings(cx).performance.cpu_by_app.top_n;
+            menu.submenu(w.groups_shown.clone(), window, cx, move |sub, _, _| {
+                GROUPS_SHOWN.iter().fold(sub, |sub, &n| {
+                    sub.radio_item(
+                        n.to_string(),
+                        n == top_n,
+                        Box::new(PerfSetCpuByAppTopN { count: n }),
+                    )
+                })
+            })
+            .separator()
+        } else {
+            menu
+        };
         let mut menu = menu.submenu(w.menu_graph.clone(), window, cx, move |menu, _, _| {
             mode_menu(menu, mode, &labels, &later)
         });
@@ -1607,6 +1685,7 @@ impl Render for CpuPage {
             .on_action(cx.listener(Self::on_set_mode))
             .on_action(cx.listener(Self::on_toggle_kernel))
             .on_action(cx.listener(Self::on_set_secondary))
+            .on_action(cx.listener(Self::on_groups_shown))
             .on_action(cx.listener(Self::on_edit_start))
             .on_action(cx.listener(Self::on_reset_page))
             .child(

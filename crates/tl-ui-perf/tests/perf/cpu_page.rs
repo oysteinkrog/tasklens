@@ -1181,6 +1181,7 @@ mod page {
                 "Per core",
                 "All cores overlaid",
                 "All cores stacked",
+                "By app",
                 "Core board"
             ]
         );
