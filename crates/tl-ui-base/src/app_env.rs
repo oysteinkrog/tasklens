@@ -153,6 +153,11 @@ pub struct AppEnv {
     /// One engine client per enabled `[[hosts]]` entry (ADR-018). `None` for the rescue window
     /// and in tests.
     pub hosts: Option<crate::hosts_api::HostsApi>,
+    /// Makes the next settings write first copy `settings.toml` to
+    /// `settings.toml.pre-layouts-v2`, unless that copy exists. A GPU page calls it before it
+    /// writes its converted layout (ADR-019 phase 3 "Report and backup"). tl-app wires it to
+    /// `Store::keep_pre_layouts_copy`.
+    pub keep_pre_layouts_copy: Arc<dyn Fn()>,
 }
 
 impl Global for AppEnv {}
@@ -188,6 +193,7 @@ impl AppEnv {
             run_history: None,
             engine_link: None,
             hosts: None,
+            keep_pre_layouts_copy: Arc::new(|| {}),
         }
     }
 }

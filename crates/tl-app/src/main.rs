@@ -264,6 +264,7 @@ fn main() -> ExitCode {
     let (request_tx, app_requests) =
         app_requests.unwrap_or_else(|| async_channel::bounded(single_instance::QUEUE));
     let write_store = store.clone();
+    let copy_store = store.clone();
     let env = AppEnv {
         debug,
         config_dir: paths.config_dir.clone(),
@@ -273,6 +274,7 @@ fn main() -> ExitCode {
         pending_crash: None,
         mark_crash_seen: Arc::new(|| {}),
         write_settings_now: Arc::new(move |s| write_store.write_settings_now(s)),
+        keep_pre_layouts_copy: Arc::new(move || copy_store.keep_pre_layouts_copy()),
         set_autostart: Arc::new(|_, _| Ok(())),
         global_shortcut: None,
         import_taskslinger: Arc::new(import_ts::import_file),
