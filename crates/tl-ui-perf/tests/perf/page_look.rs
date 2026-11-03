@@ -4,8 +4,9 @@
 //! Edit Widgets, applies with no change, then enters again, moves one widget and applies. At
 //! each stage it reads what the last frame drew, by debug selector:
 //!
-//! - every placed widget's root is drawn at its placed size and lies in the editor's visible
-//!   area, so a hidden or empty widget fails;
+//! - every placed widget's root is drawn at its placed size and place, inside the container's
+//!   rows, and the container lies in the editor's visible area, so a hidden, empty or misplaced
+//!   widget fails;
 //! - in Edit Widgets the editor draws a frame over each widget, at the widget's bounds;
 //! - a metric widget's look is the parts it drew (name, value, stats, reason, bar, chart and the
 //!   empty-sensor lines), the text of each drawn text part, the fill of a drawn bar and the
@@ -18,7 +19,7 @@
 
 use gpui_kit::{AppContext as _, Bounds, Entity, EntityId, Hsla, Pixels, VisualTestContext, px};
 use tl_ui_chart::chart::ChartView;
-use tl_ui_overview::widget::container::WidgetContainer;
+use tl_ui_overview::widget::container::{WidgetContainer, container_id};
 use tl_ui_overview::widget::edit::{WidgetEditor, editor_id, frame_id};
 use tl_ui_overview::widget::metric_widget::{MetricWidget, part_id, widget_id};
 use tl_ui_settings::layout::WidgetContent;
@@ -160,20 +161,41 @@ fn metric_look(vcx: &mut VisualTestContext, cid: &str, w: &Entity<MetricWidget>)
 }
 
 /// The look of every placed widget of `container`, by id, read from the last frame. Checks on
-/// the way that each widget is drawn at its placed size inside the editor's visible area, and,
-/// in Edit Widgets, under a frame of the editor at its bounds.
+/// the way that the container is drawn in the editor's visible area, that each widget is drawn
+/// at its placed size and place inside the container's rows (a page body taller than the area
+/// scrolls), and, in Edit Widgets, under a frame of the editor at its bounds.
 pub fn looks(
     vcx: &mut VisualTestContext,
     container: &Entity<WidgetContainer>,
     editor: &Entity<WidgetEditor>,
     stage: &str,
 ) -> Vec<(u32, Look)> {
-    let (cid, placed) = vcx.update(|_, cx| {
-        let c = container.read(cx);
-        (c.id().to_string(), c.placement().widgets.clone())
-    });
     let editing = vcx.read_entity(editor, |e, _| e.is_editing());
+    let (cid, placed, content_h, scroll) = vcx.update(|_, cx| {
+        let c = container.read(cx);
+        // In Edit Widgets the editor's body scrolls the whole container; outside it the
+        // container's own body scrolls its rows.
+        let scroll = if editing { px(0.) } else { c.scroll_offset() };
+        (
+            c.id().to_string(),
+            c.placement().widgets.clone(),
+            c.placement().content_h,
+            scroll,
+        )
+    });
     let area = drawn(vcx, editor_id(&cid)).unwrap_or_else(|| panic!("{stage}: the editor draws"));
+    let body =
+        drawn(vcx, container_id(&cid)).unwrap_or_else(|| panic!("{stage}: the container draws"));
+    // The container starts in the editor's visible area and is no wider; a page body taller
+    // than the area scrolls, so a widget below the fold is reached by the scroll.
+    assert!(
+        inside(
+            Bounds::new(body.origin, gpui_kit::size(body.size.width, px(0.))),
+            area
+        ),
+        "{stage}: the container {body:?} lies in the visible area {area:?}"
+    );
+    let extent = f32::from(body.size.height).max(f32::from(content_h));
     let mut out = Vec::new();
     for p in placed {
         let id = p.id;
@@ -189,9 +211,22 @@ pub fn looks(
                 p.bounds
             );
         }
+        // Drawn where it is placed in the container, and inside the rows the body scrolls over.
+        let (dx, dy) = (
+            f32::from(root.origin.x - body.origin.x),
+            f32::from(root.origin.y - body.origin.y + scroll),
+        );
         assert!(
-            inside(root, area),
-            "{stage}: widget {id} at {root:?} lies in the visible area {area:?}"
+            (dx - f32::from(p.bounds.origin.x)).abs() <= SLACK
+                && (dy - f32::from(p.bounds.origin.y)).abs() <= SLACK,
+            "{stage}: widget {id} is drawn at {root:?} in the container at {body:?}, placed at {:?}",
+            p.bounds
+        );
+        assert!(
+            f32::from(p.bounds.right()) <= f32::from(body.size.width) + SLACK
+                && f32::from(p.bounds.bottom()) <= extent + SLACK,
+            "{stage}: widget {id} placed at {:?} lies in the container's rows ({body:?}, {extent} px tall)",
+            p.bounds
         );
         if editing {
             let frame = drawn(vcx, frame_id(&cid, id))
@@ -285,10 +320,29 @@ pub fn sweep(
 ) {
     draw(vcx);
     let flow = looks(vcx, container, editor, &format!("{page} flow"));
+    // Every widget draws something, so a sweep that compares empty looks cannot pass.
+    for (id, look) in &flow {
+        let draws = match look {
+            Look::Metric(m) => !m.parts.is_empty(),
+            Look::Group { members, lines, .. } => !members.is_empty() || !lines.is_empty(),
+            Look::Fixed { content, lines } => content.is_some() || !lines.is_empty(),
+        };
+        assert!(draws, "{page}: widget {id} draws a part: {look:?}");
+    }
+    let metrics = || {
+        flow.iter().flat_map(|(_, l)| match l {
+            Look::Metric(m) => vec![m],
+            Look::Group { members, .. } => members.iter().collect(),
+            Look::Fixed { .. } => Vec::new(),
+        })
+    };
     assert!(
-        flow.iter()
-            .any(|(_, l)| matches!(l, Look::Metric(m) if !m.parts.is_empty())),
-        "{page}: the page draws a metric widget: {flow:?}"
+        metrics().any(|m| m.chart.as_ref().is_some_and(|c| !c.lines.is_empty())),
+        "{page}: the page draws a chart: {flow:?}"
+    );
+    assert!(
+        metrics().any(|m| m.texts.iter().any(|(_, t)| !t.is_empty())),
+        "{page}: the page draws a text: {flow:?}"
     );
     let compare = |after: &[(u32, Look)], stage: &str| {
         let ids = |l: &[(u32, Look)]| l.iter().map(|(id, _)| *id).collect::<Vec<_>>();
