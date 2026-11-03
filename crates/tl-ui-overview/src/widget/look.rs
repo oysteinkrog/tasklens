@@ -21,7 +21,8 @@
 //! heading, the legend, and the range text under the plot. A metric that has a 1.3.0 page chart
 //! keeps that chart's heading, range word and legend (a disk's Active time and Transfer rate,
 //! a GPU's Memory, Temperature, Power and Clocks, the CPU page's Utilization charts and its
-//! secondary charts, the Memory page's Physical memory, Commit and Swap charts). On a page a
+//! secondary charts, the Memory page's Physical memory, Commit and Swap charts, an adapter's
+//! Throughput chart with its dashed upload line). On a page a
 //! Memory chart draws in the memory colour, as the 1.3.0 Memory page does; the Memory box's row
 //! colours stay in the box.
 //!
@@ -36,7 +37,7 @@ use tl_ui_settings::layout::{FormSet, METRIC_POWER, METRIC_TEMP, WidgetOptions};
 use tl_ui_settings::layout_boxes::{
     DeviceKind, METRIC_CORE_CLOCKS, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO,
     METRIC_MEM_AVAILABLE, METRIC_MEM_CACHED, METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION,
-    METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_TX, METRIC_POWER_DRAW,
+    METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_TRAFFIC, METRIC_NET_TX, METRIC_POWER_DRAW,
 };
 use tl_ui_settings::layout_pages::{
     METRIC_CLOCK, METRIC_COMMIT_PCT, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED,
@@ -53,7 +54,9 @@ use tl_ui_base::theme::TlTheme;
 use tl_ui_base::theme::derived::blend_over;
 use tl_ui_chart::chart::{ChartLabels, ChartSeries, LegendStyle, ValueAlign, ValueFormat};
 use tl_ui_perf_core::core::core_clocks::clock_series;
-use tl_ui_perf_core::core::look::{DIRTY_ALPHA, OVERLAID_MIN_ALPHA, STACKED_ALPHAS};
+use tl_ui_perf_core::core::look::{
+    DIRTY_ALPHA, NET_UPLOAD_ALPHA, OVERLAID_MIN_ALPHA, STACKED_ALPHAS,
+};
 
 /// The CPU box's range word and legend (`cpu_box::total_labels`).
 const KEY_CPU_RANGE: &str = "perf-cpu-heading-utilization";
@@ -90,6 +93,10 @@ const KEY_MEM_COMMITTED: &str = "perf-mem-legend-committed";
 const KEY_MEM_COMMIT: &str = "perf-mem-heading-commit";
 const KEY_MEM_SWAP: &str = "perf-mem-heading-swap";
 const KEY_MEM_SWAP_RANGE: &str = "perf-mem-range-swap";
+/// The Network page chart's legend (`net::throughput_labels` of 1.3.0); its heading and range
+/// word are [`KEY_NET_RANGE`].
+const KEY_NET_DOWNLOAD: &str = "perf-net-legend-download";
+const KEY_NET_UPLOAD: &str = "perf-net-legend-upload";
 
 /// What a page style Cell's chart shows besides the plot: the widget's name, which of the name
 /// and the value its forms keep, and whether the value is the sum of the chart's lines.
@@ -226,6 +233,22 @@ impl ChartLook {
         }
     }
 
+    /// The 1.3.0 Network page's upload line: `net_line` at [`NET_UPLOAD_ALPHA`], dashed, no
+    /// fill (UI-PRF-031).
+    fn page_upload(&self, id: SeriesId, theme: &TlTheme) -> ChartSeries {
+        let line = theme.graph.net_line;
+        ChartSeries {
+            id,
+            minus: self.minus_of(id),
+            line: Hsla {
+                a: line.a * NET_UPLOAD_ALPHA,
+                ..line
+            },
+            dashed: true,
+            ..ChartSeries::default()
+        }
+    }
+
     /// The chart's series, and whether they stack.
     pub fn series(&self, theme: &TlTheme) -> (SmallVec<[ChartSeries; 4]>, bool) {
         let accent = if self.page && self.kind == DeviceKind::Memory {
@@ -264,7 +287,9 @@ impl ChartLook {
             Lines::Pair { second_dashed } => {
                 let mut out: SmallVec<[ChartSeries; 4]> = smallvec![self.line(first, accent, true)];
                 if let Some(&second) = self.series.get(1) {
-                    out.push(if self.is_net() {
+                    out.push(if self.is_net() && self.page {
+                        self.page_upload(second, theme)
+                    } else if self.is_net() {
                         self.upload(second, theme)
                     } else {
                         ChartSeries {
@@ -418,6 +443,7 @@ impl ChartLook {
         let gpu = self.kind == DeviceKind::Gpu;
         let cpu = self.kind == DeviceKind::Cpu;
         let mem = self.kind == DeviceKind::Memory;
+        let net = self.kind == DeviceKind::Net;
         let heading = match &*self.metric {
             // The 1.3.0 CPU page's Overall chart: Utilization, Total and Kernel, no axis text.
             METRIC_CPU_TOTAL if cpu => {
@@ -511,6 +537,18 @@ impl ChartLook {
                 ];
                 labels.show_axis_max = true;
                 tr(cx, KEY_DISK_TRANSFER)
+            }
+            // The 1.3.0 Network page's Throughput chart (UI-PRF-031): Download and Upload, the
+            // axis text shown.
+            METRIC_NET_TRAFFIC if net => {
+                let word = tr(cx, KEY_NET_RANGE);
+                labels.range_word = word.clone();
+                labels.legend = smallvec![
+                    (tr(cx, KEY_NET_DOWNLOAD), LegendStyle::Solid),
+                    (tr(cx, KEY_NET_UPLOAD), LegendStyle::Dashed),
+                ];
+                labels.show_axis_max = true;
+                word
             }
             _ => {
                 if labels.range_word.is_empty() {

@@ -9,3 +9,6 @@ pub const STACKED_ALPHAS: [f32; 2] = [0.85, 0.70];
 
 /// Alpha of the dirty-bytes line against `mem_line`.
 pub const DIRTY_ALPHA: f32 = 0.6;
+
+/// Alpha of the Network page's dashed upload line against `net_line` (UI-PRF-031).
+pub const NET_UPLOAD_ALPHA: f32 = 0.7;
