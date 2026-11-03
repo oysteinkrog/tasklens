@@ -28,6 +28,7 @@ fn env_with(xdg: Option<&str>) -> impl Fn(&str) -> Option<std::ffi::OsString> {
 
 #[test]
 fn render_unit_replaces_placeholders() {
+    captured_logs();
     let text = lowmem_unit::render_unit(std::path::Path::new("/usr/bin/tasklens-watch"), -900);
     assert!(
         text.lines()
@@ -41,6 +42,7 @@ fn render_unit_replaces_placeholders() {
 
 #[test]
 fn render_unit_quotes_spaces() {
+    captured_logs();
     let text = lowmem_unit::render_unit(
         std::path::Path::new("/home/u/my builds/tasklens-watch"),
         -900,
@@ -67,6 +69,7 @@ fn render_unit_quotes_spaces() {
 
 #[test]
 fn unit_path_xdg_fallback() {
+    captured_logs();
     let expected = std::path::PathBuf::from("/home/u/.config/systemd/user/tasklens-lowmem.service");
     for xdg in [None, Some(""), Some("relative/path")] {
         assert_eq!(
@@ -84,6 +87,7 @@ fn unit_path_xdg_fallback() {
 
 #[test]
 fn unit_file_write_and_remove_in_scratch_dir() {
+    captured_logs();
     use std::os::unix::fs::PermissionsExt;
     let scratch = tempfile::tempdir().unwrap();
     let path = scratch
@@ -119,6 +123,7 @@ fn unit_file_write_and_remove_in_scratch_dir() {
 #[ignore = "changes the user's real systemd session"]
 #[allow(clippy::print_stdout, reason = "prints the U-24 result for the owner")]
 fn real_install_enable_remove() {
+    captured_logs();
     let installed = lowmem_unit::install_and_enable().expect("install_and_enable");
     println!(
         "U-24: accepted OOMScoreAdjust={}",
@@ -149,6 +154,7 @@ fn real_install_enable_remove() {
 #[test]
 #[ignore = "needs a session bus and a built tasklens-watch; starts the real binary"]
 fn watch_memory_no_single_instance() {
+    captured_logs();
     use zbus::fdo::{RequestNameFlags, RequestNameReply};
     let conn = zbus::blocking::Connection::session().expect("session bus");
     let reply = conn
@@ -331,6 +337,7 @@ impl io::Write for Captured {
 
 #[test]
 fn wrap_persist_installs_on_enable() {
+    captured_logs();
     let (fake, persist) = wrap(false, false, installed_ok);
     persist(&with_lowmem(true), &UiState::default());
     // One save from the callback, one from the worker after the install.
@@ -344,6 +351,7 @@ fn wrap_persist_installs_on_enable() {
 
 #[test]
 fn wrap_persist_no_op_on_same_value() {
+    captured_logs();
     let (fake, persist) = wrap(true, true, installed_ok);
     persist(&with_lowmem(true), &UiState::default());
     persist(&with_lowmem(true), &UiState::default());
@@ -355,6 +363,7 @@ fn wrap_persist_no_op_on_same_value() {
 
 #[test]
 fn wrap_persist_removes_on_disable() {
+    captured_logs();
     let (fake, persist) = wrap(true, true, installed_ok);
     persist(&with_lowmem(false), &UiState::default());
     wait_idle(&fake, 2);
@@ -365,6 +374,7 @@ fn wrap_persist_removes_on_disable() {
 
 #[test]
 fn wrap_persist_coalesces_while_busy() {
+    captured_logs();
     let (fake, persist) = wrap(false, false, installed_ok);
     *fake.hold.lock().unwrap() = true;
     persist(&with_lowmem(true), &UiState::default());
@@ -377,9 +387,10 @@ fn wrap_persist_coalesces_while_busy() {
     assert_eq!(fake.saved.lock().unwrap().len(), 4);
 }
 
-/// One capturing subscriber for the whole test binary. A per-test `with_default` subscriber is
-/// flaky here: tests run in parallel, and a callsite first hit on a thread without a subscriber
-/// can cache "never" for the thread that has one.
+/// One capturing subscriber for the whole test binary. Every test calls this first, so the
+/// global subscriber is set before any tracing callsite registers. A callsite that registers while
+/// no global subscriber exists, or while `set_global_default` runs, can cache "never" and drop its
+/// lines for the whole run.
 fn captured_logs() -> &'static Captured {
     static LOGS: std::sync::OnceLock<Captured> = std::sync::OnceLock::new();
     LOGS.get_or_init(|| {
@@ -413,6 +424,7 @@ fn wrap_persist_inner_called_on_failure() {
 
 #[test]
 fn failure_reverts_setting_and_notifies() {
+    captured_logs();
     let (fake, persist) = wrap(false, false, install_fails);
     persist(&with_lowmem(true), &UiState::default());
     wait_idle(&fake, 2);
@@ -434,6 +446,7 @@ fn failure_reverts_setting_and_notifies() {
 /// reverted value, which starts no second install.
 #[test]
 fn failed_install_reverts_ui_without_second_install() {
+    captured_logs();
     let (fake, persist) = wrap(false, false, install_fails);
     persist(&with_lowmem(true), &UiState::default());
     fake.wait_for(|f| !f.reverts.lock().expect("lock").is_empty());
@@ -450,6 +463,7 @@ fn failed_install_reverts_ui_without_second_install() {
 /// A failed remove asks tl-ui to show the switch on again.
 #[test]
 fn failed_remove_reverts_ui_to_on() {
+    captured_logs();
     let fake = Arc::new(Fake::default());
     let f1 = fake.clone();
     let f2 = fake.clone();
@@ -476,6 +490,7 @@ fn failed_remove_reverts_ui_to_on() {
 
 #[test]
 fn oom_score_adjust_written_to_state() {
+    captured_logs();
     let (fake, persist) = wrap(false, false, installed_fallback);
     persist(&with_lowmem(true), &UiState::default());
     wait_idle(&fake, 2);
@@ -490,6 +505,7 @@ fn oom_score_adjust_written_to_state() {
 
 #[test]
 fn startup_reinstalls_missing_unit() {
+    captured_logs();
     let (fake, _persist) = wrap(true, false, installed_ok);
     fake.wait_for(|f| f.installs() == 1);
     std::thread::sleep(Duration::from_millis(50));
