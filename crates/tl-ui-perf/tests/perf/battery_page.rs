@@ -10,8 +10,9 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
-use tl_model::ids::{DeviceIdx, MetricId};
-use tl_model::snapshot::{BatteryDetails, DeviceDetailsSnapshot, InvField};
+use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::series::{Sample, SeriesView};
+use tl_model::snapshot::{BatteryDetails, DeviceDetailsSnapshot, InvField, SeriesSet};
 use tl_model::validity::Validity;
 use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::app_env::{BootSettings, EngineGlobal};
@@ -58,7 +59,7 @@ fn text(s: &str) -> InvField<Arc<str>> {
     valid(Arc::from(s))
 }
 
-fn record(kind: &str, power_supply: bool, state: &str) -> BatteryDetails {
+pub(super) fn record(kind: &str, power_supply: bool, state: &str) -> BatteryDetails {
     BatteryDetails {
         kind: Arc::from(kind),
         vendor: text("Logitech"),
@@ -100,6 +101,28 @@ fn publish(engine: &FakeEngine, b: BatteryDetails) {
         d.header.version += 1;
         d.batteries = Arc::from(vec![(BAT, b)]);
         s.device_details = Arc::new(d);
+        // The battery's charge and power series, which the page's chart widgets draw.
+        let view = |metric: MetricId, v: f32| {
+            Arc::new(SeriesView {
+                id: SeriesId {
+                    device: BAT,
+                    metric,
+                },
+                version: 1,
+                period_ns: 1_000_000_000,
+                samples: Arc::from([Sample::valid(1_000_000_000, v)]),
+            })
+        };
+        let mut series = vec![
+            view(MetricId::BATTERY_PCT, 80.),
+            view(MetricId::BATTERY_POWER, -5.),
+        ];
+        series.sort_by_key(|v| v.id);
+        s.series = Arc::new(SeriesSet {
+            header: s.series.header,
+            series: Arc::from(series),
+            slow: Arc::from([]),
+        });
     });
 }
 
@@ -220,7 +243,8 @@ fn battery_graph_kind_by_type(cx: &mut TestAppContext) {
     r.vcx.update(|_, cx| {
         let p = r.page.read(cx);
         assert!(p.is_system());
-        let c = p.chart().read(cx);
+        let c = p.chart(cx).expect("the chart");
+        let c = c.read(cx);
         assert_eq!(c.labels.heading.as_deref(), Some("Power"));
         assert_eq!(c.labels.value_fmt, ValueFormat::Watts);
         assert_eq!(c.labels.range_word.as_ref(), "Power draw");
@@ -236,7 +260,8 @@ fn battery_graph_kind_by_type(cx: &mut TestAppContext) {
     r.vcx.update(|_, cx| {
         let p = r.page.read(cx);
         assert!(!p.is_system());
-        let c = p.chart().read(cx);
+        let c = p.chart(cx).expect("the chart");
+        let c = c.read(cx);
         assert_eq!(c.labels.heading.as_deref(), Some("Percentage"));
         assert_eq!(c.labels.value_fmt, ValueFormat::Percent);
         assert_eq!(c.labels.range_word.as_ref(), "Percentage");
@@ -324,7 +349,8 @@ fn battery_details_rows(cx: &mut TestAppContext) {
 fn battery_symmetric_fill_below_zero(cx: &mut TestAppContext) {
     let r = open(cx, record("Battery", true, "Discharging"));
     r.vcx.update(|_, cx| {
-        let c = r.page.read(cx).chart().read(cx);
+        let c = r.page.read(cx).chart(cx).expect("the chart");
+        let c = c.read(cx);
         assert_eq!(c.spec.y, YScale::Symmetric);
         assert!(c.spec.series[0].fill.is_some(), "filled");
     });

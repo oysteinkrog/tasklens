@@ -44,10 +44,11 @@ use super::aggregate::{add_demand, page_layout, reset_page, start_page_edit, str
 use super::core::sensors::fan_key_parts;
 pub use super::core::sensors::{SensorRef, default_sensor, sensor_device};
 use super::details::{Fallback, KeyValueModel};
+use super::gpu_views::PartResized;
+use super::memory_views::{MemoryPartView, PartDraw, PartShown};
 use super::page::details_draw;
 use super::page::{
-    DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_history_request, page_range_ns,
-    page_words,
+    DevicePage, DevicePageFrame, header_text, page_history_request, page_range_ns, page_words,
 };
 use super::page_flow;
 use super::widget::container::WidgetContainer;
@@ -77,19 +78,10 @@ use tl_ui_chart::chart::{
 use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
 use tl_ui_kit::components::menu::TlMenu;
 use tl_ui_settings::layout::FixedWidget;
-use tl_ui_settings::layout::METRIC_TEMP;
-use tl_ui_settings::layout_pages::{METRIC_SPEED, page_container};
-
-/// Debug selector of the Battery chart box.
-pub const BATTERY_CHART_ID: &str = "perf-battery-chart";
-/// Debug selector of the Battery charge history chart box.
-pub const BATTERY_HISTORY_ID: &str = "perf-battery-history";
-/// Debug selector of the first day label under the history chart.
-pub const BATTERY_DAY_LABEL_ID: &str = "perf-battery-day-label";
+use tl_ui_settings::layout::{METRIC_POWER, METRIC_TEMP};
+use tl_ui_settings::layout_pages::{METRIC_PERCENT, METRIC_SPEED, page_container};
 
 const NS_PER_S: u64 = 1_000_000_000;
-/// Fill alpha of a type that has one colour (UI-PRF-005 table note).
-const FILL_ALPHA: f32 = 0.85;
 
 pub const ROW_SPEED: &str = "perf-fan-row-speed";
 pub const ROW_PWM: &str = "perf-fan-row-pwm";
@@ -103,9 +95,6 @@ pub const FAN_DETAIL_ROWS: [&str; 5] = [ROW_SPEED, ROW_PWM, ROW_MODE, ROW_TEMPER
 /// The battery colour name (UI-PRF-005: "Mint").
 const BAT_COLOR: &str = "mint";
 
-const BAT_KEY_POWER: &str = "perf-bat-heading-power";
-const BAT_KEY_PERCENTAGE: &str = "perf-bat-heading-percentage";
-const BAT_KEY_RANGE_POWER: &str = "perf-bat-range-power";
 const BAT_KEY_HEADING_DAY: &str = "perf-bat-heading-day";
 /// Monday first, the order of `Weekday::to_monday_zero_offset`.
 const DAY_KEYS: [&str; 7] = [
@@ -218,7 +207,6 @@ fn choose_sensor(snap: &Snapshot, fan_key: &str, saved: Option<&str>) -> Option<
 struct PageSettings {
     /// The shared range the Fan and Battery charts draw.
     range_ns: u64,
-    smooth: bool,
     rounded: bool,
     /// `[fans]` entry of this fan.
     label: Option<String>,
@@ -231,7 +219,6 @@ impl PageSettings {
         let fan = s.fans.get(&*key.0);
         Self {
             range_ns: page_range_ns(cx),
-            smooth: s.motion.smooth_graphs,
             rounded: s.appearance.rounded_corners,
             label: fan
                 .and_then(|f| f.label.clone())
@@ -268,18 +255,12 @@ fn series(device: DeviceIdx, metric: MetricId) -> SeriesId {
 
 /// The chart settings of one spec, copied out of [`PageSettings`].
 pub struct PageSettingsView {
-    range_ns: u64,
-    smooth: bool,
     grid: GridStyle,
 }
 
 impl PageSettingsView {
     fn of(s: &PageSettings) -> Self {
-        Self {
-            range_ns: s.range_ns,
-            smooth: s.smooth,
-            grid: plot_grid(s),
-        }
+        Self { grid: plot_grid(s) }
     }
 }
 
@@ -1033,43 +1014,6 @@ fn battery_line(theme: &TlTheme) -> gpui_kit::Hsla {
     accent_color(BAT_COLOR).unwrap_or(theme.graph.gpu_line)
 }
 
-/// The battery chart (UI-PRF-035). A system battery draws its signed power: charge above the
-/// zero line, discharge below. Any other device draws its charge percentage.
-pub fn battery_spec(
-    device: DeviceIdx,
-    system: bool,
-    s: &PageSettingsView,
-    theme: &TlTheme,
-) -> ChartSpec {
-    let line = battery_line(theme);
-    let (metric, y) = if system {
-        (MetricId::BATTERY_POWER, YScale::Symmetric)
-    } else {
-        (
-            MetricId::BATTERY_PCT,
-            YScale::Fixed {
-                min: 0.0,
-                max: 100.0,
-            },
-        )
-    };
-    ChartSpec {
-        series: smallvec![ChartSeries {
-            id: series(device, metric),
-            fill: Some(line.opacity(FILL_ALPHA)),
-            line,
-            ..ChartSeries::default()
-        }],
-        y,
-        range_ns: s.range_ns,
-        smooth: s.smooth,
-        grid: s.grid.clone(),
-        background: ChartBg::Window,
-        hover: true,
-        ..ChartSpec::default()
-    }
-}
-
 /// The history series of a system battery. Sample times are unix nanoseconds, so the chart
 /// (frozen, right edge at its newest sample) needs no boot-time offset. Only the past 24 hours up
 /// to `now_s` are kept, at most 500 points. A point more than an hour after the one before it
@@ -1184,9 +1128,6 @@ fn history_labels(words: &BatWords) -> ChartLabels {
 #[derive(Clone, Debug, Default)]
 struct BatWords {
     version: Option<Option<u64>>,
-    power: SharedString,
-    percentage: SharedString,
-    range_power: SharedString,
     heading_day: SharedString,
     days: [SharedString; 7],
 }
@@ -1202,34 +1143,9 @@ impl BatWords {
             return false;
         }
         self.version = version;
-        self.power = tr(cx, BAT_KEY_POWER);
-        self.percentage = tr(cx, BAT_KEY_PERCENTAGE);
-        self.range_power = tr(cx, BAT_KEY_RANGE_POWER);
         self.heading_day = tr(cx, BAT_KEY_HEADING_DAY);
         self.days = DAY_KEYS.map(|k| tr(cx, k));
         true
-    }
-}
-
-fn battery_labels(system: bool, words: &BatWords) -> ChartLabels {
-    if system {
-        ChartLabels {
-            heading: Some(words.power.clone()),
-            value_fmt: ValueFormat::Watts,
-            value_align: ValueAlign::Right,
-            range_word: words.range_power.clone(),
-            legend: SmallVec::new(),
-            show_axis_max: true,
-        }
-    } else {
-        ChartLabels {
-            heading: Some(words.percentage.clone()),
-            value_fmt: ValueFormat::Percent,
-            value_align: ValueAlign::Right,
-            range_word: words.percentage.clone(),
-            legend: SmallVec::new(),
-            show_axis_max: false,
-        }
     }
 }
 
@@ -1514,12 +1430,40 @@ fn battery_of(snap: &Snapshot, device: DeviceIdx) -> Option<&BatteryDetails> {
         .map(|(_, b)| b)
 }
 
-/// The Battery device page: one chart (Power for a system battery, Percentage for any other
-/// UPower device) and the Details rows.
+/// The part name of the battery history view (`memory_views::part_id`).
+const PART_HISTORY: &str = "battery-history";
+
+/// The debug selector of the history chart box of container `container`.
+pub fn history_chart_id(container: &str) -> String {
+    format!("perf-page-{container}-battery-history")
+}
+
+/// The debug selector of the first day label under the history chart of container `container`.
+pub fn history_day_label_id(container: &str) -> String {
+    format!("perf-page-{container}-battery-day-label")
+}
+
+/// The Battery device page. Its body is one widget container (ADR-019 phase 3,
+/// `tasklens-hzire.9`): by default the Power chart of a system battery or the Percentage chart
+/// of any other UPower device, the 24-hour charge history of a system battery with at least 2
+/// points, and the Details widget, in the 1.3.0 places (`page_flow::sensors`). The page keeps the
+/// header, the history fetch and the Details model.
+///
+/// Render contract: the page renders on a header change, a range change and a layout change,
+/// never because of a sample. A Details value change notifies only the `DetailsView`; a new
+/// history notifies only the history view.
 pub struct BatteryPage {
     key: DeviceKey,
     row: DeviceRow,
-    chart: Entity<ChartView>,
+    /// The container id, `page.bat:...`.
+    container_id: SharedString,
+    details: KeyValueModel,
+    details_view: Entity<DetailsView>,
+    history_view: Entity<MemoryPartView>,
+    container: Entity<WidgetContainer>,
+    editor: Entity<WidgetEditor>,
+    /// What the page's flow placer reads.
+    parts: page_flow::sensors::BatteryParts,
     /// The 24-hour charge history of a system battery with at least 2 points (PERF-079).
     history: Option<Entity<ChartView>>,
     /// The history record the chart was built from, to tell a new one by `Arc::ptr_eq`.
@@ -1533,8 +1477,7 @@ pub struct BatteryPage {
     /// Asks for the history again every 10 minutes while the page is active.
     refresh: Option<Task<()>>,
     this: WeakEntity<Self>,
-    details: KeyValueModel,
-    /// The device powers the system (`PowerSupply`), so the chart shows power.
+    /// The device powers the system (`PowerSupply`), so the page shows power.
     is_system: bool,
     focus: FocusHandle,
     hub: Entity<SnapshotHub>,
@@ -1549,9 +1492,11 @@ pub struct BatteryPage {
     words: BatWords,
     /// The host this page shows. Set when it opens; never changes.
     host: HostContext,
-    _subs: SmallVec<[Subscription; 3]>,
+    _subs: SmallVec<[Subscription; 8]>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub notify_count: Cell<u32>,
 }
 
 impl BatteryPage {
@@ -1563,25 +1508,83 @@ impl BatteryPage {
         demand: Entity<DemandAggregator>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let theme = current(cx).clone();
         let settings = PageSettings::read(&key, cx);
         let snap = Arc::clone(hub.read(cx).current());
+        let container_id = SharedString::from(page_container(&key.0));
         let mut words = BatWords::default();
         words.refresh(cx);
         let is_system = battery_of(&snap, row.idx).is_some_and(|b| b.power_supply);
-        let view = PageSettingsView::of(&settings);
-        let spec = battery_spec(row.idx, is_system, &view, &theme);
-        let labels = battery_labels(is_system, &words);
-        let chart = cx.new(|cx| {
-            ChartView::new(spec, labels, &hub, cx)
-                .with_newest_marks()
-                .with_device_history(&snap)
-        });
+        let this = cx.weak_entity();
+
+        let mut details = battery_details_model();
+        details.refresh_strings(cx);
+        let details_view = {
+            let shown = DetailsShown::of(&details, strings_version(cx));
+            let draw = details_draw(this.clone());
+            let id = container_id.clone();
+            cx.new(|_| DetailsView::new(id, shown, draw))
+        };
+        let history_view = {
+            let id = container_id.clone();
+            let draw = history_draw(this.clone());
+            cx.new(move |_| MemoryPartView::new(id, PART_HISTORY, PartShown::default(), draw))
+        };
+        let parts = page_flow::sensors::BatteryParts {
+            details: details_view.read(cx).natural_height(),
+            history: history_view.read(cx).natural_height(),
+            history_shown: Rc::new(Cell::new(false)),
+            system: Rc::new(Cell::new(is_system)),
+        };
+        let content: FixedContent = {
+            let details: AnyView = details_view.clone().into();
+            let history: AnyView = history_view.clone().into();
+            let shown = Rc::clone(&parts.history_shown);
+            // A history 1.3.0 hides shows "Nothing to show on this device" in a grid layout.
+            Rc::new(move |kind: &FixedWidget, _: &mut App| match kind {
+                FixedWidget::Details => Some(details.clone()),
+                FixedWidget::BatteryHistory => shown.get().then(|| history.clone()),
+                _ => None,
+            })
+        };
+        let container = {
+            let store = Rc::new(RefCell::new(SourceStore::for_page(&hub)));
+            let layout = page_layout(&container_id, cx);
+            let id = container_id.clone();
+            let hub = hub.clone();
+            let flow = page_flow::sensors::battery_flow(parts.clone());
+            cx.new(move |cx| {
+                let mut c = WidgetContainer::new(id, layout, &hub, store, cx);
+                c.set_flow_placer(Some(flow), cx);
+                c.set_fixed_content(Some(content), cx);
+                c
+            })
+        };
+        let editor = {
+            let container = container.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| {
+                let mut e = WidgetEditor::new(container, &hub, cx);
+                e.set_page_parts(battery_page_parts(false));
+                e
+            })
+        };
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
         subs.push(cx.observe_global::<tl_ui_base::theme::UiMetrics>(Self::sync_style));
+        subs.push(cx.observe_global::<Strings>(Self::sync_words));
+        // A part got taller or shorter: the parts under it move.
+        subs.push(
+            cx.subscribe(&details_view, |this, _, _: &DetailsResized, cx| {
+                this.place_again(cx);
+            }),
+        );
+        subs.push(cx.subscribe(&history_view, |this, _, _: &PartResized, cx| {
+            this.place_again(cx);
+        }));
+        // A layout change can change what the page asks for.
+        subs.push(cx.observe(&container, |this, _, cx| this.send_demand(cx)));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -1590,7 +1593,13 @@ impl BatteryPage {
         let mut this = Self {
             key,
             row,
-            chart,
+            container_id,
+            details,
+            details_view,
+            history_view,
+            container,
+            editor,
+            parts,
             history: None,
             history_raw: None,
             history_version: 0,
@@ -1599,7 +1608,6 @@ impl BatteryPage {
             native_path: None,
             refresh: None,
             this: cx.weak_entity(),
-            details: battery_details_model(),
             is_system,
             focus: cx.focus_handle(),
             hub,
@@ -1616,13 +1624,33 @@ impl BatteryPage {
             _subs: subs,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            notify_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
         this
     }
 
-    pub fn chart(&self) -> &Entity<ChartView> {
-        &self.chart
+    /// The chart of the first placed widget of `metric` that draws one.
+    pub fn chart_of(&self, metric: &str, cx: &App) -> Option<Entity<ChartView>> {
+        let c = self.container.read(cx);
+        c.layout()
+            .widgets
+            .iter()
+            .filter(|w| w.content.metric_key().is_some_and(|k| k.as_str() == metric))
+            .find_map(|w| c.widget(w.id)?.read(cx).chart().cloned())
+    }
+
+    /// The page's chart: Power on a system battery, Percentage on any other device.
+    pub fn chart(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(
+            if self.is_system {
+                METRIC_POWER
+            } else {
+                METRIC_PERCENT
+            },
+            cx,
+        )
     }
 
     /// The 24-hour charge history chart, present for a system battery with at least 2 points.
@@ -1635,28 +1663,73 @@ impl BatteryPage {
         self.midnights.iter().map(|(x, _)| *x).collect()
     }
 
-    /// True when the chart shows power (the battery powers the system).
+    /// True when the page shows power (the battery powers the system).
     pub fn is_system(&self) -> bool {
         self.is_system
     }
 
-    /// This page's demand part while it is active: batteries ride on the sensors bit, and the
-    /// device metric history at 1 h, 24 h and 7 d.
-    pub fn demand_part(&self) -> Demand {
-        Demand {
+    /// The page's widget container.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
+    }
+
+    /// The editor around the container (Edit Widgets).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
+    }
+
+    /// The Details widget's view.
+    pub fn details_view(&self) -> &Entity<DetailsView> {
+        &self.details_view
+    }
+
+    /// The battery history widget's view.
+    pub fn history_view(&self) -> &Entity<MemoryPartView> {
+        &self.history_view
+    }
+
+    /// The container id, `page.bat:...`.
+    pub fn container_id(&self) -> &SharedString {
+        &self.container_id
+    }
+
+    /// The page is the shown page (`set_active`).
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// This page's demand part while it is active: batteries ride on the sensors bit, the device
+    /// metric history at 1 h, 24 h and 7 d, and what the placed widgets read.
+    pub fn demand_part(&self, cx: &App) -> Demand {
+        let mut demand = Demand {
             any_surface_visible: true,
             sensors: true,
             device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
-        }
+        };
+        add_demand(&mut demand, &self.container.read(cx).demand_part());
+        demand
     }
 
     fn send_demand(&self, cx: &mut App) {
-        if !self.active {
-            return;
+        if self.active {
+            let (id, window, part) = (self.id, self.window, self.demand_part(cx));
+            self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
         }
-        let (id, window, part) = (self.id, self.window, self.demand_part());
-        self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
+    }
+
+    fn notify(&self, cx: &mut Context<Self>) {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// A part's height, or the battery's kind or history shown state changed: the flow layout
+    /// places the parts again.
+    fn place_again(&mut self, cx: &mut Context<Self>) {
+        self.container.update(cx, |c, cx| {
+            c.place_again(cx);
+        });
     }
 
     fn on_snapshot(
@@ -1669,19 +1742,18 @@ impl BatteryPage {
         self.apply_snapshot(&snap, ev.mask, cx);
     }
 
-    /// Brings the chart kind, Details rows and header up to date. Notifies only when something
-    /// the page draws changed.
+    /// Brings the page's kind, history, Details rows and header up to date. Only a header
+    /// change renders the page.
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
         let details = mask.contains(ComponentMask::DEVICE_DETAILS);
         let devices = mask.contains(ComponentMask::DEVICES);
-        let mut changed = false;
         let record = battery_of(snap, self.row.idx);
         if details {
             let system = record.is_some_and(|b| b.power_supply);
             if system != self.is_system {
                 self.is_system = system;
-                self.rebuild_chart(cx);
-                changed = true;
+                self.parts.system.set(system);
+                self.place_again(cx);
             }
             self.native_path = record.map(|b| Arc::clone(&b.native_path));
             let history = record.and_then(|b| b.history.clone());
@@ -1690,7 +1762,7 @@ impl BatteryPage {
                 self.request_history();
             }
             self.history_seen = history.is_some();
-            changed |= self.sync_history(history, cx);
+            self.sync_history(history, cx);
             let kind = record.map_or("", |b| &*b.kind);
             let word = page_words(cx).battery_kind(kind).clone();
             let age_ns = self
@@ -1698,14 +1770,29 @@ impl BatteryPage {
                 .read(cx)
                 .now_ns()
                 .saturating_sub(snap.device_details.header.observed_end);
-            changed |= update_battery_details(&mut self.details, record, &word, age_ns);
+            if update_battery_details(&mut self.details, record, &word, age_ns) {
+                self.sync_details(cx);
+            }
         }
-        if details || devices {
-            changed |= self.sync_header(snap, cx);
+        if (details || devices) && self.sync_header(snap, cx) {
+            self.notify(cx);
         }
-        if changed {
-            cx.notify();
+        // The battery went away: an edit ends as Cancel does.
+        if devices
+            && !snap
+                .devices
+                .entries
+                .iter()
+                .any(|e| e.idx == self.row.idx && e.present)
+        {
+            self.editor.update(cx, |e, cx| e.cancel(cx));
         }
+    }
+
+    /// Hands the Details view what the grid shows; it notifies only when that changed.
+    fn sync_details(&mut self, cx: &mut Context<Self>) {
+        let shown = DetailsShown::of(&self.details, strings_version(cx));
+        self.details_view.update(cx, |v, cx| v.set_shown(shown, cx));
     }
 
     /// Sends the history fetch for this battery. Only a system battery shows the history.
@@ -1727,15 +1814,34 @@ impl BatteryPage {
         }
     }
 
-    /// Creates, updates or drops the history chart for the record's history. Returns true when
-    /// the page changed. A new `Arc` rebuilds the series (the chart's geometry once); the same
-    /// `Arc` changes nothing.
-    fn sync_history(&mut self, history: Option<Arc<[(i64, f32)]>>, cx: &mut Context<Self>) -> bool {
+    /// What the history view draws: the words, the midnights and the history's version. The
+    /// view renders again only when this changed.
+    fn history_shown(&self) -> PartShown {
+        PartShown {
+            texts: self.words.days.to_vec(),
+            numbers: std::iter::once(self.history_version)
+                .chain(
+                    self.midnights
+                        .iter()
+                        .flat_map(|(x, d)| [u64::from(x.to_bits()), u64::from(*d)]),
+                )
+                .collect(),
+            flags: vec![self.history.is_some()],
+            ..PartShown::default()
+        }
+    }
+
+    /// Creates, updates or drops the history chart for the record's history. A new `Arc`
+    /// rebuilds the series (the chart's geometry once); the same `Arc` changes nothing.
+    fn sync_history(&mut self, history: Option<Arc<[(i64, f32)]>>, cx: &mut Context<Self>) {
         let history = history.filter(|h| self.is_system && h.len() >= 2);
         let Some(history) = history else {
             self.history_raw = None;
             self.midnights.clear();
-            return self.history.take().is_some();
+            if self.history.take().is_some() {
+                self.history_changed(cx);
+            }
+            return;
         };
         if self.history.is_some()
             && self
@@ -1743,7 +1849,7 @@ impl BatteryPage {
                 .as_ref()
                 .is_some_and(|r| Arc::ptr_eq(r, &history))
         {
-            return false;
+            return;
         }
         self.history_version += 1;
         let now_s = unix_now_s();
@@ -1779,7 +1885,22 @@ impl BatteryPage {
                 }));
             }
         }
-        true
+        self.history_changed(cx);
+    }
+
+    /// The history chart, its midnights or its words changed: the view draws them, and the
+    /// flow layout places the parts again when the view appeared or went.
+    fn history_changed(&mut self, cx: &mut Context<Self>) {
+        let on = self.history.is_some();
+        let flipped = self.parts.history_shown.get() != on;
+        self.parts.history_shown.set(on);
+        let shown = self.history_shown();
+        self.history_view.update(cx, |v, cx| v.set_shown(shown, cx));
+        if flipped {
+            let parts = battery_page_parts(on);
+            self.editor.update(cx, |e, _| e.set_page_parts(parts));
+            self.place_again(cx);
+        }
     }
 
     fn history_spec(&self, cx: &App) -> ChartSpec {
@@ -1797,19 +1918,14 @@ impl BatteryPage {
         if header == self.header {
             return false;
         }
+        let word = header.0.clone();
+        self.editor.update(cx, |e, _| e.set_page_name(word));
         self.header = header;
         true
     }
 
-    fn rebuild_chart(&mut self, cx: &mut Context<Self>) {
-        let theme = current(cx).clone();
-        let view = PageSettingsView::of(&self.settings);
-        let spec = battery_spec(self.row.idx, self.is_system, &view, &theme);
-        let labels = battery_labels(self.is_system, &self.words);
-        self.chart.update(cx, |v, cx| {
-            v.set_spec(spec, cx);
-            v.set_labels(labels, cx);
-        });
+    /// Rebuilds the history chart's spec and labels from the current settings, theme and words.
+    fn rebuild_history(&mut self, cx: &mut Context<Self>) {
         if let Some(history) = self.history.clone() {
             let spec = self.history_spec(cx);
             let labels = history_labels(&self.words);
@@ -1821,6 +1937,11 @@ impl BatteryPage {
     }
 
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        // A saved layout (Apply, Reset Page) shows when the page is not in Edit Widgets.
+        if !self.editor.read(cx).is_editing() {
+            let layout = page_layout(&self.container_id, cx);
+            self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+        }
         let versions = section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -1832,11 +1953,12 @@ impl BatteryPage {
         }
         let range_moved = new.range_ns != self.settings.range_ns;
         self.settings = new;
-        self.rebuild_chart(cx);
+        self.rebuild_history(cx);
         if range_moved {
+            // The header switch shows the new range.
             self.send_demand(cx);
+            self.notify(cx);
         }
-        cx.notify();
     }
 
     fn sync_style(&mut self, cx: &mut Context<Self>) {
@@ -1845,9 +1967,100 @@ impl BatteryPage {
             return;
         }
         self.style_version = version;
-        self.rebuild_chart(cx);
-        cx.notify();
+        self.rebuild_history(cx);
     }
+
+    /// New strings: the Details words, the day names and the header.
+    fn sync_words(&mut self, cx: &mut Context<Self>) {
+        self.details.refresh_strings(cx);
+        if self.words.refresh(cx) {
+            self.rebuild_history(cx);
+            if self.history.is_some() {
+                self.history_changed(cx);
+            }
+        }
+        let snap = Arc::clone(self.hub.read(cx).current());
+        self.apply_snapshot(&snap, ComponentMask::DEVICE_DETAILS, cx);
+        self.sync_details(cx);
+        self.sync_header(&snap, cx);
+        self.notify(cx);
+    }
+
+    /// "Edit Widgets…" in the page menu.
+    fn on_edit_start(
+        &mut self,
+        _: &PerfWidgetEditStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        start_page_edit(&self.editor, &self.hub, window, cx);
+    }
+
+    /// "Reset Page" in the page menu (ADR-019 phase 3 "Reset").
+    fn on_reset_page(
+        &mut self,
+        _: &PerfWidgetResetPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        reset_page(&self.container_id, self.header.0.clone(), window, cx);
+    }
+}
+
+/// The page parts Add Widget lists on a Battery page: Details, and the history while the
+/// battery has one to show.
+fn battery_page_parts(history: bool) -> Vec<FixedWidget> {
+    let mut parts = vec![FixedWidget::Details];
+    if history {
+        parts.push(FixedWidget::BatteryHistory);
+    }
+    parts
+}
+
+/// What the history view draws (UI-PRF-035): the chart box, `sp4`-free (the flow places the gap),
+/// with the day labels under it at the grid line of each midnight.
+fn history_draw(this: WeakEntity<BatteryPage>) -> PartDraw {
+    Rc::new(move |_, cx| {
+        let page = this.upgrade()?;
+        let page = page.read(cx);
+        let history = page.history.clone()?;
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        // The labels sit under the 1 px inset of the plot, at the grid line of each midnight.
+        let mut days = div()
+            .relative()
+            .w_full()
+            .h(m.text.xs * m.line_height)
+            .mx(px(1.0))
+            .text_color(theme.text_secondary);
+        *days.text_style() = t_xs(&m);
+        for (n, (x, day)) in page.midnights.iter().enumerate() {
+            let label = div()
+                .absolute()
+                .left(relative(*x))
+                .child(page.words.days[usize::from(*day).min(6)].clone());
+            let id = history_day_label_id(&page.container_id);
+            days = days.child(if n == 0 {
+                label.tl_selector(move || id)
+            } else {
+                label
+            });
+        }
+        let chart_id = history_chart_id(&page.container_id);
+        Some(
+            v_flex()
+                .w_full()
+                .child(
+                    div()
+                        .tl_selector(move || chart_id)
+                        .w_full()
+                        .h(px(HISTORY_H * m.ui_scale))
+                        .child(history.cached(StyleRefinement::default().size_full())),
+                )
+                .child(days)
+                .into_any_element(),
+        )
+    })
 }
 
 impl DevicePage for BatteryPage {
@@ -1867,56 +2080,9 @@ impl DevicePage for BatteryPage {
         SmallVec::new()
     }
 
-    fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
-        let m = *metrics(cx);
-        let theme = current(cx).clone();
-        let mut out = v_flex().w_full().child(
-            div()
-                .tl_selector(|| BATTERY_CHART_ID.into())
-                .w_full()
-                .h(px(GRAPH_H_STACKED * m.ui_scale))
-                .child(
-                    self.chart
-                        .clone()
-                        .cached(StyleRefinement::default().size_full()),
-                ),
-        );
-        if let Some(history) = &self.history {
-            // The labels sit under the 1 px inset of the plot, at the grid line of each midnight.
-            let mut days = div()
-                .relative()
-                .w_full()
-                .h(m.text.xs * m.line_height)
-                .mx(px(1.0))
-                .text_color(theme.text_secondary);
-            *days.text_style() = t_xs(&m);
-            for (n, (x, day)) in self.midnights.iter().enumerate() {
-                let label = div()
-                    .absolute()
-                    .left(relative(*x))
-                    .child(self.words.days[usize::from(*day).min(6)].clone());
-                days = days.child(if n == 0 {
-                    label.tl_selector(|| BATTERY_DAY_LABEL_ID.into())
-                } else {
-                    label
-                });
-            }
-            out = out
-                .child(div().h(m.sp[4]))
-                .child(
-                    div()
-                        .tl_selector(|| BATTERY_HISTORY_ID.into())
-                        .w_full()
-                        .h(px(HISTORY_H * m.ui_scale))
-                        .child(
-                            history
-                                .clone()
-                                .cached(StyleRefinement::default().size_full()),
-                        ),
-                )
-                .child(days);
-        }
-        out.into_any_element()
+    fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {
+        // The charts are widgets of the container.
+        div().into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
@@ -1950,6 +2116,10 @@ impl DevicePage for BatteryPage {
 
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
         SmallVec::new()
+    }
+
+    fn widget_editor(&self) -> Option<&Entity<WidgetEditor>> {
+        Some(&self.editor)
     }
 
     fn set_active(&mut self, active: bool, cx: &mut App) {
@@ -1992,72 +2162,27 @@ impl Render for BatteryPage {
             self.window = Some(handle);
             self.send_demand(cx);
         }
-        self.details.refresh_strings(cx);
-        if self.words.refresh(cx) {
-            let labels = battery_labels(self.is_system, &self.words);
-            self.chart.update(cx, |v, cx| v.set_labels(labels, cx));
-            if let Some(history) = self.history.clone() {
-                let labels = history_labels(&self.words);
-                history.update(cx, |v, cx| v.set_labels(labels, cx));
-            }
-            let snap = Arc::clone(self.hub.read(cx).current());
-            self.apply_snapshot(&snap, ComponentMask::ALL, cx);
-        }
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        div().size_full().track_focus(&self.focus).child(
-            DevicePageFrame {
-                page: self,
-                m: &m,
-                theme: &theme,
-            }
-            .render(window, cx),
-        )
+        div()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_edit_start))
+            .on_action(cx.listener(Self::on_reset_page))
+            .child(
+                DevicePageFrame {
+                    page: self,
+                    m: &m,
+                    theme: &theme,
+                }
+                .render(window, cx),
+            )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn raw(values: &[f32]) -> SeriesView {
-        SeriesView {
-            id: SeriesId {
-                device: DeviceIdx(3),
-                metric: MetricId::FAN_PWM,
-            },
-            version: 7,
-            period_ns: NS_PER_S,
-            samples: values
-                .iter()
-                .enumerate()
-                .map(|(i, v)| Sample::valid(i as u64 * NS_PER_S, *v))
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn pwm_series_scaled_to_axis() {
-        let scaled = pwm_scaled(&raw(&[0.0, 25.0, 50.0]), 1800.0);
-        let values: Vec<f32> = scaled.samples.iter().map(|s| s.value).collect();
-        assert_eq!(values, [0.0, 450.0, 900.0]);
-        assert_eq!(scaled.samples.last().map(|s| s.value), Some(900.0));
-        assert_eq!(scaled.id.metric, MetricId::FAN_PWM);
-        assert_eq!(scaled.samples[2].t_ns, 2 * NS_PER_S);
-    }
-
-    #[test]
-    fn pwm_series_version_follows_axis() {
-        let r = raw(&[10.0]);
-        assert_ne!(
-            pwm_scaled(&r, 1800.0).version,
-            pwm_scaled(&r, 3600.0).version
-        );
-        assert_eq!(
-            pwm_scaled(&r, 1800.0).version,
-            pwm_scaled(&r, 1800.0).version
-        );
-    }
 
     #[test]
     fn history_series_marks_gaps_over_an_hour() {

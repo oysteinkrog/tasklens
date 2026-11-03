@@ -1066,6 +1066,31 @@ mod tests {
     }
 
     #[test]
+    fn percent_series_scaled_to_axis() {
+        let raw = SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(3),
+                metric: MetricId::FAN_PWM,
+            },
+            version: 7,
+            period_ns: 1_000_000_000,
+            samples: [0.0, 25.0, 50.0]
+                .iter()
+                .enumerate()
+                .map(|(i, v)| Sample::valid(i as u64 * 1_000_000_000, *v))
+                .collect(),
+        };
+        let scaled = percent_scaled(&raw, 1800.0);
+        let values: Vec<f32> = scaled.samples.iter().map(|s| s.value).collect();
+        assert_eq!(values, [0.0, 450.0, 900.0]);
+        assert_eq!(scaled.id.metric, MetricId::FAN_PWM);
+        assert_eq!(scaled.samples[2].t_ns, 2_000_000_000);
+        // The version follows the axis, so a cache keyed on it sees a new axis.
+        assert_ne!(scaled.version, percent_scaled(&raw, 3600.0).version);
+        assert_eq!(scaled.version, percent_scaled(&raw, 1800.0).version);
+    }
+
+    #[test]
     fn value_sum_of_newest_valid() {
         let rx = view(
             MetricId::NET_RX,

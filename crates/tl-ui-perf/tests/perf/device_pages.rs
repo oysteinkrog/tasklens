@@ -486,7 +486,7 @@ mod shared_range {
                 ns(&fan.read(cx).speed(cx).expect("speed chart")),
                 cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
                 gpu.read(cx).engines().read(cx).spec.range_ns / S,
-                ns(bat.read(cx).chart()),
+                ns(&bat.read(cx).chart(cx).expect("battery chart")),
             ]
         })
     }
@@ -576,7 +576,11 @@ mod shared_range {
         publish_history(&mut r, DeviceRange::H24, &[id]);
         let bat = page::<BatteryPage>(&mut r, MOUSE);
         let n = r.vcx.update(|_, cx| {
-            bat.read(cx).chart().read(cx).resolved()[0]
+            bat.read(cx)
+                .chart(cx)
+                .expect("battery chart")
+                .read(cx)
+                .resolved()[0]
                 .as_ref()
                 .map(|v| v.samples.len())
         });
@@ -933,8 +937,40 @@ fn publish_p2(r: &mut Rig) {
         d.header.version += 1;
         d.batteries = Arc::from(vec![(DeviceIdx(16), mouse_record())]);
         s.device_details = Arc::new(d);
+        // The battery's charge and power series, which the page's chart widgets draw.
+        s.series = battery_series(s.series.header.version + 1);
     });
     draw(r.vcx);
+}
+
+/// The charge and power series of the mouse (catalog index 16), one valid sample each.
+fn battery_series(version: u64) -> Arc<tl_model::snapshot::SeriesSet> {
+    use tl_model::ids::{MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    let view = |metric: MetricId, v: f32| {
+        Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(16),
+                metric,
+            },
+            version,
+            period_ns: 1_000_000_000,
+            samples: Arc::from([Sample::valid(1_000_000_000, v)]),
+        })
+    };
+    let mut series = vec![
+        view(MetricId::BATTERY_PCT, 80.),
+        view(MetricId::BATTERY_POWER, -5.),
+    ];
+    series.sort_by_key(|v| v.id);
+    Arc::new(tl_model::snapshot::SeriesSet {
+        header: tl_model::snapshot::ComponentHeader {
+            version,
+            ..tl_model::snapshot::ComponentHeader::default()
+        },
+        series: Arc::from(series),
+        slow: Arc::from([]),
+    })
 }
 
 #[gpui_kit::test]
@@ -966,7 +1002,13 @@ fn build_page_fan_and_battery(cx: &mut TestAppContext) {
         .expect("a BatteryPage");
     r.vcx.update(|_, cx| {
         assert!(
-            mouse_page.read(cx).chart().read(cx).spec.hover,
+            mouse_page
+                .read(cx)
+                .chart(cx)
+                .expect("battery chart")
+                .read(cx)
+                .spec
+                .hover,
             "battery chart takes hover"
         );
     });
@@ -994,7 +1036,7 @@ fn sensor_pages_demand_switch(cx: &mut TestAppContext) {
         .expect("a BatteryPage");
     let (fan_on, mouse_part) = r
         .vcx
-        .update(|_, cx| (fan.read(cx).is_active(), mouse.read(cx).demand_part()));
+        .update(|_, cx| (fan.read(cx).is_active(), mouse.read(cx).demand_part(cx)));
     assert!(!fan_on, "the Fan page withdrew its part");
     assert!(mouse_part.sensors);
     let d = last_demand(&r);
@@ -1023,6 +1065,17 @@ mod battery_history {
             s.device_details = Arc::new(d);
         });
         draw(r.vcx);
+    }
+
+    /// The debug selector of the history chart box and of the first day label.
+    fn history_chart_id() -> &'static str {
+        let id = tl_ui_perf::performance::sensors::history_chart_id(&format!("page.{MOUSE}"));
+        Box::leak(id.into_boxed_str())
+    }
+
+    fn history_day_label_id() -> &'static str {
+        let id = tl_ui_perf::performance::sensors::history_day_label_id(&format!("page.{MOUSE}"));
+        Box::leak(id.into_boxed_str())
     }
 
     fn page(r: &mut Rig) -> Entity<BatteryPage> {
@@ -1060,12 +1113,12 @@ mod battery_history {
         publish_battery(&mut r, true, Some(recent(1)));
         select(&mut r, MOUSE);
         assert!(!has_chart(&mut r), "1 point");
-        assert!(r.vcx.debug_bounds("perf-battery-history").is_none());
+        assert!(r.vcx.debug_bounds(history_chart_id()).is_none());
         publish_battery(&mut r, true, None);
         assert!(!has_chart(&mut r), "no history yet");
         publish_battery(&mut r, true, Some(recent(2)));
         assert!(has_chart(&mut r), "2 points");
-        assert!(r.vcx.debug_bounds("perf-battery-history").is_some());
+        assert!(r.vcx.debug_bounds(history_chart_id()).is_some());
         publish_battery(&mut r, true, Some(recent(1)));
         assert!(!has_chart(&mut r), "back to 1 point");
     }
@@ -1139,7 +1192,7 @@ mod battery_history {
             assert_eq!(v.cached_fill_stroke_counts(), (0, 2));
         });
         if midnights == 1 {
-            assert!(r.vcx.debug_bounds("perf-battery-day-label").is_some());
+            assert!(r.vcx.debug_bounds(history_day_label_id()).is_some());
         }
     }
 
@@ -1162,7 +1215,7 @@ mod battery_history {
         draw(r.vcx);
         let b = r
             .vcx
-            .debug_bounds("perf-battery-history")
+            .debug_bounds(history_chart_id())
             .expect("history chart bounds");
         r.vcx
             .simulate_mouse_move(b.center(), None, gpui_kit::Modifiers::none());
