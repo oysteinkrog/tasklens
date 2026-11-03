@@ -297,11 +297,20 @@ fn old_page_keys_stay_for_1_3_0() {
                 assert_eq!(kept["performance"].get(key), Some(v), "{name}: {key}");
             }
         }
-        // A build without the page kinds keeps the page entries as read.
+        // A build without the page kinds keeps the page entries as read. A kind this build
+        // supports (GPU since tasklens-hzire.4) reads as known; the file stays the same.
         let mut older: Settings = toml::from_str(&text).expect("TOML");
         older.clamp();
         for e in &older.performance.layouts.0 {
-            assert!(matches!(e, LayoutEntry::Kept(_)), "{name}");
+            match e {
+                LayoutEntry::Known(l) => {
+                    assert!(
+                        tl_ui_settings::layout::is_layout_container(&l.container),
+                        "{name}"
+                    );
+                }
+                _ => assert!(matches!(e, LayoutEntry::Kept(_)), "{name}"),
+            }
         }
         assert_eq!(toml::to_string(&older).expect("serializes"), text, "{name}");
     }

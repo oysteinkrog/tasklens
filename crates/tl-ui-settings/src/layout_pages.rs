@@ -834,19 +834,24 @@ mod tests {
         let text = format!(
             "[[performance.layouts]]\ncontainer = \"{GPU}\"\nversion = 2\nnext_id = 4\n\n[[performance.layouts.widgets]]\nid = 3\ndevice = \"gpu:GPU-0a1b2c3d\"\nmetric = \"memory\"\nforms = [\"chart\", \"value\"]\ncol = 0\nrow = 0\ncols = 12\nrows = 7\n"
         );
-        // A build without the GPU page keeps the entry as read.
+        // A build without the GPU page keeps the entry as read. GPU pages are containers since
+        // tasklens-hzire.4, so this build reads the entry as known.
         let mut s: Settings = toml::from_str(&text).expect("TOML");
         assert!(s.clamp().is_empty());
-        assert!(matches!(
-            s.performance.layouts.entry(GPU),
-            Some(LayoutEntry::Kept(_))
-        ));
-        let before = s.performance.layouts.clone();
-        let (back, _) = load_all(&save(&s));
-        assert!(back.performance.layouts.known(GPU).is_some());
-        let mut again: Settings = toml::from_str(&save(&s)).expect("TOML");
-        again.clamp();
-        assert_eq!(again.performance.layouts, before);
+        if PAGE_KINDS.contains(&DeviceKind::Gpu) {
+            assert!(s.performance.layouts.known(GPU).is_some());
+        } else {
+            assert!(matches!(
+                s.performance.layouts.entry(GPU),
+                Some(LayoutEntry::Kept(_))
+            ));
+            let before = s.performance.layouts.clone();
+            let (back, _) = load_all(&save(&s));
+            assert!(back.performance.layouts.known(GPU).is_some());
+            let mut again: Settings = toml::from_str(&save(&s)).expect("TOML");
+            again.clamp();
+            assert_eq!(again.performance.layouts, before);
+        }
         // A build with GPU pages reads it as known; nothing prunes it while the GPU is gone,
         // and it is written back unchanged.
         let (s, changed) = load_all(&text);

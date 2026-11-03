@@ -1903,14 +1903,8 @@ mod tests {
         let power = at(DeviceKind::Gpu, METRIC_POWER);
         let limit = power.value_total(gpu);
         assert_eq!(limit, Some(320.0));
-        assert_eq!(
-            text(power, true, 31.9, None, limit),
-            format!(
-                "{} / {}",
-                fmt(ValueFormat::Watts, 31.9),
-                fmt(ValueFormat::Watts, 320.0)
-            )
-        );
+        // The unit once, as the 1.3.0 page's Power chart (ADR-019 phase 3 "Page style").
+        assert_eq!(text(power, true, 31.9, None, limit), "31.9 / 320 W");
         assert_eq!(
             text(power, false, 31.9, None, limit),
             fmt(ValueFormat::Watts, 31.9)
@@ -1920,13 +1914,14 @@ mod tests {
         let clocks = at(DeviceKind::Gpu, METRIC_GPU_CLOCKS);
         let clocks_max = clocks.value_total(gpu);
         assert_eq!(clocks_max, Some(2520.0));
-        let clocks_text = format!(
-            "{} / {}",
-            fmt(ValueFormat::Mhz, 1905.0),
-            fmt(ValueFormat::Mhz, 2520.0)
+        assert_eq!(
+            text(clocks, false, 1905.0, None, clocks_max),
+            "1905 / 2520 MHz"
         );
-        assert_eq!(text(clocks, false, 1905.0, None, clocks_max), clocks_text);
-        assert_eq!(text(clocks, true, 1905.0, None, clocks_max), clocks_text);
+        assert_eq!(
+            text(clocks, true, 1905.0, None, clocks_max),
+            "1905 / 2520 MHz"
+        );
         // Commit as a percent of the limit; its stats too.
         let commit = at(DeviceKind::Memory, METRIC_COMMIT_PCT);
         assert_eq!(text(commit, false, 69.0, None, Some(100.0)), "69.0%");
