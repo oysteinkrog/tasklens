@@ -209,6 +209,7 @@ pub fn page_presets(kind: DeviceKind) -> &'static [&'static str] {
             PRESET_ALL_CORES_OVERLAID,
             PRESET_ALL_CORES_STACKED,
             PRESET_BOARD,
+            PRESET_APPS,
         ],
         DeviceKind::Memory => &[PRESET_USAGE, PRESET_APPS],
         k if PAGE_DEVICE_KINDS.contains(&k) => &[PRESET_DEFAULT],
@@ -280,6 +281,7 @@ pub fn cpu_mode_widgets(preset: &str) -> Vec<(WidgetContent, FormSet)> {
             vec![metric(DEVICE_CPU, METRIC_CORES_STACKED, CHART_VALUE_LABEL)]
         }
         PRESET_BOARD => vec![total(), fixed(FixedWidget::CpuCoreBoard)],
+        PRESET_APPS => vec![fixed(FixedWidget::CpuByApp)],
         _ => vec![fixed(FixedWidget::CpuCoreGrid)],
     }
 }
@@ -692,7 +694,7 @@ mod tests {
                         "cpu total [chart,value,label]".into(),
                         "fixed cpu_core_board".into(),
                     ],
-                    // Not in the loop above: its widgets come with tasklens-qkvs0.7.
+                    // Covered by cpu_apps_mode_converts_to_cpu_by_app_secondary_then_details.
                     Apps => unreachable!(),
                 };
                 let cvl = |k: &str| format!("cpu {k} [chart,value,label]");
@@ -714,6 +716,37 @@ mod tests {
                 assert_eq!(convert_cpu_page(&perf, "page.cpu"), l, "deterministic");
             }
         }
+    }
+
+    #[test]
+    fn cpu_apps_mode_converts_to_cpu_by_app_secondary_then_details() {
+        for graph in [
+            CpuSecondaryGraph::None,
+            CpuSecondaryGraph::Power,
+            CpuSecondaryGraph::Clock,
+            CpuSecondaryGraph::Clocks,
+            CpuSecondaryGraph::Temperature,
+        ] {
+            let perf = PerformanceSettings {
+                cpu_graph_mode: CpuGraphMode::Apps,
+                cpu_secondary_graph: graph,
+                ..PerformanceSettings::default()
+            };
+            let l = convert_cpu_page(&perf, "page.cpu");
+            let got = describe(&l);
+            assert_eq!(got.first().map(String::as_str), Some("fixed cpu_by_app"));
+            assert_eq!(got.last().map(String::as_str), Some("fixed details"));
+            let mut mid = Vec::new();
+            for (c, _) in cpu_secondary_widgets(graph) {
+                if let WidgetContent::Metric(s) = c {
+                    mid.push(s.metric.as_str().to_owned());
+                }
+            }
+            assert_eq!(got.len(), mid.len() + 2, "{graph:?}");
+            assert_eq!(l.preset.as_ref().map(|p| p.id.as_str()), Some(PRESET_APPS));
+        }
+        assert!(page_presets(DeviceKind::Cpu).contains(&PRESET_APPS));
+        assert_eq!(cpu_preset(CpuGraphMode::Apps), "apps");
     }
 
     #[test]

@@ -400,6 +400,7 @@ pub fn preset_widgets(kind: &str, preset: &PresetSetting) -> Vec<(WidgetContent,
         ("cpu", "chart") => vec![total()],
         ("cpu", "cores") => vec![cores(ROW, rows(None))],
         ("cpu", "core_charts") => vec![cores(CHART_VALUE_LABEL, cells(None))],
+        ("cpu", "apps") => vec![fixed(FixedWidget::CpuByApp)],
         ("cpu", _) => vec![total(), cores(ROW, rows(None))],
         ("memory", "chart_rows") => {
             let mut list = vec![metric(DEVICE_MEMORY, METRIC_MEM_USED, FormSet::CHART)];

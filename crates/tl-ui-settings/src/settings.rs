@@ -816,7 +816,10 @@ pub struct OverviewBoxSetting {
 
 /// The layout modes of each Overview box kind (UI-PRF-019), the default mode first.
 pub const OVERVIEW_BOX_MODES: [(&str, &[&str]); 7] = [
-    ("cpu", &["chart_cores", "chart", "cores", "core_charts"]),
+    (
+        "cpu",
+        &["chart_cores", "chart", "cores", "core_charts", "apps"],
+    ),
     ("memory", &["rows", "chart_rows", "chart", "charts", "apps"]),
     ("gpu", &["engine_charts", "chart_engines", "chart"]),
     ("disk", &["disk_charts", "rows", "total_chart"]),

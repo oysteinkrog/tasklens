@@ -1,0 +1,8 @@
+# Settings with the CPU box mode apps (CPU by app, D-042, UI-PRF-062).
+schema_version = 1
+
+[performance.overview]
+grid = [
+  { kind = "cpu", col = 0, row = 0, cols = 8, rows = 8, mode = "apps" },
+  { kind = "processes", col = 0, row = 8, cols = 12, rows = 8 },
+]

@@ -344,6 +344,9 @@ pub enum FixedWidget {
     /// The Memory by app chart and its legend (UI-PRF-060), in `overview.memory` and
     /// `page.memory`.
     MemoryByApp,
+    /// The CPU by app stacked chart and its legend (UI-PRF-062, D-042), in `overview.cpu` and
+    /// `page.cpu`.
+    CpuByApp,
     /// The "Details" heading and the page's Details grid (UI-PRF-021), on every page.
     Details,
     /// The CPU page's per-core charts (UI-PRF-023), in `page.cpu` only.
@@ -374,10 +377,11 @@ pub enum FixedWidget {
 
 impl FixedWidget {
     /// Each known fixed widget and its name, as written.
-    pub const NAMES: [(&'static str, FixedWidget); 15] = [
+    pub const NAMES: [(&'static str, FixedWidget); 16] = [
         ("processes", FixedWidget::Processes),
         ("timeline", FixedWidget::Timeline),
         ("memory_by_app", FixedWidget::MemoryByApp),
+        ("cpu_by_app", FixedWidget::CpuByApp),
         ("details", FixedWidget::Details),
         ("cpu_core_grid", FixedWidget::CpuCoreGrid),
         ("cpu_core_board", FixedWidget::CpuCoreBoard),
@@ -417,6 +421,7 @@ impl FixedWidget {
             FixedWidget::Processes => Some(PROCESSES_BOX_CONTAINER),
             FixedWidget::Timeline => Some(TIMELINE_BOX_CONTAINER),
             FixedWidget::MemoryByApp => Some(MEMORY_BOX_CONTAINER),
+            FixedWidget::CpuByApp => Some(CPU_BOX_CONTAINER),
             _ => None,
         }
     }
@@ -430,7 +435,9 @@ impl FixedWidget {
             | FixedWidget::MemoryCompressed
             | FixedWidget::SwapDevices
             | FixedWidget::MemoryModules => Some(DeviceKind::Memory),
-            FixedWidget::CpuCoreGrid | FixedWidget::CpuCoreBoard => Some(DeviceKind::Cpu),
+            FixedWidget::CpuByApp | FixedWidget::CpuCoreGrid | FixedWidget::CpuCoreBoard => {
+                Some(DeviceKind::Cpu)
+            }
             FixedWidget::GpuEngineGrid | FixedWidget::GpuDisplays => Some(DeviceKind::Gpu),
             FixedWidget::DiskPartitions => Some(DeviceKind::Disk),
             FixedWidget::NetSettings => Some(DeviceKind::Net),
@@ -1954,6 +1961,26 @@ mod tests {
         reset_to_default(&mut s.performance, GPU_BOX_CONTAINER);
         assert_eq!(s.performance.layouts.0.len(), 1);
         assert_eq!(s.performance.layouts.0[0].container(), Some("page.cpu"));
+    }
+
+    #[test]
+    fn cpu_by_app_stays_in_the_cpu_containers_only() {
+        let w = "{ id = 1, fixed = \"cpu_by_app\", col = 0, row = 0, cols = 2, rows = 2 }";
+        let second = "{ id = 2, fixed = \"cpu_by_app\", col = 2, row = 0, cols = 2, rows = 2 }";
+        for container in ["overview.cpu", "page.cpu"] {
+            let (ids, changed) = ids_in(container, "", &[w]);
+            assert_eq!((ids, changed), (vec![1], vec![]), "{container}");
+            let (ids, changed) = ids_in(container, "", &[w, second]);
+            assert_eq!((ids, changed), (vec![1], vec![LAYOUTS_KEY]), "{container}");
+        }
+        for container in ["overview.memory", "page.memory"] {
+            let (ids, changed) = ids_in(container, "", &[w]);
+            assert_eq!((ids, changed), (vec![], vec![LAYOUTS_KEY]), "{container}");
+        }
+        assert_eq!(FixedWidget::from_name("cpu_by_app"), FixedWidget::CpuByApp);
+        assert_eq!(FixedWidget::CpuByApp.name(), "cpu_by_app");
+        let unknown = FixedWidget::from_name("cpu_by_nothing");
+        assert!(matches!(unknown, FixedWidget::Other(_)));
     }
 
     #[test]

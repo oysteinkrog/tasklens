@@ -128,6 +128,12 @@ const ROWS: &[Row] = &[
         ],
     },
     Row {
+        name: "cpu_apps",
+        kind: "cpu",
+        preset: ("apps", None, None, None, None),
+        widgets: &["fixed cpu_by_app"],
+    },
+    Row {
         name: "cpu_power_only",
         kind: "cpu",
         preset: ("chart_cores", None, None, None, None),
