@@ -6,4 +6,5 @@
 mod common;
 mod connections;
 mod service_props;
+mod services;
 mod startup;

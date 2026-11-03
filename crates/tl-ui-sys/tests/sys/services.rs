@@ -21,23 +21,23 @@ use tl_model::table::{
     UnitType,
 };
 use tl_model::time::BootId;
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::components::menu::{self, TlMenu};
-use tl_ui::components::toast::{self, ToastQueue};
-use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
-use tl_ui::host::HostContext;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::pages::services::actions::*;
-use tl_ui::pages::services::delegate::{ServicesDelegate, services_columns};
-use tl_ui::pages::services::filter_strip::{
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_base::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_kit::components::menu::{self, TlMenu};
+use tl_ui_kit::components::toast::{self, ToastQueue};
+use tl_ui_settings::settings::{AppearanceSettings, ServicesSettings, ThemeSettings, UiState};
+use tl_ui_sys::pages::services::actions::*;
+use tl_ui_sys::pages::services::delegate::{ServicesDelegate, services_columns};
+use tl_ui_sys::pages::services::filter_strip::{
     ServiceFilterState, apply_remove_filters, apply_reset_unit_types, apply_toggle_manager,
     apply_toggle_state, apply_toggle_unit_type, render_strip, unit_types_menu,
 };
-use tl_ui::pages::sys_table::{SysDelegate, SysQuery};
-use tl_ui::settings_global::TlSettings;
-use tl_ui::table::columns::ColumnLayout;
-use tl_ui::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate};
-use tl_ui_settings::settings::{AppearanceSettings, ServicesSettings, ThemeSettings, UiState};
+use tl_ui_table::table::columns::ColumnLayout;
+use tl_ui_table::table::sys_table::{SysDelegate, SysQuery};
+use tl_ui_table::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Host;
@@ -60,7 +60,7 @@ fn delegate_table_with_engine(
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
@@ -305,7 +305,7 @@ fn assert_window_binding(
 #[gpui_kit::test]
 fn services_keymap_contexts(cx: &mut TestAppContext) {
     cx.update(|cx| {
-        tl_ui::table::actions::bind_keys_table(cx);
+        tl_ui_table::table::actions::bind_keys_table(cx);
         bind_keys_services(cx);
     });
     let handle = cx.add_window(|window, cx| Root::new(cx.new(|_| Host), window, cx));
@@ -438,13 +438,13 @@ fn boot_settings(cx: &mut TestAppContext, saved: &Rc<RefCell<Vec<ServicesSetting
     cx.update(|cx| {
         gpui_kit::init(cx);
         toast::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         menu::bind_keys(cx);
         cx.set_reduce_motion(true);
         cx.set_global(BootSettings {
@@ -620,7 +620,7 @@ fn open_menu_rig(cx: &mut TestAppContext, settings: ServicesSettings) -> MenuRig
     let mut vcx = VisualTestContext::from_window(handle.into(), cx);
     vcx.update(|window, _| window.activate_window());
     let queue = vcx.update(|window, cx| {
-        let top = tl_ui::theme::metrics(cx).sp[4];
+        let top = tl_ui_base::theme::metrics(cx).sp[4];
         cx.new(|cx| ToastQueue::new(window, cx, top))
     });
     let menu = vcx.update(|window, cx| {
@@ -760,13 +760,13 @@ impl Render for FilterStripHost {
 fn unit_types_count_suffix(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
     });
     let handle = cx.add_window(|window, cx| {
         let mut state = ServiceFilterState::default();
@@ -799,13 +799,13 @@ fn unit_types_count_suffix(cx: &mut TestAppContext) {
 fn openrc_strip_hides_types_and_managers(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
     });
     let handle = cx.add_window(|window, cx| {
         Root::new(
@@ -906,11 +906,11 @@ mod copy {
     use tl_model::table::{Manager, ServiceColumn, SysNodeId, SysRow, Total, UnitRef, UnitType};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::pages::services::copy::{
+    use tl_ui_sys::pages::services::copy::{
         ServicesCopy, alias_column, block_service, column_alias, services_copy_texts,
     };
-    use tl_ui::pages::services::delegate::{ServicesDelegate, row_key};
-    use tl_ui::pages::sys_copy::{SysCopySource as _, copy_row};
+    use tl_ui_sys::pages::services::delegate::{ServicesDelegate, row_key};
+    use tl_ui_table::table::sys_copy::{SysCopySource as _, copy_row};
 
     const GOLDEN: &str = "Name: sshd.service\n\
 Display name: OpenSSH Daemon\n\
@@ -1127,7 +1127,7 @@ Binary: /usr/bin/sshd";
     fn rig(cx: &mut TestAppContext) -> Rig {
         let (table, _engine) = delegate_table_with_engine(cx, UiState::default());
         cx.update(|cx| {
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_reduce_motion(true);
         });
         let window = cx.windows().into_iter().next().expect("window");
@@ -1275,10 +1275,12 @@ mod menu_tests {
     use tl_model::table::{Manager, SysColumnId, SysNodeId, Total, UnitRef, UnitType};
     use tl_model::time::BootId;
     use tl_model::validity::Validity;
-    use tl_ui::action_tracker::ActionTracker;
-    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenuPopup};
-    use tl_ui::pages::services::menu::{MenuChoice, ServiceMenuTargets, menu_choice, service_menu};
-    use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
+    use tl_ui_base::action_tracker::ActionTracker;
+    use tl_ui_kit::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenuPopup};
+    use tl_ui_sys::pages::services::menu::{
+        MenuChoice, ServiceMenuTargets, menu_choice, service_menu,
+    };
+    use tl_ui_table::table::sys_table::{ActionKindTag, ActionTexts, SysActions};
 
     use super::*;
 
@@ -1654,67 +1656,31 @@ mod menu_tests {
     }
 }
 
-#[gpui_kit::test]
-fn init_binds_services_keys(cx: &mut TestAppContext) {
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui_settings::settings::Settings;
-
-    let engine = FakeEngine::new();
-    let client: Arc<dyn EngineClient> = engine.clone();
-    let (_tx, rx) = async_channel::bounded(4);
-    let init = UiInit {
-        settings: Settings::default(),
-        state: UiState::default(),
-        themes_json: None,
-        persist: Box::new(|_, _| {}),
-        persist_themes: Box::new(|_| {}),
-        app_requests: rx,
-        startup_toasts: Vec::new(),
-        env: AppEnv::test(),
-    };
-    cx.update(|cx| TasklensUi::init(cx, client, init));
-    cx.run_until_parked();
-
-    let handle = cx.add_window(|window, cx| Root::new(cx.new(|_| Host), window, cx));
-    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-    vcx.run_until_parked();
-    assert_window_binding(&mut vcx, &ServiceStart, "Table ServiceTable", "ctrl-s");
-    assert_window_binding(
-        &mut vcx,
-        &ServicePropsSelectTab { index: 2 },
-        "ServiceProps",
-        "ctrl-3",
-    );
-}
-
 /// Services Start, Stop, Restart, Reload and Reset failed flows (tasklens-hk6.15).
 mod flows {
     use std::sync::Arc;
 
+    use crate::common::{open_sink, shell_free_init, sink_toasts};
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use tl_model::actions::{
         ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
     };
-    use tl_model::command::Tab;
-    use tl_model::ids::NodeId;
-    use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, StartupType, UnitRecord};
+
+    use tl_model::snapshot::{StartupType, UnitRecord};
+    use tl_model::table::Total;
     use tl_model::table::{Manager, UnitRef};
-    use tl_model::table::{ProcessTableView, TableRow, Total};
-    use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::action_tracker::{GlobalActionTracker, PushedToast};
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::toast::{ToastKey, ToastKind};
-    use tl_ui::pages::services::actions::StartupChoice;
-    use tl_ui::pages::services::flows::{
-        UnitVerb, file_uri, run_file_properties, run_jump_to_process, run_open_file_location,
-        run_open_unit_file, run_set_startup, run_unit_verb, startup_change_kind, unit_action_texts,
-    };
-    use tl_ui::pages::sys_table::{ActionKindTag, SysActions};
-    use tl_ui::window::main::{main_window_view, open_main_window_on};
-    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
-    use tl_ui::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
+    use tl_model::validity::Validity;
+    use tl_ui_base::action_tracker::{GlobalActionTracker, PushedToast};
+    use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_kit::components::toast::{ToastKey, ToastKind};
     use tl_ui_settings::settings::Settings;
+    use tl_ui_sys::pages::services::actions::StartupChoice;
+    use tl_ui_sys::pages::services::flows::{
+        UnitVerb, file_uri, run_file_properties, run_open_file_location, run_open_unit_file,
+        run_set_startup, run_unit_verb, startup_change_kind, unit_action_texts,
+    };
+    use tl_ui_sys::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
+    use tl_ui_table::table::sys_table::{ActionKindTag, SysActions};
 
     use super::*;
 
@@ -1729,34 +1695,13 @@ mod flows {
         engine: Arc<FakeEngine>,
         main: VisualTestContext,
         actions: Entity<SysActions>,
+        cx: TestAppContext,
     }
 
     fn rig(cx: &mut TestAppContext) -> Rig {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
-            cx.set_reduce_motion(true);
-        });
-        let handle = cx
-            .update(|cx| open_main_window_on(Tab::Services, cx))
-            .expect("the main window opens");
-        let mut main = VisualTestContext::from_window(handle.into(), cx);
-        main.update(|window, _| window.activate_window());
-        main.run_until_parked();
-        let actions = main.update(|_, cx| {
+        let (engine, host) = shell_free_init(cx, Settings::default());
+        let main = open_sink(cx, &host);
+        let actions = cx.update(|cx| {
             let tracker = cx.global::<GlobalActionTracker>().0.clone();
             cx.new(|cx| SysActions::new(&tracker, cx))
         });
@@ -1764,6 +1709,7 @@ mod flows {
             engine,
             main,
             actions,
+            cx: cx.clone(),
         }
     }
 
@@ -1802,11 +1748,7 @@ mod flows {
         }
 
         fn toasts(&mut self) -> Vec<String> {
-            self.main.update(|_, cx| {
-                let view = main_window_view(cx).expect("main window");
-                let texts = view.read(cx).toasts().read(cx).visible_texts();
-                texts.iter().map(|t| t.to_string()).collect()
-            })
+            sink_toasts(&mut self.cx)
         }
 
         fn pending_tag(&mut self, name: &str) -> Option<ActionKindTag> {
@@ -1994,28 +1936,6 @@ mod flows {
             self.main.update(|window, cx| f(u, &actions, window, cx));
             self.main.run_until_parked();
         }
-
-        fn draw(&mut self) {
-            self.main.run_until_parked();
-            self.main.update(|window, cx| window.draw(cx).clear(cx));
-        }
-
-        fn active_tab(&mut self) -> Tab {
-            self.main.update(|_, cx| {
-                main_window_view(cx)
-                    .expect("main window")
-                    .read(cx)
-                    .active_tab()
-            })
-        }
-
-        fn queries(&self) -> usize {
-            self.engine
-                .commands()
-                .iter()
-                .filter(|c| matches!(c, Command::SetTableQuery(_)))
-                .count()
-        }
     }
 
     #[gpui_kit::test]
@@ -2139,130 +2059,6 @@ mod flows {
         rig.emit(sent[0].id, None, ActionState::Succeeded);
         assert!(rig.toasts().is_empty());
     }
-
-    #[gpui_kit::test]
-    fn jump_to_process_main_pid_zero_toast(cx: &mut TestAppContext) {
-        let mut rig = rig(cx);
-        let u = unit_rec("a.service", "/usr/bin/a", None, 0);
-        let snap = (*rig.engine.latest()).clone();
-        let tab = rig.active_tab();
-        rig.main
-            .update(|window, cx| run_jump_to_process(&u, &snap, window, cx));
-        rig.main.run_until_parked();
-        assert_eq!(rig.toasts(), ["Service not running"]);
-        assert_eq!(rig.active_tab(), tab, "the tab does not change");
-    }
-
-    fn proc_record(pid: u32) -> ProcessRecord {
-        let a = |s: &str| Arc::<str>::from(s);
-        ProcessRecord {
-            key: ProcessKey {
-                start_ticks: u64::from(pid),
-                boot_id: tl_model::time::BootId(0),
-                pid,
-            },
-            ppid: 1,
-            uid: 0,
-            meta: Arc::new(ProcessMeta {
-                comm: a("daemon"),
-                name: a("daemon"),
-                exe: None,
-                cmdline: None,
-                user: a("root"),
-                cgroup: None,
-                app_id: None,
-                icon: None,
-                description: None,
-                desktop_path: None,
-                search_lower: a("daemon"),
-            }),
-            group: GroupKind::System.key(),
-            state: ProcState::Sleeping,
-            flags: ProcFlags::empty(),
-            nice: 0,
-            threads: 1,
-            cpu_pct: 0.0,
-            rss_anon_bytes: 0,
-            rss_bytes: 0,
-            pss_bytes: 0,
-            uss_bytes: 0,
-            swap_bytes: 0,
-            io_read_bps: 0.0,
-            io_write_bps: 0.0,
-            net_rx_bps: 0.0,
-            net_tx_bps: 0.0,
-            gpu_util_pct: 0.0,
-            gpu_mem_bytes: 0,
-            euid: None,
-            net_shared: false,
-            cancelled_write_bps: 0.0,
-            validity: FieldValidity::all(Validity::Valid),
-        }
-    }
-
-    #[gpui_kit::test]
-    fn jump_to_process_calls_entry_point(cx: &mut TestAppContext) {
-        let mut rig = rig(cx);
-        let record = proc_record(812);
-        let key = record.key;
-        rig.engine.publish_with(|s| {
-            let mut processes = ProcessSnapshot {
-                records: vec![record].into(),
-                ..ProcessSnapshot::default()
-            };
-            processes.header.version = s.sequence;
-            s.processes = Arc::new(processes);
-        });
-        rig.draw();
-        let u = unit_rec("a.service", "/usr/bin/a", None, 812);
-        let snap = (*rig.engine.latest()).clone();
-        let before = rig.queries();
-        rig.main
-            .update(|window, cx| run_jump_to_process(&u, &snap, window, cx));
-        rig.main.run_until_parked();
-        assert_eq!(rig.active_tab(), Tab::Processes);
-        // The window starts on Services, so the jump is the first visit to Processes: that page
-        // sends its first query (generation 1), then the jump sends one more (generation 2).
-        assert_eq!(
-            rig.queries(),
-            before + 2,
-            "the first visit and the jump each sent a query"
-        );
-        let generation = rig
-            .engine
-            .commands()
-            .iter()
-            .rev()
-            .find_map(|c| match c {
-                Command::SetTableQuery(q) => Some(q.generation),
-                _ => None,
-            })
-            .expect("query");
-        rig.engine.publish_with(|s| {
-            let header = ComponentHeader {
-                version: s.sequence,
-                ..ComponentHeader::default()
-            };
-            s.table = Arc::new(ProcessTableView {
-                header,
-                query_generation: generation,
-                rows: vec![TableRow {
-                    node: NodeId::Process(key),
-                    depth: 0,
-                    expanded: false,
-                    has_children: false,
-                    record: Some(0),
-                    group: None,
-                    descendants: 0,
-                    subtree: None,
-                }]
-                .into(),
-                ..ProcessTableView::default()
-            });
-        });
-        rig.draw();
-        assert_eq!(rig.toasts(), ["Switched to service process."]);
-    }
 }
 
 // ---- Group and unit cells (UI-SYS-014, UI-SYS-015, UI-SYS-018) ----
@@ -2271,14 +2067,14 @@ use gpui_kit::assets::IconName;
 use tl_model::snapshot::{ServiceStatus, StartupType, UnitRecord};
 use tl_model::table::Total;
 use tl_model::validity::Validity;
-use tl_ui::pages::services::delegate::unit_icon;
-use tl_ui::pages::sys_status::DotStyle;
-use tl_ui::pages::sys_table::ActionKindTag;
-use tl_ui::table::cells::CellOut;
-use tl_ui::table::tree_table::{NameIcon, RowFlags};
-use tl_ui::theme::current;
+use tl_ui_base::theme::current;
+use tl_ui_sys::pages::services::delegate::unit_icon;
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::sys_status::DotStyle;
+use tl_ui_table::table::sys_table::ActionKindTag;
+use tl_ui_table::table::tree_table::{NameIcon, RowFlags};
 
-use tl_ui::pages::sys_status::LabelTone;
+use tl_ui_table::table::sys_status::LabelTone;
 
 fn record(name: &str, kind: UnitType, status: ServiceStatus) -> UnitRecord {
     UnitRecord {
@@ -2327,7 +2123,7 @@ fn delegate_for(
 ) -> ServicesDelegate {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
@@ -2574,7 +2370,7 @@ use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRec
 use tl_model::snapshot::ProcessSnapshot;
 use tl_model::units;
 use tl_model::validity::FieldValidity;
-use tl_ui::pages::services::delegate::{ChildCell, child_column, child_demand};
+use tl_ui_sys::pages::services::delegate::{ChildCell, child_column, child_demand};
 
 fn child_key(pid: u32) -> ProcessKey {
     ProcessKey {
@@ -2872,6 +2668,7 @@ fn collapsing_last_unit_clears_process_demand(cx: &mut TestAppContext) {
 mod page {
     use std::sync::Arc;
 
+    use crate::common::{open_page, shell_free_init_on, sink_toasts};
     use gpui_kit::base::Root;
     use gpui_kit::{
         AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton,
@@ -2880,8 +2677,7 @@ mod page {
         size,
     };
     use tl_model::actions::{ActionKind, ActionTarget, Signal};
-    use tl_model::client::EngineClient;
-    use tl_model::command::{Command, Tab};
+    use tl_model::command::Command;
     use tl_model::health::{ManagerState, SourceId};
     use tl_model::ids::ProcessKey;
     use tl_model::process::{ProcFlags, ProcessRecord};
@@ -2894,29 +2690,26 @@ mod page {
         UnitType,
     };
     use tl_model::validity::Validity;
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::menu::{
+    use tl_ui_base::app_env::AppEnv;
+    use tl_ui_base::demand::DEMAND_COALESCE;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::hub::GlobalHub;
+    use tl_ui_base::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui_kit::components::menu::{
         MenuEntryInfo, TlMenu, TlMenuPopup, close_context_menu, context_menu_open,
         open_context_menu,
     };
-    use tl_ui::components::toast::ToastQueue;
-    use tl_ui::demand::DEMAND_COALESCE;
-    use tl_ui::host::HostContext;
-    use tl_ui::hub::GlobalHub;
-    use tl_ui::pages::services::actions::{
-        GoToService, JumpOrigin, ManagerArg, ServicesClearAllFilters, ServicesShowHidden,
-        ServicesToggleManagerFilter, ServicesToggleStateFilter, StateFilterArg,
-    };
-    use tl_ui::pages::services::delegate::ServicesDelegate;
-    use tl_ui::pages::services::{REFRESH_TOAST_AFTER, ServicesPage};
-    use tl_ui::pages::sys_table::SysBody;
-    use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
-    use tl_ui::window::filter::FILTER_DEBOUNCE;
-    use tl_ui::window::main::{
-        MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
-    };
-    use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui_kit::components::toast::ToastQueue;
+    use tl_ui_pagehost::PageHost;
     use tl_ui_settings::settings::{Settings, UiState};
+    use tl_ui_sys::pages::services::actions::{
+        JumpOrigin, ManagerArg, ServicesToggleManagerFilter, ServicesToggleStateFilter,
+        StateFilterArg,
+    };
+    use tl_ui_sys::pages::services::delegate::ServicesDelegate;
+    use tl_ui_sys::pages::services::{REFRESH_TOAST_AFTER, ServicesPage};
+    use tl_ui_table::table::sys_table::SysBody;
+    use tl_ui_table::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::{child_key, child_process, record};
@@ -3001,22 +2794,14 @@ mod page {
         rows
     }
 
-    fn init(cx: &mut TestAppContext, client: Arc<dyn EngineClient>) {
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            cx.set_reduce_motion(true);
-        });
+    fn init(cx: &mut TestAppContext, engine: Arc<FakeEngine>) -> PageHost {
+        shell_free_init_on(
+            cx,
+            engine,
+            Settings::default(),
+            UiState::default(),
+            AppEnv::test(),
+        )
     }
 
     struct Rig {
@@ -3221,7 +3006,7 @@ mod page {
                 .expect("the table body");
             let row_h = self
                 .vcx
-                .update(|_, cx| tl_ui::theme::metrics(cx).row_height);
+                .update(|_, cx| tl_ui_base::theme::metrics(cx).row_height);
             let at = point(
                 body.origin.x + px(40.),
                 body.origin.y + row_h * (ix as f32 + 0.5),
@@ -3649,22 +3434,11 @@ mod page {
     #[gpui_kit::test]
     fn enter_on_exited_child_shows_open_failed(cx: &mut TestAppContext) {
         let engine = FakeEngine::new();
-        init(cx, engine.clone());
-        let handle = cx.update(|cx| {
-            set_test_page(cx, Tab::Services, services_page);
-            open_main_window_on(Tab::Services, cx).expect("main window opens")
+        let host = init(cx, engine.clone());
+        let (page, mut vcx) = open_page(cx, &host, |host, window, cx| {
+            ServicesPage::new(host, window, cx)
         });
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
-        let page = vcx.update(|_, cx| {
-            main_window_view(cx)
-                .expect("main window view")
-                .read(cx)
-                .page_entity::<ServicesPage>(Tab::Services)
-                .expect("services page")
-        });
         vcx.update(|window, cx| window.draw(cx).clear(cx));
         publish_services(
             &engine,
@@ -3688,14 +3462,10 @@ mod page {
         vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
         let failed = vcx
-            .update(|_, cx| tl_ui::windows::props::props_words(cx))
+            .update(|_, cx| tl_ui_procs::windows::props::props_words(cx))
             .open_failed
             .to_string();
-        let toasts: Vec<String> = vcx.update(|_, cx| {
-            let view = main_window_view(cx).expect("main window");
-            let texts = view.read(cx).toasts().read(cx).visible_texts();
-            texts.iter().map(|t| t.to_string()).collect()
-        });
+        let toasts = sink_toasts(cx);
         assert!(toasts.contains(&failed), "toasts: {toasts:?}");
         let count = vcx.update(|_, cx| {
             let registry = cx.global::<GlobalRegistry>().0.clone();
@@ -3919,186 +3689,14 @@ mod page {
         assert!(!text.contains("unit01.service"), "{text}");
     }
 
-    fn services_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
-        let page = cx.new(|cx| ServicesPage::new(&HostContext::local(cx), window, cx));
-        PageSlot::new(page, cx)
-    }
-
-    /// A main window on Processes with a Services page and a published sshd.service.
-    fn go_to_service_rig(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
-        let engine = FakeEngine::new();
-        init(cx, engine.clone());
-        let handle = cx.update(|cx| {
-            set_test_page(cx, Tab::Services, services_page);
-            open_main_window_on(Tab::Processes, cx).expect("main window opens")
-        });
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
-        vcx.update(|window, cx| window.draw(cx).clear(cx));
-        let units = units_with_sshd();
-        publish_view(&engine, 1, &units, units.len(), 0);
-        vcx.run_until_parked();
-        (engine, vcx)
-    }
-
-    fn dispatch_go_to_sshd(vcx: &mut VisualTestContext) {
-        vcx.update(|window, cx| {
-            window.dispatch_action(
-                Box::new(GoToService {
-                    manager: ManagerArg::System,
-                    name: "sshd.service".into(),
-                    origin: JumpOrigin::Processes,
-                }),
-                cx,
-            );
-        });
-        vcx.run_until_parked();
-        vcx.update(|window, cx| window.draw(cx).clear(cx));
-    }
-
-    fn active_tab(vcx: &mut VisualTestContext) -> Tab {
-        vcx.update(|_, cx| {
-            main_window_view(cx)
-                .expect("main window")
-                .read(cx)
-                .active_tab()
-        })
-    }
-
-    #[gpui_kit::test]
-    fn go_to_service_action_switches_tab_and_selects(cx: &mut TestAppContext) {
-        let (engine, mut vcx) = go_to_service_rig(cx);
-        assert_eq!(active_tab(&mut vcx), Tab::Processes);
-
-        dispatch_go_to_sshd(&mut vcx);
-
-        assert_eq!(active_tab(&mut vcx), Tab::Services);
-        let toasts: Vec<String> = vcx.update(|_, cx| {
-            let view = main_window_view(cx).expect("main window");
-            let texts = view.read(cx).toasts().read(cx).visible_texts();
-            texts.iter().map(|t| t.to_string()).collect()
-        });
-        assert_eq!(
-            toasts
-                .iter()
-                .filter(|t| t.as_str() == "Switched to Services tab")
-                .count(),
-            1,
-            "select_unit ran once: {toasts:?}"
-        );
-        let query = last_services_query(&engine).expect("a query");
-        assert!(
-            query
-                .expanded
-                .contains(&SysNodeId::ServiceGroup(Manager::System)),
-            "System group expanded for the jump"
-        );
-    }
-
-    #[gpui_kit::test]
-    fn go_to_service_activates_main_window(cx: &mut TestAppContext) {
-        let (_engine, mut vcx) = go_to_service_rig(cx);
-        vcx.deactivate_window();
-        assert!(!vcx.update(|window, _| window.is_window_active()));
-
-        dispatch_go_to_sshd(&mut vcx);
-
-        assert!(vcx.update(|window, _| window.is_window_active()));
-        assert_eq!(active_tab(&mut vcx), Tab::Services);
-    }
-
-    #[gpui_kit::test]
-    fn empty_state_filter_clear_resets_strip(cx: &mut TestAppContext) {
-        let engine = FakeEngine::new();
-        init(cx, engine.clone());
-        let handle = cx.update(|cx| {
-            set_test_page(cx, Tab::Services, services_page);
-            open_main_window_on(Tab::Services, cx).expect("main window opens")
-        });
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
-        vcx.update(|window, cx| window.draw(cx).clear(cx));
-        let page = vcx.update(|_, cx| {
-            main_window_view(cx)
-                .expect("main window view")
-                .read(cx)
-                .page_entity::<ServicesPage>(Tab::Services)
-                .expect("services page")
-        });
-        let focus = vcx.update(|_, cx| page.read(cx).table().read(cx).focus_handle().clone());
-        let draw = |vcx: &mut VisualTestContext| {
-            vcx.run_until_parked();
-            vcx.update(|window, cx| window.draw(cx).clear(cx));
-        };
-
-        // Text "zzz" through type-to-filter, then Failed on.
-        vcx.update(|window, cx| window.focus(&focus, cx));
-        vcx.simulate_keystrokes("z z z");
-        vcx.executor().advance_clock(FILTER_DEBOUNCE);
-        draw(&mut vcx);
-        assert_eq!(
-            vcx.read_entity(&page, |p, _| p.filter_text().to_owned()),
-            "zzz"
-        );
-        vcx.update(|window, cx| {
-            window.focus(&focus, cx);
-            window.dispatch_action(
-                Box::new(ServicesToggleStateFilter {
-                    state: StateFilterArg::Failed,
-                }),
-                cx,
-            );
-        });
-        draw(&mut vcx);
-        assert!(!vcx.read_entity(&page, |p, _| p.strip().is_default()));
-        publish_services(
-            &engine,
-            1,
-            Vec::new(),
-            &[],
-            Vec::new(),
-            ServiceCounts::default(),
-        );
-        draw(&mut vcx);
-        assert_eq!(vcx.read_entity(&page, |p, _| p.body()), SysBody::NoMatches);
-
-        vcx.update(|window, cx| {
-            window.focus(&focus, cx);
-            window.dispatch_action(Box::new(ServicesClearAllFilters), cx);
-        });
-        vcx.executor().advance_clock(FILTER_DEBOUNCE);
-        draw(&mut vcx);
-        assert_eq!(
-            vcx.read_entity(&page, |p, _| p.filter_text().to_owned()),
-            ""
-        );
-        assert!(vcx.read_entity(&page, |p, _| p.strip().is_default()));
-        let query = last_services_query(&engine).expect("a query");
-        assert!(query.filter.is_empty());
-        assert!(query.services.expect("a strip filter").states.is_empty());
-    }
-
     #[gpui_kit::test]
     fn both_managers_off_shows_no_matches(cx: &mut TestAppContext) {
         let engine = FakeEngine::new();
-        init(cx, engine.clone());
-        let handle = cx.update(|cx| {
-            set_test_page(cx, Tab::Services, services_page);
-            open_main_window_on(Tab::Services, cx).expect("main window opens")
+        let host = init(cx, engine.clone());
+        let (page, mut vcx) = open_page(cx, &host, |host, window, cx| {
+            ServicesPage::new(host, window, cx)
         });
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
-        let page = vcx.update(|_, cx| {
-            main_window_view(cx)
-                .expect("main window view")
-                .read(cx)
-                .page_entity::<ServicesPage>(Tab::Services)
-                .expect("services page")
-        });
         let focus = vcx.update(|_, cx| page.read(cx).table().read(cx).focus_handle().clone());
         let draw = |vcx: &mut VisualTestContext| {
             vcx.run_until_parked();
@@ -4212,7 +3810,7 @@ mod page {
         rig.vcx.run_until_parked();
         rig.draw();
 
-        let id = tl_ui::pages::services::delegate::row_key(&SysNodeId::Unit(unit));
+        let id = tl_ui_sys::pages::services::delegate::row_key(&SysNodeId::Unit(unit));
         assert_eq!(selected_ids(&mut rig.vcx, &rig.page), [id]);
         let focused = rig
             .vcx
@@ -4254,77 +3852,6 @@ mod page {
         assert!(sent.states.contains(&ServiceStateFilter::Failed));
         assert!(sent.states.contains(&ServiceStateFilter::Running));
         assert!(strip.system && strip.user);
-    }
-
-    #[gpui_kit::test]
-    fn go_to_service_filtered_shows_button(cx: &mut TestAppContext) {
-        let engine = FakeEngine::new();
-        init(cx, engine.clone());
-        let handle = cx.update(|cx| {
-            set_test_page(cx, Tab::Services, services_page);
-            open_main_window_on(Tab::Services, cx).expect("main window opens")
-        });
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
-        vcx.update(|window, cx| window.draw(cx).clear(cx));
-        let page = vcx.update(|_, cx| {
-            main_window_view(cx)
-                .expect("main window view")
-                .read(cx)
-                .page_entity::<ServicesPage>(Tab::Services)
-                .expect("services page")
-        });
-        let focus = vcx.update(|_, cx| page.read(cx).table().read(cx).focus_handle().clone());
-        let draw = |vcx: &mut VisualTestContext| {
-            vcx.run_until_parked();
-            vcx.update(|window, cx| window.draw(cx).clear(cx));
-        };
-        let toasts = |vcx: &mut VisualTestContext| -> Vec<String> {
-            vcx.update(|_, cx| {
-                let view = main_window_view(cx).expect("main window");
-                let texts = view.read(cx).toasts().read(cx).visible_texts();
-                texts.iter().map(|t| t.to_string()).collect()
-            })
-        };
-        let generation =
-            |engine: &FakeEngine| last_services_query(engine).map_or(0, |q| q.generation);
-
-        vcx.update(|window, cx| window.focus(&focus, cx));
-        vcx.simulate_keystrokes("n g i n x");
-        vcx.executor().advance_clock(FILTER_DEBOUNCE);
-        draw(&mut vcx);
-        let units = units_with_sshd();
-        let others = units.len() - 1;
-        publish_view(&engine, 1, &units, others, generation(&engine));
-        draw(&mut vcx);
-
-        go_to(&mut vcx, &page, sshd().unit);
-        publish_view(&engine, 2, &units, others, generation(&engine));
-        draw(&mut vcx);
-        assert_eq!(
-            toasts(&mut vcx),
-            [
-                "Switched to Services tab",
-                "Service not found in current view"
-            ]
-        );
-        assert_eq!(
-            vcx.read_entity(&page, |p, _| p.filter_text().to_owned()),
-            "nginx"
-        );
-
-        vcx.update(|window, cx| window.dispatch_action(Box::new(ServicesShowHidden), cx));
-        vcx.executor().advance_clock(FILTER_DEBOUNCE);
-        draw(&mut vcx);
-        assert_eq!(
-            vcx.read_entity(&page, |p, _| p.filter_text().to_owned()),
-            ""
-        );
-        publish_view(&engine, 3, &units, units.len(), generation(&engine));
-        draw(&mut vcx);
-        let id = tl_ui::pages::services::delegate::row_key(&SysNodeId::Unit(sshd().unit));
-        assert_eq!(selected_ids(&mut vcx, &page), [id]);
     }
 
     #[gpui_kit::test]
@@ -4474,14 +4001,14 @@ mod page {
             ActionEvent, ActionRequest, ActionState, IoPriority, RejectReason,
         };
         use tl_model::ids::NodeId;
-        use tl_ui::components::dialog::TlDialogView;
-        use tl_ui::components::window_frame::TlSecondaryWindow;
-        use tl_ui::pages::processes::actions::{
+        use tl_ui_kit::components::dialog::TlDialogView;
+        use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+        use tl_ui_procs::pages::processes::actions::{
             CapturedTarget, GoToParent, IoClass, PriorityClass, SetIoPriorityClass, SetPriority,
         };
-        use tl_ui::pages::processes::toasts::refusal_text;
-        use tl_ui::table::tree_table::RowKind;
-        use tl_ui::windows::actions::{SendSignal, SetAffinity};
+        use tl_ui_procs::pages::processes::toasts::refusal_text;
+        use tl_ui_procs::windows::actions::{SendSignal, SetAffinity};
+        use tl_ui_table::table::tree_table::RowKind;
 
         use super::*;
 
@@ -4673,53 +4200,6 @@ mod page {
         }
 
         #[gpui_kit::test]
-        fn child_go_to_parent_switches_to_processes_tab(cx: &mut TestAppContext) {
-            let engine = FakeEngine::new();
-            init(cx, engine.clone());
-            let handle = cx.update(|cx| {
-                set_test_page(cx, Tab::Services, services_page);
-                open_main_window_on(Tab::Services, cx).expect("main window opens")
-            });
-            let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-            vcx.update(|window, _| window.activate_window());
-            vcx.run_until_parked();
-            vcx.update(|window, cx| window.draw(cx).clear(cx));
-            let page = vcx.update(|_, cx| {
-                main_window_view(cx)
-                    .expect("main window view")
-                    .read(cx)
-                    .page_entity::<ServicesPage>(Tab::Services)
-                    .expect("services page")
-            });
-            let mut systemd = child_process(1, ProcFlags::PROTECTED);
-            systemd.ppid = 0;
-            publish_services(
-                &engine,
-                1,
-                fixture(),
-                &[(0, child_key(812))],
-                vec![systemd, child_process(812, ProcFlags::empty())],
-                ServiceCounts::default(),
-            );
-            vcx.run_until_parked();
-            vcx.update(|window, cx| window.draw(cx).clear(cx));
-            let table = vcx.read_entity(&page, |p, _| p.table().clone());
-            let id = vcx.read_entity(&table, |t, _| t.delegate.row_id(2));
-            table.update(&mut vcx, |table, cx| {
-                table.selection.click(id);
-                cx.notify();
-            });
-            vcx.update(|window, cx| {
-                let focus = table.read(cx).focus_handle().clone();
-                window.focus(&focus, cx);
-                window.dispatch_action(Box::new(GoToParent), cx);
-            });
-            vcx.run_until_parked();
-            vcx.update(|window, cx| window.draw(cx).clear(cx));
-            assert_eq!(active_tab(&mut vcx), Tab::Processes);
-        }
-
-        #[gpui_kit::test]
         fn child_copy_all_metrics_matches_processes_tab(cx: &mut TestAppContext) {
             let mut rig = rig(cx);
             rig.activate();
@@ -4748,10 +4228,10 @@ mod page {
 
         #[gpui_kit::test]
         fn child_add_minigraph_adds_process_card(cx: &mut TestAppContext) {
-            use tl_ui::demand::GlobalDemand;
-            use tl_ui::pages::minigraph::actions::AddMinigraph;
-            use tl_ui::pages::minigraph::panel::MinigraphPanel;
-            use tl_ui::pages::minigraph::sources::{GraphColumn, MinigraphSource};
+            use tl_ui_base::demand::GlobalDemand;
+            use tl_ui_perf_core::minigraph::actions::AddMinigraph;
+            use tl_ui_perf_core::minigraph::panel::MinigraphPanel;
+            use tl_ui_perf_core::minigraph::sources::{GraphColumn, MinigraphSource};
 
             let mut rig = rig(cx);
             let panel = rig.vcx.update(|_, cx| {
@@ -4788,7 +4268,7 @@ mod page {
         fn child_restart_plasma_shell_like_processes_tab(cx: &mut TestAppContext) {
             use tl_model::actions::ActionState;
             use tl_model::table::UnitRef;
-            use tl_ui::pages::processes::actions::RestartUnit;
+            use tl_ui_procs::pages::processes::actions::RestartUnit;
 
             let mut rig = rig(cx);
             rig.activate();
@@ -4854,109 +4334,5 @@ mod page {
             dispatch(&mut rig, Box::new(RestartUnit { unit }));
             assert_eq!(restarts(&rig).len(), 2, "sends again once done");
         }
-    }
-}
-
-/// The shell builds `ServicesPage` on its first visit and shows its toolbar and status text
-/// (tasklens-hk6.20).
-mod main_window {
-    use super::*;
-    use tl_model::command::Tab;
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::pages::services::ServicesPage;
-    use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
-    use tl_ui_settings::settings::{Settings, StartTab};
-
-    fn boot(cx: &mut TestAppContext) -> (VisualTestContext, Entity<MainWindow>) {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let mut settings = Settings::default();
-        settings.general.start_tab = StartTab::Processes;
-        let init = UiInit {
-            settings,
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| TasklensUi::init(cx, client, init));
-        cx.run_until_parked();
-        let handle = cx.update(open_main_window).expect("the main window opens");
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.run_until_parked();
-        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
-        (vcx, main)
-    }
-
-    fn select(vcx: &mut VisualTestContext, main: &Entity<MainWindow>, tab: Tab) {
-        main.update_in(vcx, |m, window, cx| m.select_tab(tab, window, cx));
-        vcx.run_until_parked();
-        vcx.update(|window, cx| window.draw(cx).clear(cx));
-    }
-
-    fn toolbar_shape(vcx: &mut VisualTestContext) -> (f32, bool, bool) {
-        let width = vcx
-            .debug_bounds("Toolbar")
-            .map(|b| f32::from(b.size.width))
-            .expect("the toolbar draws");
-        (
-            width,
-            vcx.debug_bounds("TlShield").is_some(),
-            vcx.debug_bounds("TlButton-picker").is_some(),
-        )
-    }
-
-    #[gpui_kit::test]
-    fn main_window_creates_services_page_lazily(cx: &mut TestAppContext) {
-        let (mut vcx, main) = boot(cx);
-        let page = |vcx: &mut VisualTestContext| {
-            vcx.read_entity(&main, |m, _| m.page_entity::<ServicesPage>(Tab::Services))
-        };
-        assert!(page(&mut vcx).is_none(), "no page before the first visit");
-        select(&mut vcx, &main, Tab::Services);
-        let first = page(&mut vcx).expect("the Services tab builds a page");
-        assert_eq!(vcx.read_entity(&main, |m, _| m.active_tab()), Tab::Services);
-        select(&mut vcx, &main, Tab::Processes);
-        select(&mut vcx, &main, Tab::Services);
-        let again = page(&mut vcx).expect("the page is kept");
-        assert_eq!(first.entity_id(), again.entity_id());
-    }
-
-    #[gpui_kit::test]
-    fn services_toolbar_slots(cx: &mut TestAppContext) {
-        let (mut vcx, main) = boot(cx);
-        select(&mut vcx, &main, Tab::Processes);
-        let processes = toolbar_shape(&mut vcx);
-        select(&mut vcx, &main, Tab::Information);
-        let information = toolbar_shape(&mut vcx);
-        select(&mut vcx, &main, Tab::Services);
-        let services = toolbar_shape(&mut vcx);
-        assert_eq!(
-            services, information,
-            "the same slots 1 and 4 as the other default tabs"
-        );
-        assert!(
-            services.0 < processes.0,
-            "no Processes page buttons on Services"
-        );
-    }
-
-    #[gpui_kit::test]
-    fn services_status_text_in_chip(cx: &mut TestAppContext) {
-        let (mut vcx, main) = boot(cx);
-        select(&mut vcx, &main, Tab::Services);
-        let page = vcx
-            .read_entity(&main, |m, _| m.page_entity::<ServicesPage>(Tab::Services))
-            .expect("Services built");
-        let mut expected = String::new();
-        vcx.read_entity(&page, |p, _| p.status_text(&mut expected));
-        assert!(!expected.is_empty(), "the loading text shows at first");
-        let chip = vcx.read_entity(&main, |m, _| m.status_chip().clone());
-        let drawn = vcx.read_entity(&chip, |c, _| c.drawn_text());
-        assert_eq!(drawn, expected);
     }
 }

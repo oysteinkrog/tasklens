@@ -33,7 +33,7 @@ mod processes_shell;
 mod props_shell;
 mod run;
 mod selectors;
-mod services;
+mod services_shell;
 mod settings_window;
 mod setup_window;
 mod shell;
