@@ -1,5 +1,8 @@
 //! Network page: the Throughput chart, its scale and value, the disconnected gap and the demand
 //! (E25, UI-PRF-031; PERF-054, PERF-055).
+//!
+//! The Public IP tests that click Fetch need the shell's public IP service and stay in tl-ui
+//! (`tests/ui/net_page_shell.rs`).
 
 use std::sync::Arc;
 
@@ -7,8 +10,6 @@ use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement as _, Render,
     Styled as _, TestAppContext, VisualTestContext, Window, div, px,
 };
-use tl_model::client::EngineClient;
-use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
@@ -17,20 +18,18 @@ use tl_model::snapshot::{PublicIpState, SystemSnapshot};
 use tl_model::system::{LinkState, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
-use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::host::HostContext;
-use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_chart::chart::{ChartState, ChartView, ValueFormat, YScale, format_value};
-use tl_ui_kit::components::kv_grid;
 use tl_ui_kit::components::menu::{context_menu_layer, open_context_menu};
+use tl_ui_pagehost::PageHost;
 use tl_ui_perf::performance::net::{NetPage, NetSettingsDesktop, THROUGHPUT_ID};
 use tl_ui_perf::performance::page::DevicePage as _;
 use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
-use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
+use tl_ui_settings::settings::{NetworkUnit, Settings};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The interface in the fake catalog.
@@ -134,37 +133,17 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
         });
         s.system = Arc::new(sys);
     });
-    let client: Arc<dyn EngineClient> = engine.clone();
+    let host = PageHost::install(cx, Arc::clone(&engine), settings);
     cx.update(|cx| {
-        gpui_kit::init(cx);
-        tl_ui_base::theme::store::init(
-            cx,
-            &ThemeSettings::default(),
-            &AppearanceSettings::default(),
-            Vec::new(),
-        );
-        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
-        init_strings(cx, "en-US");
-        kv_grid::init(cx);
-        cx.set_global(EngineGlobal(Arc::clone(&client)));
-        cx.set_global(BootSettings {
-            settings,
-            state: UiState::default(),
-            persist: None,
-            startup_toasts: Vec::new(),
-        });
-        TlSettings::init(cx);
         tl_ui_kit::actions::register_global_handlers(cx);
         tl_ui_kit::components::menu::bind_keys(cx);
         // No Network settings link, whatever XDG_CURRENT_DESKTOP the test runs under.
         cx.set_global(NetSettingsDesktop(None));
-        // The public IP notice is a shell service the page reaches through ShellApi.
-        tl_ui::window::main::install_shell_api(cx);
     });
-    let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-    // Only EngineGlobal is installed here, so the host has the client and nothing else.
-    let ctx = HostContext::from_parts(Some(Arc::clone(&client)), None, None, None, None);
-    let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+    let hub = host.hub.clone();
+    // The page's host has the client and nothing else; the page gets the hub and demand itself.
+    let ctx = HostContext::from_parts(Some(Arc::clone(&host.client)), None, None, None, None);
+    let demand = host.demand.clone();
     let key = DeviceKey(Arc::from("net:enp38s0"));
     let row = DeviceRow {
         key: key.clone(),
@@ -692,8 +671,6 @@ mod public_ip {
     use super::*;
     use tl_ui_perf::performance::net::{local_hh_mm, public_ip_text};
 
-    const FETCH_BUTTON: &str = "TlButton-perf-net-public-ip-fetch";
-
     fn accepted(accepted: bool) -> Settings {
         let mut s = Settings::default();
         s.network.public_ip_notice_accepted = accepted;
@@ -743,68 +720,6 @@ mod public_ip {
                 found.value.tooltip.map(|t| t.to_string()),
             )
         })
-    }
-
-    fn fetches(r: &Rig<'_>) -> usize {
-        r.engine
-            .commands()
-            .iter()
-            .filter(|c| matches!(c, Command::Device(DeviceCommand::FetchPublicIp)))
-            .count()
-    }
-
-    fn click_fetch(r: &mut Rig<'_>) {
-        let button = r
-            .vcx
-            .debug_bounds(FETCH_BUTTON)
-            .expect("Fetch button drawn");
-        r.vcx.simulate_click(button.center(), Modifiers::none());
-        draw(r.vcx);
-    }
-
-    #[gpui_kit::test]
-    fn public_ip_states(cx: &mut TestAppContext) {
-        let mut r = open(cx, accepted(true), system(1000));
-        assert_eq!(row(&mut r).0, "Not fetched");
-        let value = r.vcx.debug_bounds("TlKv-value-15").expect("value drawn");
-        let button = r.vcx.debug_bounds(FETCH_BUTTON).expect("Fetch button");
-        assert!(button.left() > value.left(), "the button follows the text");
-        assert_eq!(button.size.height, px(24.));
-
-        publish(&mut r, PublicIpState::Fetching);
-        assert_eq!(row(&mut r).0, "Fetching…");
-        click_fetch(&mut r);
-        assert_eq!(fetches(&r), 0, "a loading button ignores clicks");
-
-        publish(&mut r, fetched(None));
-        assert_eq!(row(&mut r).0, "203.0.113.4 (fetched 14:02)");
-        assert!(
-            r.vcx.debug_bounds(FETCH_BUTTON).is_none(),
-            "no button after a result"
-        );
-    }
-
-    #[gpui_kit::test]
-    fn public_ip_first_fetch_opens_notice(cx: &mut TestAppContext) {
-        let mut r = open(cx, accepted(false), system(1000));
-        let before = r.vcx.update(|_, cx| cx.windows().len());
-        click_fetch(&mut r);
-        assert_eq!(fetches(&r), 0, "no command before Continue");
-        let after = r.vcx.update(|_, cx| cx.windows().len());
-        assert_eq!(after, before + 1, "the notice window opened");
-    }
-
-    #[gpui_kit::test]
-    fn public_ip_accepted_sends_command(cx: &mut TestAppContext) {
-        let mut r = open(cx, accepted(true), system(1000));
-        click_fetch(&mut r);
-        assert_eq!(fetches(&r), 1, "the command went out at once");
-        publish(&mut r, PublicIpState::Fetching);
-        assert_eq!(row(&mut r).0, "Fetching…");
-        assert!(
-            r.vcx.debug_bounds(FETCH_BUTTON).is_some(),
-            "the button shows its spinner"
-        );
     }
 
     #[gpui_kit::test]

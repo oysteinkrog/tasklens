@@ -13,6 +13,7 @@ mod disk_page;
 mod fan_page;
 mod gpu_page;
 mod memory_page;
+mod net_page;
 mod overview;
 mod overview_cpu_widgets;
 mod overview_disk_widgets;

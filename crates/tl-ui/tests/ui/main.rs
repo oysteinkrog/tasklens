@@ -24,7 +24,7 @@ mod information;
 mod low_memory;
 mod menus;
 mod minigraphs;
-mod net_page;
+mod net_page_shell;
 mod overview;
 mod overview_range;
 mod overview_timeline;
