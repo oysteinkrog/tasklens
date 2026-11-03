@@ -8,8 +8,9 @@
 //!
 //! The switch is not a widget: the placer keeps its height above the first part and says where
 //! it goes ([`MemoryParts::switch_at`]), and the container draws the page's switch view there.
-//! A `swap` widget takes no space while the system has no swap (SwapTotal 0), and a block takes
-//! none while 1.3.0 hides it (no zram and zswap off, no swap device, no module data).
+//! A `swap` widget takes no space while the system has no swap (SwapTotal 0, read when the page
+//! is shown or its layout changes, never on a sample), and a block takes none while 1.3.0 hides
+//! it (no zram and zswap off, no swap device, no module data).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -35,7 +36,8 @@ pub struct MemoryParts {
     pub switch: Rc<Cell<f32>>,
     /// Where the last placement put the switch, body px; the container's flow decoration.
     pub switch_at: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// The system has swap: a `swap` widget takes space.
+    /// The system had swap when the page was last shown or its layout last changed: a `swap`
+    /// widget takes space. A sample does not change it.
     pub swap: Rc<Cell<bool>>,
     /// The composition bar's height with its caption (its `MemoryPartView`).
     pub bar: Rc<Cell<f32>>,

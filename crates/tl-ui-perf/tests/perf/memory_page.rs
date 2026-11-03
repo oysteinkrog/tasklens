@@ -491,6 +491,15 @@ fn memory_totals_change_rebuilds_specs(cx: &mut TestAppContext) {
     sys.header.version = 2;
     r.engine.publish_with(move |s| s.system = Arc::new(sys));
     draw(r.vcx);
+    // A sample places no new widget (ADR-019 render contract): the Swap chart shows when the
+    // page is shown again.
+    assert!(r.metric_bounds("swap").is_none(), "a sample adds no chart");
+    let page = r.page.clone();
+    for active in [false, true] {
+        r.vcx
+            .update(|_, cx| page.update(cx, |p, cx| p.set_active(active, cx)));
+    }
+    draw(r.vcx);
     assert!(r.metric_bounds("swap").is_some(), "swap appeared");
     let swap = r.chart("swap");
     let y = r.vcx.read_entity(&swap, |v, _| v.spec.y);

@@ -970,6 +970,85 @@ fn shown_entities(r: &mut Rig, life: &mut Lifecycle) -> Vec<EntityId> {
     })
 }
 
+/// Memory totals as [`publish_memory`] with `swap` bytes of swap.
+fn publish_swap(engine: &FakeEngine, swap: u64) {
+    publish_memory(engine, 23 * GIB);
+    engine.publish_with(move |s| {
+        let sys = Arc::make_mut(&mut s.system);
+        sys.memory.swap_total = swap;
+        sys.memory.swap_free = swap;
+    });
+}
+
+/// A sample that turns swap off or on renders no page or container and makes or drops no
+/// entity: the Swap chart keeps its place. Showing the page again reads SwapTotal, and the
+/// chart goes or comes back (ADR-019 phase 3 render contract, "A listed `swap` takes no space
+/// while SwapTotal is 0").
+#[gpui_kit::test]
+fn page_mem_swap_sample_places_nothing(cx: &mut TestAppContext) {
+    let mut r = open(cx, PerformanceSettings::default());
+    let container = r.container();
+    let page = r.page.clone();
+    let swap = r.metric_id("swap");
+    let placed = |r: &mut Rig| {
+        r.vcx
+            .update(|_, cx| container.read(cx).placed_ids().contains(&swap))
+    };
+    let counts = |r: &mut Rig| {
+        r.vcx.update(|_, cx| {
+            (
+                page.read(cx).notify_count.get(),
+                container.read(cx).notify_count.get(),
+            )
+        })
+    };
+    let reshow = |r: &mut Rig| {
+        for active in [false, true] {
+            r.vcx
+                .update(|_, cx| page.update(cx, |p, cx| p.set_active(active, cx)));
+        }
+        draw(r.vcx);
+    };
+    assert!(placed(&mut r), "8 GiB of swap: the Swap chart is placed");
+    let mut life = Lifecycle::new(&mut r);
+    let entities = shown_entities(&mut r, &mut life);
+    let before = counts(&mut r);
+
+    publish_swap(&r.engine, 0);
+    draw(r.vcx);
+    assert_eq!(
+        counts(&mut r),
+        before,
+        "swapoff: no page or container notify"
+    );
+    assert_eq!(life.counts(), (0, 0), "swapoff: no entity made or dropped");
+    assert!(placed(&mut r), "a sample keeps the Swap chart's place");
+    assert_eq!(shown_entities(&mut r, &mut life), entities);
+
+    reshow(&mut r);
+    assert!(!placed(&mut r), "shown again without swap: no Swap chart");
+    assert!(r.try_bounds(widget_id(PAGE, swap)).is_none());
+
+    let before = counts(&mut r);
+    let made = life.counts().0;
+    publish_swap(&r.engine, 8 * GIB);
+    draw(r.vcx);
+    assert_eq!(
+        counts(&mut r),
+        before,
+        "swapon: no page or container notify"
+    );
+    assert_eq!(life.counts().0, made, "swapon: no entity made");
+    assert!(!placed(&mut r), "a sample places no Swap chart");
+
+    reshow(&mut r);
+    assert!(
+        placed(&mut r),
+        "shown again with swap: the Swap chart is back"
+    );
+    assert!(r.try_bounds(widget_id(PAGE, swap)).is_some(), "drawn");
+}
+
 /// A sample that changes nothing the page shows renders no page or container; a sample that
 /// moves memory's values notifies neither the page nor the container, and Details and the bar
 /// notify for their own changes. No sample makes or drops a widget, chart or part entity
