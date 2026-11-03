@@ -1163,7 +1163,7 @@ fn long_range_switches_tier(cx: &mut TestAppContext) {
 }
 
 /// `TlMenu` drops a doubled separator, so a page without its own items has one separator
-/// between the common items and View, never two.
+/// before and one after the widget items (Edit Widgets and Reset Page), never two.
 #[gpui_kit::test]
 fn page_menu_single_separator_without_page_items(cx: &mut TestAppContext) {
     let mut r = open(cx, 1600., 1000., true);
@@ -1177,6 +1177,9 @@ fn page_menu_single_separator_without_page_items(cx: &mut TestAppContext) {
             (MenuEntryKind::Item, "Copy"),
             (MenuEntryKind::Item, "Graph Summary View"),
             (MenuEntryKind::Submenu, "Time range"),
+            (MenuEntryKind::Separator, ""),
+            (MenuEntryKind::Item, "Edit Widgets…"),
+            (MenuEntryKind::Disabled, "Reset Page"),
             (MenuEntryKind::Separator, ""),
             (MenuEntryKind::Submenu, "View"),
             (MenuEntryKind::Disabled, "Add tray icon graph"),
