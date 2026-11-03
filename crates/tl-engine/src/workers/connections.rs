@@ -34,7 +34,6 @@ use std::time::Duration;
 use asupersync::channel::{mpsc, watch};
 use asupersync::runtime::JoinError;
 use asupersync::supervision::ManagedGeneration;
-use asupersync::time;
 use asupersync::{Cx, Outcome};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -1004,7 +1003,8 @@ pub async fn run_resolver<R: Resolve>(
             let task_answers = answers.clone();
             let task_done = done.clone();
             let spawned = cx.spawn(move |cx| async move {
-                let found = time::timeout(cx.now(), LOOKUP_TIMEOUT, resolver.lookup(&cx, ip)).await;
+                let found =
+                    crate::time_util::timeout(&cx, LOOKUP_TIMEOUT, resolver.lookup(&cx, ip)).await;
                 if cx.checkpoint().is_err() {
                     return;
                 }

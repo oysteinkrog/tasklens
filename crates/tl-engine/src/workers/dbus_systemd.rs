@@ -3749,7 +3749,7 @@ mod tests {
             let guard = start_color_scheme(&cx, EngineMode::Full, manager, &client, &tx);
             assert_eq!(guard.is_some(), manager == Manager::User);
             let mut got = Vec::new();
-            if let Ok(Ok(msg)) = time::timeout(cx.now(), wait, rx.recv(&cx)).await {
+            if let Ok(Ok(msg)) = crate::time_util::timeout(&cx, wait, rx.recv(&cx)).await {
                 match msg {
                     EngineMsg::Source(SourceUpdate::ColorScheme(v)) => got.push(v),
                     other => panic!("unexpected message {other:?}"),
@@ -4116,7 +4116,7 @@ mod tests {
             if self.end {
                 return Err(DbusError::Closed);
             }
-            let _ = time::timeout(cx.now(), d, std::future::pending::<()>()).await;
+            let _ = crate::time_util::timeout(cx, d, std::future::pending::<()>()).await;
             if cx.checkpoint().is_err() {
                 return Err(DbusError::Closed);
             }

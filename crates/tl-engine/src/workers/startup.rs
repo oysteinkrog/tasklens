@@ -1401,7 +1401,7 @@ mod tests {
         rx: &mut mpsc::Receiver<EngineMsg>,
         d: Duration,
     ) -> Option<StartupUpdate> {
-        match asupersync::time::timeout(cx.now(), d, rx.recv(cx)).await {
+        match crate::time_util::timeout(cx, d, rx.recv(cx)).await {
             Ok(Ok(EngineMsg::Source(SourceUpdate::Startup(update)))) => Some(update),
             Ok(other) => panic!("unexpected {other:?}"),
             Err(_) => None,

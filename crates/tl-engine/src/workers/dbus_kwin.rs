@@ -879,7 +879,7 @@ async fn unload_on_exit(cx: &Cx, conn: &DbusConn) {
             zbus::Proxy::new(&raw, KWIN_NAME, SCRIPTING_PATH, SCRIPTING_INTERFACE).await?;
         scripting.call_noreply("unloadScript", &(PLUGIN,)).await
     };
-    let mut call = std::pin::pin!(time::timeout(cx.now(), UNLOAD_TIMEOUT, call));
+    let mut call = std::pin::pin!(crate::time_util::timeout(cx, UNLOAD_TIMEOUT, call));
     let result = std::future::poll_fn(|task| cx.masked(|| call.as_mut().poll(task))).await;
     if !matches!(result, Ok(Ok(()))) {
         tracing::debug!(target: "tasklens::engine", "unloadScript on exit did not complete");
@@ -1226,7 +1226,7 @@ impl PickHost for KWinScripting<'_> {
                 )
                 .await
             };
-            let result = time::timeout(cx.now(), PICK_TIMEOUT, call).await;
+            let result = crate::time_util::timeout(&cx, PICK_TIMEOUT, call).await;
             if cx.checkpoint().is_err() {
                 return;
             }

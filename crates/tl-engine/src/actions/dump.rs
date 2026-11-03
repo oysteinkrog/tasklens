@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::Cx;
-use asupersync::time;
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 use tl_model::actions::{ActionError, ActionState, DumpMode, RejectReason};
@@ -110,7 +109,7 @@ async fn with_progress<T>(
 ) -> T {
     let mut job = std::pin::pin!(job);
     loop {
-        match time::timeout(cx.now(), PROGRESS_EVERY, job.as_mut()).await {
+        match crate::time_util::timeout(cx, PROGRESS_EVERY, job.as_mut()).await {
             Ok(out) => return out,
             Err(_) => {
                 if let Ok(meta) = std::fs::metadata(path) {
@@ -257,7 +256,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use asupersync::channel::mpsc;
-    use asupersync::time::{TimeSource, TimerDriverHandle, VirtualClock};
+    use asupersync::time::{self, TimeSource, TimerDriverHandle, VirtualClock};
     use asupersync::types::{Budget, Time};
     use asupersync::{LabConfig, LabRuntime};
     use tl_model::actions::{ActionEvent, ActionId, ActionKind, ActionTarget, CgroupRef};

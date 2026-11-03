@@ -618,7 +618,7 @@ async fn open_store(
         Store::open(job_cfg, now_boot_ns(), Instant::now() + LOAD_BUDGET)
     })?;
     let delay = cfg.load_delay;
-    let joined = time::timeout(cx.now(), LOAD_TIMEOUT, async {
+    let joined = crate::time_util::timeout(cx, LOAD_TIMEOUT, async {
         if let Some(d) = delay {
             time::sleep(cx.now(), d).await;
         }
@@ -1046,7 +1046,7 @@ pub async fn run_history(
     }
 
     loop {
-        if let Ok(Ok(msg)) = time::timeout(cx.now(), RECV_WAIT, rx.recv(&cx)).await {
+        if let Ok(Ok(msg)) = crate::time_util::timeout(&cx, RECV_WAIT, rx.recv(&cx)).await {
             msgs.push(msg);
             while msgs.len() < BATCH_MAX {
                 match rx.try_recv() {

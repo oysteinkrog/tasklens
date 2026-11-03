@@ -25,7 +25,6 @@ use std::time::Duration;
 use asupersync::Cx;
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::runtime::JoinError;
-use asupersync::time;
 use tl_model::command::{SetupState, SetupStep};
 use tl_model::health::{HelperStartOutcome, HelperState};
 use tl_model::helper_proto::{HelperFrame, HelperReply, HelperRequest};
@@ -340,7 +339,7 @@ pub async fn helper_task_with(
     task.publish(&cx, first, None).await;
     loop {
         let msg = if task.state == HelperState::Unlocked {
-            match time::timeout(cx.now(), IDLE_CHECK, rx.recv(&cx)).await {
+            match crate::time_util::timeout(&cx, IDLE_CHECK, rx.recv(&cx)).await {
                 Ok(msg) => msg,
                 Err(_) => {
                     task.idle_check(&cx).await;
@@ -617,7 +616,7 @@ async fn run_blocking<T: Send + 'static>(
     let mut job = cx
         .spawn_blocking(move |_| f())
         .map_err(|e| Lost::Gone(format!("could not start a job: {e}").into()))?;
-    match time::timeout(cx.now(), wait, job.join(cx)).await {
+    match crate::time_util::timeout(cx, wait, job.join(cx)).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(JoinError::Panicked(_))) => Err(Lost::Gone("helper job panicked".into())),
         Ok(Err(_)) => Err(Lost::Gone("helper job cancelled".into())),

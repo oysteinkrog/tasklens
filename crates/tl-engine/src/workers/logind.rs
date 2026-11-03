@@ -178,7 +178,6 @@ mod tests {
     use std::sync::Mutex;
 
     use asupersync::channel::watch;
-    use asupersync::time;
     use asupersync::types::Budget;
     use asupersync::{LabConfig, LabRuntime};
     use tl_model::demand::Demand;
@@ -198,7 +197,7 @@ mod tests {
             if let Some(entering) = self.0.pop_front() {
                 return Ok(Some(entering));
             }
-            let _ = time::timeout(cx.now(), d, std::future::pending::<()>()).await;
+            let _ = crate::time_util::timeout(cx, d, std::future::pending::<()>()).await;
             Ok(None)
         }
     }
@@ -340,7 +339,7 @@ mod tests {
                     let _ = run(cx, io).await;
                 })
                 .expect("worker spawns");
-            let first = time::timeout(cx.now(), Duration::from_secs(5), rx.recv(&cx))
+            let first = crate::time_util::timeout(&cx, Duration::from_secs(5), rx.recv(&cx))
                 .await
                 .expect("a message within 5 s")
                 .expect("channel open");

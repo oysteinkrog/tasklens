@@ -10,7 +10,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use asupersync::Cx;
-use asupersync::time;
 use rustix::io::Errno;
 use tl_model::actions::{
     ActionError, ActionKind, ActionState, Family, FourTuple, Proto, RejectReason,
@@ -147,7 +146,7 @@ fn internal_error_text(text: &str) -> ActionState {
 /// dropped: the reducer is gone or did not take it within 1 s.
 async fn send_support(cx: &Cx, actx: &ActionCtx, supported: bool) -> bool {
     let msg = EngineMsg::Source(SourceUpdate::ConnectionsDestroySupport(supported));
-    match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, actx.msgs.send(cx, msg)).await {
+    match crate::time_util::timeout(cx, EVENT_SEND_TIMEOUT, actx.msgs.send(cx, msg)).await {
         Ok(Ok(())) => true,
         Ok(Err(_)) | Err(_) => {
             tracing::warn!(target: "tasklens::action", supported, "destroy support message dropped");

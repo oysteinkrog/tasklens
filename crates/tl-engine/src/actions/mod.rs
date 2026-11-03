@@ -27,7 +27,6 @@ use std::time::Duration;
 use asupersync::Cx;
 use asupersync::channel::mpsc;
 use asupersync::runtime::TaskHandle;
-use asupersync::time::{self, Elapsed};
 use futures_lite::FutureExt;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustix::io::Errno;
@@ -49,6 +48,7 @@ use crate::bridge::HookCtx;
 use crate::config::EngineConfig;
 use crate::dbus::ManagerConnSlot;
 use crate::reducer::{ActionGate, ActionRoute, AdmissionView};
+use crate::time_util::WaitEnd;
 use crate::update::EngineMsg;
 
 /// Most requests running at once; one more is `Rejected(Busy)`.
@@ -1091,7 +1091,7 @@ async fn run_with(
         send_end(route, req.id, end);
     };
     let summary = event(req.id, None, summary);
-    match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, events.push(summary, end_now)).await {
+    match crate::time_util::timeout(cx, EVENT_SEND_TIMEOUT, events.push(summary, end_now)).await {
         Ok(Some(Ok(()))) => {}
         Ok(None) => {
             tracing::debug!(target: "tasklens::action", id = req.id.0, "the gate ended the action first");
@@ -1114,7 +1114,7 @@ async fn run_with(
         return;
     }
     let finished = EngineMsg::ActionFinished { id: route.id };
-    match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, actx.msgs.send(cx, finished)).await {
+    match crate::time_util::timeout(cx, EVENT_SEND_TIMEOUT, actx.msgs.send(cx, finished)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
             tracing::warn!(target: "tasklens::action", id = req.id.0, "reducer gone, ActionFinished dropped");
@@ -1455,7 +1455,7 @@ async fn emit(events: &Emitter<'_>, cx: &Cx, ev: ActionEvent) {
         tracing::debug!(target: "tasklens::action", id, "action cancelled, event dropped");
         return;
     }
-    match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, events.push(ev, |_| {})).await {
+    match crate::time_util::timeout(cx, EVENT_SEND_TIMEOUT, events.push(ev, |_| {})).await {
         Ok(Some(Ok(()))) => {}
         Ok(None) => {
             tracing::debug!(target: "tasklens::action", id, "action ended, event dropped");
@@ -1470,13 +1470,13 @@ async fn emit(events: &Emitter<'_>, cx: &Cx, ev: ActionEvent) {
 }
 
 /// Runs `job` under the deadline `d`. `None` waits without a timeout.
-pub async fn with_deadline<T>(
+pub(crate) async fn with_deadline<T>(
     cx: &Cx,
     d: Option<Duration>,
     job: impl Future<Output = T>,
-) -> Result<T, Elapsed> {
+) -> Result<T, WaitEnd> {
     match d {
-        Some(d) => time::timeout(cx.now(), d, job).await,
+        Some(d) => crate::time_util::timeout(cx, d, job).await,
         None => Ok(job.await),
     }
 }
@@ -2739,6 +2739,7 @@ mod run_tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use asupersync::time;
     use asupersync::types::Budget;
     use asupersync::{LabConfig, LabRuntime};
     use smallvec::SmallVec;

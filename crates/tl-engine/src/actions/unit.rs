@@ -137,7 +137,8 @@ impl JobStream {
             if waited >= EXECUTOR_TICK {
                 return Ok(None);
             }
-            let next = time::timeout(cx.now(), EXECUTOR_TICK - waited, self.inner.next()).await;
+            let next =
+                crate::time_util::timeout(cx, EXECUTOR_TICK - waited, self.inner.next()).await;
             if cx.checkpoint().is_err() {
                 return Err(UnitBusError::Closed);
             }
@@ -241,13 +242,13 @@ fn reply_value(reply: &zbus::Message) -> zbus::Result<OwnedValue> {
     Ok(value.try_into_owned()?)
 }
 
-/// `time::timeout` then a checkpoint, with the errors as `UnitBusError`.
+/// `time_util::timeout` then a checkpoint, with the errors as `UnitBusError`.
 async fn timed<T>(
     cx: &Cx,
     d: Duration,
     fut: impl Future<Output = zbus::Result<T>>,
 ) -> Result<T, UnitBusError> {
-    let result = time::timeout(cx.now(), d, fut).await;
+    let result = crate::time_util::timeout(cx, d, fut).await;
     if cx.checkpoint().is_err() {
         return Err(UnitBusError::Closed);
     }

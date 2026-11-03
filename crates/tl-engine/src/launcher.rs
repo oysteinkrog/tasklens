@@ -7,8 +7,8 @@
 //! `pkexec env … /bin/sh -c <text>` and gets no scope; the launcher watches the child's comm to
 //! see when the polkit prompt closed (R-253).
 //!
-//! Every D-Bus call has a 2 s `time::timeout` followed by a checkpoint, except the 30 s wait for
-//! `JobRemoved`. Never log a command text, an Exec line or a path above `debug`.
+//! Every D-Bus call has a 2 s `time_util::timeout` followed by a checkpoint, except the 30 s wait
+//! for `JobRemoved`. Never log a command text, an Exec line or a path above `debug`.
 
 #![cfg_attr(
     not(test),
@@ -617,7 +617,7 @@ impl CallError {
 }
 
 async fn timed<T>(cx: &Cx, fut: impl Future<Output = zbus::Result<T>>) -> Result<T, CallError> {
-    let result = time::timeout(cx.now(), CALL_TIMEOUT, fut).await;
+    let result = crate::time_util::timeout(cx, CALL_TIMEOUT, fut).await;
     if cx.checkpoint().is_err() {
         return Err(CallError::Cancelled);
     }
@@ -728,12 +728,9 @@ async fn start_unit_and_wait(
         if waited >= JOB_WAIT {
             return Err(internal("job wait timed out"));
         }
-        let next = time::timeout(
-            cx.now(),
-            (JOB_WAIT - waited).min(CALL_TIMEOUT),
-            stream.next(),
-        )
-        .await;
+        let next =
+            crate::time_util::timeout(cx, (JOB_WAIT - waited).min(CALL_TIMEOUT), stream.next())
+                .await;
         if cx.checkpoint().is_err() {
             return Err(internal("cancelled"));
         }

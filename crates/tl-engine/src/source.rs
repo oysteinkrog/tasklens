@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use asupersync::channel::{mpsc, oneshot, watch};
 use asupersync::runtime::JoinError;
-use asupersync::time::{Interval, MissedTickBehavior, interval, sleep_until, timeout, timeout_at};
+use asupersync::time::{Interval, MissedTickBehavior, interval, sleep_until};
 use asupersync::{Cx, Outcome, PanicPayload};
 use tl_model::command::{DeviceCommand, HistoryWhat, KWinCommand, SetupStep};
 use tl_model::demand::Demand;
@@ -35,6 +35,7 @@ use tl_model::ids::ProcessKey;
 use tl_model::settings::EngineSettings;
 use tl_model::time::now_boot_ns;
 
+use crate::time_util::{timeout, timeout_at};
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 
 /// An off source wakes this often to re-read demand. It does no I/O on these wakes.
@@ -342,7 +343,7 @@ pub async fn run<S: Source>(cx: Cx, mut io: WorkerIo, mut src: S) -> Outcome<(),
         }
 
         if src.wakes_on_demand() {
-            match timeout_at(iv.deadline(), io.demand.changed(&cx)).await {
+            match timeout_at(&cx, iv.deadline(), io.demand.changed(&cx)).await {
                 // Read the new demand at the top of the loop; the deadline stays.
                 Ok(Ok(())) => {
                     if cx.checkpoint().is_err() {
@@ -450,7 +451,7 @@ pub async fn run<S: Source>(cx: Cx, mut io: WorkerIo, mut src: S) -> Outcome<(),
                 let Some(wait) = hung_after.take() else {
                     break done.recv(&cx).await;
                 };
-                match timeout(cx.now(), wait, done.recv(&cx)).await {
+                match timeout(&cx, wait, done.recv(&cx)).await {
                     Ok(got) => break got,
                     Err(_) => {
                         if let Some(state) = late.hung() {

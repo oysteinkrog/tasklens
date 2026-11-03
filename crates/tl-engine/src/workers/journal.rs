@@ -27,7 +27,6 @@ use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use asupersync::runtime::{RuntimeHandle, TaskHandle};
-use asupersync::time;
 use rustix::event::{PollFd, PollFlags, Timespec};
 use serde_json::Value;
 use tl_model::journal::{
@@ -312,7 +311,7 @@ async fn run(
         session.start_follow(&cx).await;
     }
     loop {
-        let msg = time::timeout(cx.now(), IDLE_SLICE, control.recv()).await;
+        let msg = crate::time_util::timeout(&cx, IDLE_SLICE, control.recv()).await;
         session.reap();
         match msg {
             Ok(Ok(JournalControl::SetFollow(true))) => session.start_follow(&cx).await,

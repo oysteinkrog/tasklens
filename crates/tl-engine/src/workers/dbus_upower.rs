@@ -1126,7 +1126,6 @@ mod tests {
     use std::sync::Mutex;
 
     use asupersync::channel::watch;
-    use asupersync::time;
     use asupersync::types::Budget;
     use asupersync::{LabConfig, LabRuntime};
     use tl_model::demand::Demand;
@@ -1410,7 +1409,7 @@ mod tests {
             if event.is_some() {
                 return Ok(event);
             }
-            let _ = time::timeout(cx.now(), d, std::future::pending::<()>()).await;
+            let _ = crate::time_util::timeout(cx, d, std::future::pending::<()>()).await;
             // Same as `DbusConn::next_signal`: a cancelled `cx` ends the stream.
             if cx.checkpoint().is_err() {
                 return Err(DbusError::Closed);

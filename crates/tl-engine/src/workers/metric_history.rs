@@ -68,7 +68,6 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwapOption;
 use asupersync::channel::mpsc;
 use asupersync::runtime::{JoinError, TaskHandle};
-use asupersync::time;
 use asupersync::{Cx, Outcome};
 use rustc_hash::FxHashMap;
 use rustix::time::{ClockId, Timespec, clock_gettime};
@@ -1201,7 +1200,7 @@ pub async fn run_metric_history(
     }
 
     loop {
-        if let Ok(Ok(msg)) = time::timeout(cx.now(), RECV_WAIT, rx.recv(&cx)).await {
+        if let Ok(Ok(msg)) = crate::time_util::timeout(&cx, RECV_WAIT, rx.recv(&cx)).await {
             msgs.push(msg);
             while msgs.len() < BATCH_MAX {
                 match rx.try_recv() {

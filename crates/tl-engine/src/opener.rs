@@ -6,7 +6,7 @@
 //! `LaunchWhat::DbusActivate` (R-170 item 11). The colour scheme reader feeds
 //! `SystemSnapshot.color_scheme` (R-170 item 4); the `SystemdUser` worker runs it (R-244).
 //!
-//! Every D-Bus call has a 2 s `time::timeout` followed by a checkpoint. `xdg-open` gets the
+//! Every D-Bus call has a 2 s `time_util::timeout` followed by a checkpoint. `xdg-open` gets the
 //! target as one argv element, never through a shell. Never log a path or URI above `debug`.
 
 #![cfg_attr(
@@ -27,7 +27,6 @@ use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::channel::mpsc;
-use asupersync::time;
 use futures_lite::StreamExt;
 use tl_model::actions::{ActionError, ActionState};
 use zbus::message::Type;
@@ -192,7 +191,7 @@ pub(crate) async fn watch_color_scheme(
         send_scheme(cx, tx, v).await?;
     }
     loop {
-        let next = time::timeout(cx.now(), CALL_TIMEOUT, stream.next()).await;
+        let next = crate::time_util::timeout(cx, CALL_TIMEOUT, stream.next()).await;
         if cx.checkpoint().is_err() {
             return Ok(());
         }
@@ -358,10 +357,10 @@ async fn portal_open_file(cx: &Cx, conn: &zbus::Connection, target: &str) -> Res
     timed(cx, call).await.map(drop)
 }
 
-/// `time::timeout` with `CALL_TIMEOUT`, then a checkpoint. The error is a reason without the
+/// `time_util::timeout` with `CALL_TIMEOUT`, then a checkpoint. The error is a reason without the
 /// D-Bus error message, which can hold a path.
 async fn timed<T>(cx: &Cx, fut: impl Future<Output = zbus::Result<T>>) -> Result<T, Arc<str>> {
-    let result = time::timeout(cx.now(), CALL_TIMEOUT, fut).await;
+    let result = crate::time_util::timeout(cx, CALL_TIMEOUT, fut).await;
     if cx.checkpoint().is_err() {
         return Err("cancelled".into());
     }
@@ -971,7 +970,7 @@ mod tests {
             let mut got = Vec::new();
             let mut emitted = false;
             loop {
-                let msg = time::timeout(cx.now(), Duration::from_secs(5), rx.recv(&cx))
+                let msg = crate::time_util::timeout(&cx, Duration::from_secs(5), rx.recv(&cx))
                     .await
                     .expect("update within 5 s")
                     .expect("channel open");
