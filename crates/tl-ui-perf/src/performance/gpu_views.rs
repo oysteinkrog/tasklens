@@ -108,8 +108,10 @@ pub struct GpuEngineGridView {
     /// The "3D / Compute" cell shown while the probe is missing.
     placeholder: Option<Entity<ChartView>>,
     shown: EnginesShown,
-    /// The box width and its top-left corner in the window at the last paint.
+    /// The box width at the last paint.
     width: Rc<Cell<Pixels>>,
+    /// The grid's top-left corner in the window at the last paint. It moves with the scroll
+    /// offset of a grid taller than its widget.
     origin: Rc<Cell<Point<Pixels>>>,
     /// The box height at the last paint, px; 0 before the first.
     height: Rc<Cell<Pixels>>,
@@ -230,17 +232,12 @@ impl Render for GpuEngineGridView {
         let drawn_h = grid_height(&layout, cell_h, gap);
 
         let measure = {
-            let (width, height, origin) = (
-                Rc::clone(&self.width),
-                Rc::clone(&self.height),
-                Rc::clone(&self.origin),
-            );
+            let (width, height) = (Rc::clone(&self.width), Rc::clone(&self.height));
             let natural_cell = Rc::clone(&self.natural);
             let grid = self.grid.clone();
             let this = cx.entity().downgrade();
             canvas(
                 move |bounds, window, cx| {
-                    origin.set(bounds.origin);
                     let old_w = width.replace(bounds.size.width);
                     let old_h = height.replace(bounds.size.height);
                     let at = |w: Pixels| grid_layout(n, measured(w), min_w, gap);
@@ -299,6 +296,16 @@ impl Render for GpuEngineGridView {
             }
         };
 
+        // The grid's corner, read inside the scrolled content so it follows the scroll offset.
+        let corner = {
+            let origin = Rc::clone(&self.origin);
+            canvas(
+                move |bounds, _, _| origin.set(bounds.origin),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
         let id = engines_id(&self.container);
         let grid_box = div()
             .tl_selector(move || id)
@@ -306,7 +313,8 @@ impl Render for GpuEngineGridView {
             .w_full()
             .flex_none()
             .h(drawn_h)
-            .capture_any_mouse_down(move |ev, _, cx| hit(ev, cx));
+            .capture_any_mouse_down(move |ev, _, cx| hit(ev, cx))
+            .child(corner);
         let grid_box = match (&self.placeholder, self.shown.missing) {
             (Some(p), true) => {
                 let cell = div()
