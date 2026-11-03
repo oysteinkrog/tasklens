@@ -1,18 +1,21 @@
-//! The Network page: one page per interface with the Throughput chart above the Details grid,
-//! its scale (auto or link speed), the disconnected state and the page's demand
+//! The Network page: one page per interface with the Throughput chart above the Details grid
+//! and the Network settings link, its disconnected state and the page's demand
 //! (docs/ui/performance.md UI-PRF-031, UI-PRF-020; PERF-018, PERF-054, PERF-055).
 //!
-//! The chart is a cached view that re-renders for its own series. The page re-renders only when
-//! its header changes. The spec is built again only when the link speed, a chart setting or the
-//! theme changed.
+//! The page's body is one widget container (ADR-019 phase 3, `tasklens-hzire.8`), one layout
+//! per adapter (`page.net:<key>`). By default it draws the 1.3.0 parts in their 1.3.0 places
+//! (`page_flow::net`): the `traffic` chart widget, the Details widget and the `net_settings`
+//! link. Edit Widgets changes them. The page keeps the header, the Details model and the
+//! Public IP state; it hands the Details rows to its `DetailsView` and the link to its part
+//! view, each of which renders only for its own change. The chart's scale (link speed or auto)
+//! and its failed state come from the widget's source.
 //!
 //! A disconnected interface needs nothing from the page: the engine marks its samples invalid,
 //! so the chart draws a gap after the last valid sample (E19-003).
 //!
 //! The page's words are `en-US.ftl` keys, translated once per strings version into [`Words`].
 
-#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt::{self, Write as _};
 use std::net::Ipv6Addr;
 use std::rc::Rc;
@@ -21,32 +24,45 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, h_flex};
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, EntityId,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, EntityId,
     FocusHandle, Focusable, Global, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, canvas, div,
-    fill, point, px, size,
+    Pixels, Render, SharedString, Styled as _, Subscription, WeakEntity, Window, canvas, div, fill,
+    point, px, size,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, LaunchSpec, LaunchWhat};
 use tl_model::command::{Command, CommandError, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceIdentity, NetKind};
-use tl_model::health::{SourceId, SourceState};
-use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::ids::DeviceIdx;
 use tl_model::snapshot::{InvField, NetDetails, PublicIpState, Snapshot, WifiInfo};
 use tl_model::system::{LinkState, Metric, NetTotals};
 use tl_model::time::TimeNs;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
+use tl_ui_settings::layout::FixedWidget;
+use tl_ui_settings::layout_boxes::METRIC_NET_TRAFFIC;
+use tl_ui_settings::layout_pages::page_container;
 use tl_ui_settings::settings::NetworkUnit;
 
-use super::actions::{NoOp, PerfFetchPublicIp, PerfOpenNetworkSettings};
+use super::actions::{
+    NoOp, PerfFetchPublicIp, PerfOpenNetworkSettings, PerfWidgetEditStart, PerfWidgetResetPage,
+};
+use super::aggregate::{add_demand, page_layout, reset_page, start_page_edit, strings_version};
 pub use super::core::scales::throughput_scale;
 use super::details::{Fallback, KeyValueModel};
+use super::gpu_views::PartResized;
+use super::memory_views::{MemoryPartView, PartDraw, PartShown};
 use super::page::{
-    DetailsLinkClick, DetailsValuePrefix, DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text,
+    DetailsLinkClick, DetailsValuePrefix, DevicePage, DevicePageFrame, details_draw, header_text,
     page_history_request, page_range_ns, page_words,
 };
+use super::page_flow::net::{NetParts, net_flow};
+use super::widget::container::WidgetContainer;
+use super::widget::details_widget::{DetailsResized, DetailsShown, DetailsView};
+use super::widget::edit::WidgetEditor;
+use super::widget::fixed_widget::FixedContent;
+use super::widget::source::SourceStore;
 use super::{DeviceKey, DeviceKind, DeviceRow, NetClass};
 use tl_ui_base::action_tracker::ToastTexts;
 use tl_ui_base::demand::DemandAggregator;
@@ -58,22 +74,13 @@ use tl_ui_base::settings_global::{Section, SettingKey, SettingValue, TlSettings}
 use tl_ui_base::shell::ShellApi;
 use tl_ui_base::template::Template;
 use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
-use tl_ui_chart::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
-    ValueAlign, ValueFormat, YScale,
-};
+use tl_ui_chart::chart::ChartView;
 use tl_ui_kit::actions::SetSetting;
 use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use tl_ui_kit::components::link::TlLink;
 use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
 use tl_ui_kit::components::toast::ToastQueue;
 
-/// Debug selector of the chart box.
-pub const THROUGHPUT_ID: &str = "perf-net-throughput";
-
-const KEY_THROUGHPUT: &str = "perf-net-heading-throughput";
-const KEY_DOWNLOAD: &str = "perf-net-legend-download";
-const KEY_UPLOAD: &str = "perf-net-legend-upload";
 const KEY_SETTINGS_LINK: &str = "perf-net-settings-link";
 const KEY_SETTINGS_FAILED: &str = "perf-net-settings-failed";
 
@@ -109,19 +116,11 @@ pub struct NetSettingsDesktop(pub Option<SettingsDesktop>);
 
 impl Global for NetSettingsDesktop {}
 
-/// Alpha of the upload line against `net_line`.
-const UPLOAD_ALPHA: f32 = 0.7;
-/// Bits per second in one Mb/s, the unit of the sysfs `speed`.
-const BPS_PER_MBPS: f32 = 1_000_000.;
-
 /// The page's words, translated once per strings version.
 #[derive(Clone, Debug, Default)]
 pub struct Words {
     /// `None` before the first refresh; then the strings version, `None` without strings.
     version: Option<Option<u64>>,
-    pub throughput: SharedString,
-    pub download: SharedString,
-    pub upload: SharedString,
     pub settings_link: SharedString,
     pub settings_failed: SharedString,
 }
@@ -135,27 +134,21 @@ impl Words {
         }
         self.version = version;
         let t = |key| tr(cx, key);
-        self.throughput = t(KEY_THROUGHPUT);
-        self.download = t(KEY_DOWNLOAD);
-        self.upload = t(KEY_UPLOAD);
         self.settings_link = t(KEY_SETTINGS_LINK);
         self.settings_failed = t(KEY_SETTINGS_FAILED);
         true
     }
 }
 
-/// The settings the page draws from.
+/// The settings the page reads: the range it asks the history for and the unit of the Details
+/// rates. The chart widget follows the chart settings itself.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PageSettings {
     range_ns: u64,
-    smooth: bool,
-    rounded: bool,
     /// `units.network`.
     unit: NetworkUnit,
     /// `units.network_auto_scale`.
     auto_scale: bool,
-    /// `performance.network_dynamic_scale`.
-    dynamic_scale: bool,
 }
 
 impl PageSettings {
@@ -163,104 +156,16 @@ impl PageSettings {
         let s = TlSettings::settings(cx);
         Self {
             range_ns: page_range_ns(cx),
-            smooth: s.motion.smooth_graphs,
-            rounded: s.appearance.rounded_corners,
             unit: s.units.network,
             auto_scale: s.units.network_auto_scale,
-            dynamic_scale: s.performance.network_dynamic_scale,
         }
     }
 }
 
 /// The versions of the sections [`PageSettings`] reads.
-fn section_versions(cx: &App) -> [u64; 4] {
+fn section_versions(cx: &App) -> [u64; 2] {
     let tl = TlSettings::get(cx);
-    [
-        tl.version(Section::Performance),
-        tl.version(Section::Motion),
-        tl.version(Section::Appearance),
-        tl.version(Section::Units),
-    ]
-}
-
-/// The interface's sysfs link speed in bits per second, `None` when it is not Valid or not above
-/// 0 (sysfs `speed` -1).
-fn link_speed_bps(snap: &Snapshot, device: DeviceIdx) -> Option<f32> {
-    snap.system
-        .nets
-        .iter()
-        .find(|(i, _)| *i == device)
-        .map(|(_, n)| n.link_speed_mbps)
-        .filter(|m| m.validity == Validity::Valid && m.value > 0)
-        .map(|m| m.value as f32 * BPS_PER_MBPS)
-}
-
-/// Download with fill, upload as a fainter dashed line.
-fn throughput_spec(device: DeviceIdx, y: YScale, s: &PageSettings, theme: &TlTheme) -> ChartSpec {
-    let line = theme.graph.net_line;
-    let id = |metric| SeriesId { device, metric };
-    ChartSpec {
-        series: smallvec![
-            ChartSeries {
-                id: id(MetricId::NET_RX),
-                fill: Some(theme.graph.net_fill),
-                line,
-                ..ChartSeries::default()
-            },
-            ChartSeries {
-                id: id(MetricId::NET_TX),
-                line: Hsla {
-                    a: line.a * UPLOAD_ALPHA,
-                    ..line
-                },
-                dashed: true,
-                ..ChartSeries::default()
-            },
-        ],
-        y,
-        range_ns: s.range_ns,
-        grid: GridStyle {
-            lines: true,
-            baseline: false,
-            outline: true,
-            rounded: s.rounded,
-            vertical_at: None,
-        },
-        smooth: s.smooth,
-        background: ChartBg::Window,
-        hover: true,
-        ..ChartSpec::default()
-    }
-}
-
-fn throughput_labels(w: &Words) -> ChartLabels {
-    ChartLabels {
-        heading: Some(w.throughput.clone()),
-        value_fmt: ValueFormat::RateNetwork,
-        value_align: ValueAlign::Right,
-        range_word: w.throughput.clone(),
-        legend: smallvec![
-            (w.download.clone(), LegendStyle::Solid),
-            (w.upload.clone(), LegendStyle::Dashed)
-        ],
-        show_axis_max: true,
-    }
-}
-
-/// The chart state from the network source health: Failed with its error, else Live (the view
-/// derives WarmingUp and Stale itself).
-fn health_state(snap: &Snapshot) -> ChartState {
-    let h = snap.health.get(SourceId::Net);
-    match h.state {
-        SourceState::Failed => ChartState::Failed(
-            h.last_error
-                .as_deref()
-                .unwrap_or_default()
-                .to_owned()
-                .into(),
-        ),
-        _ => ChartState::Live,
-    }
+    [tl.version(Section::Performance), tl.version(Section::Units)]
 }
 
 // ---- Details grid (UI-PRF-031, PERF-056, PERF-057) ----
@@ -1018,24 +923,44 @@ pub fn update_net_public_ip(model: &mut KeyValueModel, state: &PublicIpState) ->
     changed
 }
 
-/// One network interface's device page.
+/// The part name of the Network settings link, as its debug selector names it
+/// (`memory_views::part_id`).
+pub const PART_SETTINGS: &str = "net-settings";
+
+/// The draw of the Network settings link from the page. `None` once the page is gone, or on a
+/// desktop without a network settings tool.
+fn settings_draw(page: WeakEntity<NetPage>) -> PartDraw {
+    Rc::new(move |_: &mut Window, cx: &mut App| page.upgrade()?.read(cx).settings_element(cx))
+}
+
+/// One network interface's device page. Its body is one widget container (ADR-019 phase 3,
+/// `tasklens-hzire.8`); see the module docs.
+///
+/// Render contract: the page renders on a header change, a range change and a layout change,
+/// never because of a sample. A Details value change notifies only the `DetailsView`.
 pub struct NetPage {
     key: DeviceKey,
     row: DeviceRow,
-    throughput: Entity<ChartView>,
+    /// The container id, `page.<adapter key>`.
+    container_id: SharedString,
     /// E25-007 and E25-020 fill the rows.
     details: KeyValueModel,
-    /// `unit`, `auto_scale` and `dynamic_scale` with the chart settings.
+    details_view: Entity<DetailsView>,
+    /// The Network settings link (fixed widget `net_settings`).
+    settings_view: Entity<MemoryPartView>,
+    /// The heights and the shown flag the flow placer reads.
+    parts: NetParts,
+    container: Entity<WidgetContainer>,
+    editor: Entity<WidgetEditor>,
+    /// The range and the unit of the Details rates.
     settings: PageSettings,
-    settings_versions: [u64; 4],
-    /// Valid sysfs speed in bits per second.
-    link_speed_bps: Option<f32>,
+    settings_versions: [u64; 2],
     /// The Public IP row's fetch state, from `Snapshot.inventory` (INVENTORY).
     public_ip: PublicIpRowState,
     /// The Fetch button's focus handle, after `unit_focus` in `focus_order`.
     fetch_focus: FocusHandle,
     header: (SharedString, SharedString),
-    /// `UiMetrics.style_version` the chart colours were built for.
+    /// `UiMetrics.style_version` the settings link was drawn for.
     style_version: u64,
     words: Words,
     hub: Entity<SnapshotHub>,
@@ -1061,9 +986,14 @@ pub struct NetPage {
     settings_focus: FocusHandle,
     /// The host this page shows. Set when it opens; never changes.
     host: HostContext,
-    _subs: SmallVec<[Subscription; 4]>,
+    _subs: SmallVec<[Subscription; 8]>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub notify_count: Cell<u32>,
+    /// How many times the page asked the container to place its widgets again.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub place_count: Cell<u32>,
 }
 
 impl NetPage {
@@ -1075,10 +1005,9 @@ impl NetPage {
         demand: Entity<DemandAggregator>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let theme = current(cx).clone();
+        let container_id = SharedString::from(page_container(&key.0));
         let settings = PageSettings::read(cx);
         let snap = Arc::clone(hub.read(cx).current());
-        let link_speed = link_speed_bps(&snap, row.idx);
         let wifi = row.net_class == Some(NetClass::Wireless);
         let mut words = Words::default();
         words.refresh(cx);
@@ -1087,20 +1016,60 @@ impl NetPage {
             cx.set_global(NetSettingsDesktop(settings_desktop(xdg.as_deref())));
         }
         let settings_desktop = cx.global::<NetSettingsDesktop>().0;
+        let this = cx.weak_entity();
 
-        let throughput = {
-            let y = throughput_scale(settings.dynamic_scale, link_speed, settings.unit);
-            let (spec, labels) = (
-                throughput_spec(row.idx, y, &settings, &theme),
-                throughput_labels(&words),
-            );
-            cx.new(|cx| {
-                let mut view = ChartView::new(spec, labels, &hub, cx)
-                    .with_newest_marks()
-                    .with_device_history(&snap);
-                // The value is download plus upload.
-                view.set_value_sum(true, cx);
-                view
+        let mut details = net_details_model(wifi);
+        details.refresh_strings(cx);
+        let details_view = {
+            let shown = DetailsShown::of(&details, strings_version(cx));
+            let draw = details_draw(this.clone());
+            let id = container_id.clone();
+            cx.new(|_| DetailsView::new(id, shown, draw))
+        };
+        let settings_view = {
+            let id = container_id.clone();
+            let draw = settings_draw(this);
+            let shown = settings_shown(settings_desktop, &words);
+            cx.new(move |_| MemoryPartView::new(id, PART_SETTINGS, shown, draw))
+        };
+        let parts = NetParts {
+            details: details_view.read(cx).natural_height(),
+            settings: settings_view.read(cx).natural_height(),
+            settings_shown: Rc::new(Cell::new(settings_desktop.is_some())),
+        };
+        let content: FixedContent = {
+            let details: AnyView = details_view.clone().into();
+            let link: AnyView = settings_view.clone().into();
+            let shown = settings_desktop.is_some();
+            // On a desktop without a network settings tool the link shows "Nothing to show on
+            // this device" in a grid layout.
+            Rc::new(move |kind: &FixedWidget, _: &mut App| match kind {
+                FixedWidget::Details => Some(details.clone()),
+                FixedWidget::NetSettings => shown.then(|| link.clone()),
+                _ => None,
+            })
+        };
+        let container = {
+            let store = Rc::new(RefCell::new(SourceStore::for_page(&hub)));
+            let layout = page_layout(&container_id, cx);
+            let id = container_id.clone();
+            let hub = hub.clone();
+            let flow = net_flow(parts.clone());
+            cx.new(move |cx| {
+                let mut c = WidgetContainer::new(id, layout, &hub, store, cx);
+                c.set_flow_placer(Some(flow), cx);
+                c.set_fixed_content(Some(content), cx);
+                c
+            })
+        };
+        let editor = {
+            let container = container.clone();
+            let hub = hub.clone();
+            let shown = settings_desktop.is_some();
+            cx.new(move |cx| {
+                let mut e = WidgetEditor::new(container, &hub, cx);
+                e.set_page_parts(page_parts(shown));
+                e
             })
         };
 
@@ -1109,6 +1078,19 @@ impl NetPage {
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
         subs.push(cx.observe_global::<UiMetrics>(Self::sync_style));
         subs.push(cx.observe_global::<Strings>(Self::sync_words));
+        // A part got taller or shorter: the parts under it move.
+        subs.push(
+            cx.subscribe(&details_view, |this, _, _: &DetailsResized, cx| {
+                this.place_again(cx);
+            }),
+        );
+        subs.push(
+            cx.subscribe(&settings_view, |this, _, _: &PartResized, cx| {
+                this.place_again(cx);
+            }),
+        );
+        // A layout change can change what the page asks for.
+        subs.push(cx.observe(&container, |this, _, cx| this.send_demand(cx)));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -1117,11 +1099,15 @@ impl NetPage {
         let mut this = Self {
             key,
             row,
-            throughput,
-            details: net_details_model(wifi),
+            container_id,
+            details,
+            details_view,
+            settings_view,
+            parts,
+            container,
+            editor,
             settings,
             settings_versions: section_versions(cx),
-            link_speed_bps: link_speed,
             header: (SharedString::default(), SharedString::default()),
             style_version: metrics(cx).style_version,
             words,
@@ -1148,6 +1134,10 @@ impl NetPage {
             _subs: subs,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            notify_count: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            place_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
         this
@@ -1203,8 +1193,44 @@ impl NetPage {
         })
     }
 
-    pub fn throughput(&self) -> &Entity<ChartView> {
-        &self.throughput
+    /// The Throughput chart of the first placed `traffic` widget that draws one, while the page
+    /// shows it.
+    pub fn throughput(&self, cx: &App) -> Option<Entity<ChartView>> {
+        let c = self.container.read(cx);
+        c.layout()
+            .widgets
+            .iter()
+            .filter(|w| {
+                w.content
+                    .metric_key()
+                    .is_some_and(|k| k.as_str() == METRIC_NET_TRAFFIC)
+            })
+            .find_map(|w| c.widget(w.id)?.read(cx).chart().cloned())
+    }
+
+    /// The page's widget container.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
+    }
+
+    /// The editor around the container (Edit Widgets).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
+    }
+
+    /// The Details widget's view.
+    pub fn details_view(&self) -> &Entity<DetailsView> {
+        &self.details_view
+    }
+
+    /// The Network settings link's view (fixed widget `net_settings`).
+    pub fn settings_view(&self) -> &Entity<MemoryPartView> {
+        &self.settings_view
+    }
+
+    /// The container id, `page.<adapter key>`.
+    pub fn container_id(&self) -> &SharedString {
+        &self.container_id
     }
 
     pub fn unit(&self) -> NetworkUnit {
@@ -1215,35 +1241,45 @@ impl NetPage {
         self.settings.auto_scale
     }
 
-    pub fn dynamic_scale(&self) -> bool {
-        self.settings.dynamic_scale
-    }
-
-    pub fn link_speed_bps(&self) -> Option<f32> {
-        self.link_speed_bps
-    }
-
     pub fn words(&self) -> &Words {
         &self.words
     }
 
-    /// This page's demand part while it is active: network, and the device metric history at
-    /// 1 h, 24 h and 7 d.
-    pub fn demand_part(&self) -> Demand {
-        Demand {
+    /// This page's demand part while it is active: network, the device metric history at 1 h,
+    /// 24 h and 7 d, and what the placed widgets read. With the default layout it equals
+    /// 1.3.0's.
+    pub fn demand_part(&self, cx: &App) -> Demand {
+        let mut demand = Demand {
             any_surface_visible: true,
             nets: true,
             device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
-        }
+        };
+        add_demand(&mut demand, &self.container.read(cx).demand_part());
+        demand
     }
 
     fn send_demand(&self, cx: &mut App) {
         if !self.active {
             return;
         }
-        let (id, window, part) = (self.id, self.window, self.demand_part());
+        let (id, window, part) = (self.id, self.window, self.demand_part(cx));
         self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
+    }
+
+    fn notify(&self, cx: &mut Context<Self>) {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// A part's height changed: the flow layout places the parts again.
+    fn place_again(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.place_count.set(self.place_count.get() + 1);
+        self.container.update(cx, |c, cx| {
+            c.place_again(cx);
+        });
     }
 
     fn on_snapshot(
@@ -1256,39 +1292,60 @@ impl NetPage {
         self.apply_snapshot(&snap, ev.mask, cx);
     }
 
-    /// Brings the link speed, chart state, Details rows and header up to date with the
-    /// components in `mask`. Notifies only when the header or a row changed.
+    /// Brings the Details rows and the header up to date with the components in `mask`. Only a
+    /// header change renders the page; a row change goes to the Details view. A failed network
+    /// collector and a new link speed reach the chart widgets through their sources
+    /// (`SourceData::chart_state`, the Network scale rule).
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
-        if mask.contains(ComponentMask::SYSTEM) {
-            let speed = link_speed_bps(snap, self.row.idx);
-            if speed != self.link_speed_bps {
-                self.link_speed_bps = speed;
-                self.rebuild_spec(cx);
-            }
-        }
+        let mut rows = false;
         if mask.intersects(
             ComponentMask::SYSTEM | ComponentMask::DEVICE_DETAILS | ComponentMask::DEVICES,
-        ) && self.sync_details(snap, self.hub.read(cx).now_ns())
-        {
-            cx.notify();
+        ) {
+            rows |= self.sync_details(snap, self.hub.read(cx).now_ns());
         }
-        if mask.contains(ComponentMask::INVENTORY) && self.sync_public_ip(snap, false) {
-            cx.notify();
+        if mask.contains(ComponentMask::INVENTORY) {
+            rows |= self.sync_public_ip(snap, false);
         }
-        if mask.contains(ComponentMask::HEALTH) {
-            let state = health_state(snap);
-            self.throughput.update(cx, |v, cx| v.set_state(state, cx));
+        if rows {
+            self.sync_details_view(cx);
         }
         if mask.intersects(
             ComponentMask::DEVICES | ComponentMask::INVENTORY | ComponentMask::DEVICE_DETAILS,
-        ) && let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == self.row.idx)
+        ) && self.sync_header(snap, cx)
         {
-            let header = header_text(page_words(cx), DeviceKind::Net, 0, entry, snap);
-            if header != self.header {
-                self.header = header;
-                cx.notify();
-            }
+            self.notify(cx);
         }
+        // The adapter went away: an edit ends as Cancel does.
+        if mask.contains(ComponentMask::DEVICES)
+            && !snap
+                .devices
+                .entries
+                .iter()
+                .any(|e| e.idx == self.row.idx && e.present)
+        {
+            self.editor.update(cx, |e, cx| e.cancel(cx));
+        }
+    }
+
+    /// The header from the catalog entry. True when it changed.
+    fn sync_header(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
+        let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == self.row.idx) else {
+            return false;
+        };
+        let header = header_text(page_words(cx), DeviceKind::Net, 0, entry, snap);
+        if header == self.header {
+            return false;
+        }
+        let word = header.0.clone();
+        self.editor.update(cx, |e, _| e.set_page_name(word));
+        self.header = header;
+        true
+    }
+
+    /// Hands the Details view what the grid shows; it notifies only when that changed.
+    fn sync_details_view(&mut self, cx: &mut Context<Self>) {
+        let shown = DetailsShown::of(&self.details, strings_version(cx));
+        self.details_view.update(cx, |v, cx| v.set_shown(shown, cx));
     }
 
     /// Whether the Public IP row has a Fetch button, and if so whether it is loading. `None` once
@@ -1446,19 +1503,46 @@ impl NetPage {
         };
     }
 
-    /// Hands the chart its spec from the current settings, link speed and theme. The view keeps
-    /// an unchanged spec.
-    fn rebuild_spec(&self, cx: &mut App) {
-        let s = self.settings;
-        let theme = current(cx).clone();
-        let y = throughput_scale(s.dynamic_scale, self.link_speed_bps, s.unit);
-        let spec = throughput_spec(self.row.idx, y, &s, &theme);
-        self.throughput.update(cx, |v, cx| v.set_spec(spec, cx));
+    /// The Network settings link (UI-PRF-031, PERF-061): the link and its icon. `None` on a
+    /// desktop without a network settings tool.
+    fn settings_element(&self, cx: &App) -> Option<AnyElement> {
+        self.settings_desktop?;
+        let (m, theme) = (*metrics(cx), current(cx).clone());
+        let link = TlLink::new(
+            SETTINGS_LINK_ID,
+            self.words.settings_link.clone(),
+            Box::new(PerfOpenNetworkSettings),
+        )
+        .focus_handle(self.settings_focus.clone());
+        Some(
+            h_flex()
+                .tl_selector(|| SETTINGS_LINK_ID.into())
+                .gap(m.sp[3])
+                .child(link)
+                .child(
+                    Icon::new(IconName::ExternalLink)
+                        .size(m.icon.xs)
+                        .text_color(theme.status.info),
+                )
+                .into_any_element(),
+        )
     }
 
-    /// Applies the page's settings when one of their sections changed. The value text follows
-    /// `units.network` in the chart itself.
+    /// Hands the link's view its word; it renders only when that changed.
+    fn sync_settings_view(&mut self, cx: &mut Context<Self>) {
+        let shown = settings_shown(self.settings_desktop, &self.words);
+        self.settings_view
+            .update(cx, |v, cx| v.set_shown(shown, cx));
+    }
+
+    /// Applies the page's settings when one of their sections changed: the range and the unit
+    /// of the Details rates. A saved layout (Apply, Reset Page) shows when the page is not in
+    /// Edit Widgets.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        if !self.editor.read(cx).is_editing() {
+            let layout = page_layout(&self.container_id, cx);
+            self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+        }
         let versions = section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -1470,46 +1554,90 @@ impl NetPage {
         }
         let range_moved = new.range_ns != self.settings.range_ns;
         self.settings = new;
-        self.rebuild_spec(cx);
         // The rates and the Display unit follow `units.network`.
         let snap = Arc::clone(self.hub.read(cx).current());
+        let now = self.hub.read(cx).now_ns();
+        if self.sync_details(&snap, now) {
+            self.sync_details_view(cx);
+        }
         if range_moved {
             // The header switch shows the new range.
             self.send_demand(cx);
-        }
-        let now = self.hub.read(cx).now_ns();
-        if self.sync_details(&snap, now) || range_moved {
-            cx.notify();
+            self.notify(cx);
         }
     }
 
-    /// A new theme: the chart takes the new colours.
+    /// A new theme or UI scale: the settings link draws again with the new colours and sizes.
     fn sync_style(&mut self, cx: &mut Context<Self>) {
         let version = metrics(cx).style_version;
         if version == self.style_version {
             return;
         }
         self.style_version = version;
-        self.rebuild_spec(cx);
-        cx.notify();
+        self.settings_view.update(cx, |_, cx| cx.notify());
+        self.notify(cx);
     }
 
-    /// New strings: the chart labels and the header.
+    /// New strings: the Details words and rows, the settings link and the header.
     fn sync_words(&mut self, cx: &mut Context<Self>) {
-        if !self.words.refresh(cx) {
+        let words = self.words.refresh(cx);
+        let details = self.details.refresh_strings(cx);
+        if !(words || details) {
             return;
         }
-        let labels = throughput_labels(&self.words);
-        self.throughput.update(cx, |v, cx| v.set_labels(labels, cx));
         let snap = Arc::clone(self.hub.read(cx).current());
-        self.apply_snapshot(&snap, ComponentMask::DEVICES, cx);
         // The Display unit text and tooltip come from the new strings.
-        self.details.refresh_strings(cx);
         let now = self.hub.read(cx).now_ns();
         self.sync_details(&snap, now);
         self.sync_public_ip(&snap, true);
-        cx.notify();
+        self.sync_details_view(cx);
+        self.sync_settings_view(cx);
+        self.sync_header(&snap, cx);
+        self.notify(cx);
     }
+
+    /// "Edit Widgets…" in the page menu.
+    fn on_edit_start(
+        &mut self,
+        _: &PerfWidgetEditStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        start_page_edit(&self.editor, &self.hub, window, cx);
+    }
+
+    /// "Reset Page" in the page menu (ADR-019 phase 3 "Reset").
+    fn on_reset_page(
+        &mut self,
+        _: &PerfWidgetResetPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        reset_page(&self.container_id, self.header.0.clone(), window, cx);
+    }
+}
+
+/// What the Network settings link's view draws: its word on a desktop with a network settings
+/// tool, nothing otherwise.
+fn settings_shown(desktop: Option<SettingsDesktop>, words: &Words) -> PartShown {
+    match desktop {
+        Some(_) => PartShown {
+            texts: vec![words.settings_link.clone()],
+            flags: vec![true],
+            ..PartShown::default()
+        },
+        None => PartShown::default(),
+    }
+}
+
+/// The page parts Add Widget lists on a Network page: Details, and the Network settings link on
+/// a desktop with a network settings tool.
+fn page_parts(settings: bool) -> Vec<FixedWidget> {
+    let mut parts = vec![FixedWidget::Details];
+    if settings {
+        parts.push(FixedWidget::NetSettings);
+    }
+    parts
 }
 
 impl DevicePage for NetPage {
@@ -1529,50 +1657,18 @@ impl DevicePage for NetPage {
         SmallVec::new()
     }
 
-    fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
-        let h = GRAPH_H_SINGLE * metrics(cx).ui_scale;
-        div()
-            .tl_selector(|| THROUGHPUT_ID.into())
-            .flex_none()
-            .w_full()
-            .h(px(h))
-            .child(
-                self.throughput
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
-            )
-            .into_any_element()
+    fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {
+        // The chart is a widget of the container.
+        div().into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
         &self.details
     }
 
-    /// The Network settings link row, on KDE and GNOME only.
-    fn blocks(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 3]> {
-        let mut out = SmallVec::new();
-        if self.settings_desktop.is_some() {
-            let (m, theme) = (*metrics(cx), current(cx).clone());
-            let link = TlLink::new(
-                SETTINGS_LINK_ID,
-                self.words.settings_link.clone(),
-                Box::new(PerfOpenNetworkSettings),
-            )
-            .focus_handle(self.settings_focus.clone());
-            out.push(
-                h_flex()
-                    .tl_selector(|| SETTINGS_LINK_ID.into())
-                    .gap(m.sp[3])
-                    .child(link)
-                    .child(
-                        Icon::new(IconName::ExternalLink)
-                            .size(m.icon.xs)
-                            .text_color(theme.status.info),
-                    )
-                    .into_any_element(),
-            );
-        }
-        out
+    fn blocks(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 3]> {
+        // The Network settings link is a widget of the container.
+        SmallVec::new()
     }
 
     /// "Network settings" on KDE and GNOME only.
@@ -1586,8 +1682,8 @@ impl DevicePage for NetPage {
         )
     }
 
-    /// The Network copy text (PERF-011): the header lines, then the Details rows. The page has
-    /// no blocks.
+    /// The Network copy text (PERF-011): the header lines, then the Details rows, whatever the
+    /// layout holds. The page has no blocks.
     fn copy_text(&self, out: &mut String) {
         let (word, model) = &self.header;
         out.push_str(word);
@@ -1614,6 +1710,10 @@ impl DevicePage for NetPage {
             out.push(self.settings_focus.clone());
         }
         out
+    }
+
+    fn widget_editor(&self) -> Option<&Entity<WidgetEditor>> {
+        Some(&self.editor)
     }
 
     fn details_link_focus(&self) -> Option<Rc<[(usize, FocusHandle)]>> {
@@ -1705,7 +1805,6 @@ impl Render for NetPage {
             self.window = Some(handle);
             self.send_demand(cx);
         }
-        self.details.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
         div()
@@ -1713,6 +1812,8 @@ impl Render for NetPage {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_open_network_settings))
             .on_action(cx.listener(Self::on_fetch_public_ip))
+            .on_action(cx.listener(Self::on_edit_start))
+            .on_action(cx.listener(Self::on_reset_page))
             .child(
                 DevicePageFrame {
                     page: self,
@@ -1727,6 +1828,10 @@ impl Render for NetPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tl_ui_chart::chart::YScale;
+
+    /// Bits per second in one Mb/s, the unit of the sysfs `speed`.
+    const BPS_PER_MBPS: f32 = 1_000_000.;
 
     #[test]
     fn link_speed_scale_unknown_falls_back() {

@@ -30,6 +30,7 @@ pub mod cpu;
 pub mod disk;
 pub mod gpu;
 pub mod memory;
+pub mod net;
 
 /// The gap between two page parts (`sp4`), logical px.
 pub const PART_GAP: f32 = 8.;
