@@ -289,7 +289,7 @@ impl EngineLink {
         // Before the engine stops: the window must not write host settings to it any more.
         self.client.begin_switch();
         (engine.stop)();
-        drop(file);
+        release_lock(file);
         let next = match establish(&self.env) {
             Ok(next) => next,
             Err(e) => {
@@ -317,7 +317,7 @@ impl EngineLink {
         if let Running::Local { engine, lock: file } = old {
             self.local_runs.fetch_add(1, Ordering::AcqRel);
             (engine.stop)();
-            drop(file);
+            release_lock(file);
         }
     }
 }
@@ -602,6 +602,17 @@ pub fn lock_engine(path: &Path) -> io::Result<Option<File>> {
     }
 }
 
+/// Releases the lock that `lock_engine` took, then closes the file. The explicit unlock
+/// matters: a child forked by another thread holds a copy of the fd until it execs, and
+/// `flock` belongs to the open file description, so a plain close can leave the lock taken.
+/// An unlock through any copy frees it for all of them.
+pub fn release_lock(file: File) {
+    if let Err(e) = file.unlock() {
+        warn!(target: "tasklens::engine", "engine lock unlock: {e}");
+    }
+    drop(file);
+}
+
 /// `$XDG_RUNTIME_DIR/<app_dir>/engine.sock`, with the runtime directory and the `app_dir`
 /// directory checked as the service checks them (ADR-018 Local transport).
 pub fn socket_path(runtime: Option<&std::ffi::OsStr>, app_dir: &str) -> Result<PathBuf, String> {
@@ -767,6 +778,31 @@ mod tests {
         let mut buf = [0u8; 4];
         stream.read_exact(&mut buf).expect("hello bytes");
         buf.to_vec()
+    }
+
+    /// tasklens-wtyap: a child forked by another thread holds a copy of the lock fd until it
+    /// execs. A dup shares the open file description as a fork does, so it stands in for that
+    /// child here.
+    #[test]
+    fn a_forked_copy_of_the_lock_fd_does_not_keep_the_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(LOCK_FILE);
+
+        // A plain close leaves the lock taken while the copy lives.
+        let file = lock_engine(&path).unwrap().expect("lock");
+        let copy = file.try_clone().unwrap();
+        drop(file);
+        assert!(lock_engine(&path).unwrap().is_none());
+        drop(copy);
+
+        let file = lock_engine(&path).unwrap().expect("lock");
+        let copy = file.try_clone().unwrap();
+        release_lock(file);
+        assert!(
+            lock_engine(&path).unwrap().is_some(),
+            "release_lock frees the lock for every copy of the fd"
+        );
+        drop(copy);
     }
 
     #[test]

@@ -246,7 +246,7 @@ mod tests {
     use tl_model::remote_proto::{HelloTail, Want};
 
     use super::*;
-    use crate::engine_link::{EngineLink, LOCK_FILE, LinkEnv, lock_engine};
+    use crate::engine_link::{EngineLink, LOCK_FILE, LinkEnv, lock_engine, release_lock};
     use crate::switch_client::tests::TestBackend;
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -312,6 +312,9 @@ mod tests {
                 assert!(held.is_some(), "the window released the lock");
                 let (file, _) = HostSettingsFile::open(&unit_config, 0);
                 lock(&unit_seen).push(file.current().clone());
+                // A plain drop can leave the lock taken while a child that another test
+                // thread forked still holds a copy of the fd (tasklens-wtyap).
+                release_lock(held.unwrap());
                 false
             })),
             start_engine: Box::new(move || Ok(start(&engine_config, &engine_stopped))),
