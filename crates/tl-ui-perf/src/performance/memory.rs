@@ -2100,20 +2100,6 @@ impl MemoryPage {
         });
     }
 
-    /// Whether the system has swap in the current snapshot decides whether a `swap` widget
-    /// takes space in a flow layout. The page reads it only when it is shown and when its
-    /// layout changes, never on a sample, so a sample creates or drops no widget entity
-    /// (ADR-019 render contract). A swapon or swapoff shows the next time either happens.
-    fn sync_swap(&self, cx: &mut App) {
-        let swap = self.hub.read(cx).current().system.memory.swap_total > 0;
-        if swap != self.parts.swap.get() {
-            self.parts.swap.set(swap);
-            self.container.update(cx, |c, cx| {
-                c.place_again(cx);
-            });
-        }
-    }
-
     /// The container placed its widgets again or took a new layout: the demand follows.
     fn on_container_changed(&mut self, cx: &mut Context<Self>) {
         self.send_demand(cx);
@@ -2129,8 +2115,8 @@ impl MemoryPage {
         self.apply_snapshot(&snap, ev.mask, cx);
     }
 
-    /// Brings Details, the blocks and the bar up to date with the components in `mask`. The page
-    /// itself does not render; each part notifies for its own change.
+    /// Brings Details, the blocks, the bar and the swap state up to date with the components in
+    /// `mask`. The page itself does not render; each part notifies for its own change.
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
         let mut parts = false;
         if mask.intersects(
@@ -2144,8 +2130,11 @@ impl MemoryPage {
         if mask.contains(ComponentMask::SYSTEM) {
             let c = Composition::of(&snap.system.memory);
             self.bar.update(cx, |b, cx| b.set_composition(c, cx));
-            // SwapTotal is not read here: a sample never places the Swap chart or takes it
-            // away (ADR-019 render contract). See `sync_swap`.
+            let swap = snap.system.memory.swap_total > 0;
+            if swap != self.parts.swap.get() {
+                self.parts.swap.set(swap);
+                self.place_again(cx);
+            }
         }
         if parts {
             self.sync_parts(cx);
@@ -2340,7 +2329,6 @@ impl MemoryPage {
         let layout = self.shown_layout(cx);
         let view = layout_view(&layout);
         self.container.update(cx, |c, cx| c.set_layout(layout, cx));
-        self.sync_swap(cx);
         if view != self.view {
             // A grid layout draws the switch in the header.
             let header = view.is_none() || self.view.is_none();
@@ -2924,7 +2912,6 @@ impl DevicePage for MemoryPage {
         }
         self.active = active;
         if active {
-            self.sync_swap(cx);
             self.send_demand(cx);
         } else {
             let id = self.id;
