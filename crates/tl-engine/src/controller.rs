@@ -13,6 +13,11 @@
 //!
 //! Every restart, inside one supervisor or after `Disabled`, is counted in `RestartCounts`
 //! before its `Running` is sent, so the health snapshot that shows it carries the new count.
+//!
+//! A supervisor that ends any other way (an error, a panic, a cancelled worker) is rebuilt
+//! after `RETRY_INITIAL`, doubling to `RETRY_MAX`. A supervisor that ran for `STABLE_RUN`
+//! resets the wait. Without it a supervisor that fails at start loops with no wait: on
+//! 2026-11-03 the 1.3.0 engine logged 1.5 million restarts an hour for three sources.
 
 use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::sync::Arc;
@@ -21,7 +26,7 @@ use std::time::Duration;
 use asupersync::Cx;
 use asupersync::channel::mpsc;
 use asupersync::runtime::JoinError;
-use asupersync::supervision::{ManagedGeneration, ManagedSupervisorReport};
+use asupersync::supervision::{ManagedGeneration, ManagedSupervisorError, ManagedSupervisorReport};
 use asupersync::time::sleep;
 use asupersync::types::Outcome;
 use futures_lite::FutureExt;
@@ -33,6 +38,39 @@ use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 
 /// How long a source stays off after it spent its restart budget.
 pub const DISABLE_FOR: Duration = Duration::from_secs(60);
+/// The first wait before a supervisor that ended with an error is rebuilt.
+pub const RETRY_INITIAL: Duration = Duration::from_secs(1);
+/// The longest wait before a rebuild.
+pub const RETRY_MAX: Duration = Duration::from_secs(60);
+/// A supervisor that ran this long resets the wait to `RETRY_INITIAL`.
+pub const STABLE_RUN: Duration = Duration::from_secs(60);
+
+/// The wait before the next supervisor rebuild: `RETRY_INITIAL` doubling to `RETRY_MAX`.
+#[derive(Debug)]
+pub struct RetryBackoff {
+    next: Duration,
+}
+
+impl Default for RetryBackoff {
+    fn default() -> Self {
+        Self {
+            next: RETRY_INITIAL,
+        }
+    }
+}
+
+impl RetryBackoff {
+    /// The wait after a supervisor that ran for `ran`. A run of `STABLE_RUN` or more starts
+    /// again at `RETRY_INITIAL`.
+    pub fn delay(&mut self, ran: Duration) -> Duration {
+        if ran >= STABLE_RUN {
+            self.next = RETRY_INITIAL;
+        }
+        let delay = self.next;
+        self.next = delay.saturating_mul(2).min(RETRY_MAX);
+        delay
+    }
+}
 
 pub struct SourceController {
     id: SourceId,
@@ -69,6 +107,7 @@ impl SourceController {
     async fn run_inner(self, cx: Cx) {
         // True once a supervisor ran: the next pass restarts a worker that stopped.
         let mut restart = false;
+        let mut backoff = RetryBackoff::default();
         loop {
             if restart {
                 self.restarts.bump(self.id);
@@ -85,6 +124,7 @@ impl SourceController {
                 self.updates.clone(),
                 self.restarts.clone(),
             );
+            let started = cx.now();
             let report = match build_supervisor(self.name, factory) {
                 Ok(supervisor) => {
                     restart = true;
@@ -130,6 +170,11 @@ impl SourceController {
                 }
             }
             warn_source(self.id, outcome_kind(&report));
+            let ran = Duration::from_nanos(cx.now().as_nanos().saturating_sub(started.as_nanos()));
+            sleep(cx.now(), backoff.delay(ran)).await;
+            if cx.checkpoint().is_err() {
+                return;
+            }
         }
     }
 
@@ -236,7 +281,11 @@ fn finished_ok(report: &ManagedSupervisorReport<WorkerError>) -> bool {
 fn outcome_kind(report: &ManagedSupervisorReport<WorkerError>) -> &'static str {
     let joined = report.children.last().map(|child| &child.task_outcome);
     match (&report.outcome, joined) {
-        (Outcome::Err(_), _) => "supervisor ended with an error",
+        (Outcome::Err(error), _) => match error {
+            ManagedSupervisorError::Region(_) => "supervisor could not open its region",
+            ManagedSupervisorError::Spawn(_) => "supervisor could not spawn the worker",
+            _ => "supervisor ended with an error",
+        },
         (Outcome::Cancelled(_), _) => "supervisor was cancelled",
         (Outcome::Panicked(_), _) => "supervisor panicked",
         (Outcome::Ok(()), Some(Err(JoinError::Cancelled(_)))) => "worker was cancelled",
@@ -263,6 +312,32 @@ macro_rules! source_names {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_backoff_doubles_to_max() {
+        let mut b = RetryBackoff::default();
+        let quick = Duration::ZERO;
+        let waits: Vec<u64> = (0..9).map(|_| b.delay(quick).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+    }
+
+    #[test]
+    fn retry_backoff_resets_after_stable_run() {
+        let mut b = RetryBackoff::default();
+        for _ in 0..5 {
+            b.delay(Duration::ZERO);
+        }
+        assert_eq!(b.delay(STABLE_RUN), RETRY_INITIAL);
+        assert_eq!(
+            b.delay(STABLE_RUN - Duration::from_millis(1)),
+            Duration::from_secs(2)
+        );
+    }
 }
 
 source_names! {
