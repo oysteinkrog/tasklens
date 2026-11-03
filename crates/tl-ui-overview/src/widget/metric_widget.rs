@@ -64,7 +64,7 @@ use super::compose::{
 };
 use super::grid::is_page;
 use super::look::{ChartLook, PageChart, accent};
-use super::meta::ValueText;
+use super::meta::{Lines, ValueText};
 use super::source::{Availability, SourceData};
 use crate::overview::fit::fit_text;
 use crate::overview::gpu_flow::line_style;
@@ -85,6 +85,7 @@ use tl_ui_chart::chart::{ChartBg, ChartSpec, ChartView, GridStyle, ValueFormat, 
 use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use tl_ui_kit::components::validity::copy_text;
 use tl_ui_perf_core::core::actions::PerfShowMiniWindow;
+use tl_ui_perf_core::core::core_clocks::snapshot_line_set;
 
 /// The joint between the device name and the metric name.
 const SEP: &str = " · ";
@@ -748,10 +749,20 @@ impl MetricWidget {
             let state = self.source.read(cx).chart_state();
             let page = self.chart_key.as_ref().is_some_and(|k| k.page.is_some());
             let text = page.then(|| self.page_value_text(cx)).flatten();
+            // Core clocks names each core's line, with its peak and the base clock line, as
+            // the CPU page's Core clocks chart (tasklens-hzire.5). The chart keeps an equal set.
+            let lines = self
+                .chart_key
+                .as_ref()
+                .is_some_and(|k| k.look.lines == Lines::PerCore)
+                .then(|| snapshot_line_set(self.hub.read(cx).current(), cx));
             chart.update(cx, |v, cx| {
                 v.set_state(state, cx);
                 if page {
                     v.set_value_text(text, cx);
+                }
+                if lines.is_some() {
+                    v.set_line_set(lines, cx);
                 }
             });
         }

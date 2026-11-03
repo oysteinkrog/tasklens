@@ -144,6 +144,30 @@ pub fn clocks_labels(range_caption: bool, cx: &App) -> ChartLabels {
     }
 }
 
+/// The line set of `lines` on `scale`: "Core {n}" for each line, the "Peak" column and a
+/// dashed line at the base clock.
+pub fn line_set(lines: &CoreLines, scale: ClockScale, cx: &App) -> LineSet {
+    let names: Arc<[SharedString]> = lines
+        .ids
+        .iter()
+        .map(|&id| tr_args(cx, KEY_CORE, &[("n", FluentValue::from(id))]))
+        .collect();
+    LineSet {
+        names,
+        peak_word: tr(cx, KEY_PEAK),
+        reference: scale.base_mhz,
+    }
+}
+
+/// The line set of the Core clocks chart on `snap`, for a chart whose series are the
+/// [`core_lines`] of `snap` (a `core_clocks` widget).
+pub fn snapshot_line_set(snap: &Snapshot, cx: &App) -> LineSet {
+    let mut logical = Vec::new();
+    logical_devices(&snap.devices, &mut logical);
+    let lines = core_lines(&snap.system.cpu_topology, &logical);
+    line_set(&lines, ClockScale::read(snap), cx)
+}
+
 /// The Core clocks chart of one owner and what its lines are.
 pub struct CoreClocks {
     view: Entity<ChartView>,
@@ -231,17 +255,7 @@ impl CoreClocks {
             stack: false,
             ..self.base.clone()
         };
-        let names: Arc<[SharedString]> = self
-            .lines
-            .ids
-            .iter()
-            .map(|&id| tr_args(cx, KEY_CORE, &[("n", FluentValue::from(id))]))
-            .collect();
-        let set = LineSet {
-            names,
-            peak_word: tr(cx, KEY_PEAK),
-            reference: self.scale.base_mhz,
-        };
+        let set = line_set(&self.lines, self.scale, cx);
         let labels = clocks_labels(self.range_caption, cx);
         self.view.update(cx, |v, cx| {
             v.set_spec(spec, cx);

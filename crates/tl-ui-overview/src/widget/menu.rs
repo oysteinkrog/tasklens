@@ -58,7 +58,8 @@ use tl_ui_settings::layout_boxes::{
     METRIC_PRESSURE,
 };
 use tl_ui_settings::layout_pages::{
-    METRIC_FAN, METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_VRAM_SHARED,
+    METRIC_CLOCK, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED, METRIC_FAN, METRIC_FREQ_MAX,
+    METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_VRAM_SHARED,
 };
 
 use super::grid::{self, InnerGrid, SlotDevice};
@@ -904,10 +905,53 @@ fn gpu_page_source_groups(key: &str, snap: &Snapshot, cx: &App) -> Vec<SourceGro
     groups
 }
 
+/// The metrics phase 3 adds on the CPU, after the box's, in the order of the ADR-019 phase 3
+/// key table, with their name keys.
+const CPU_PAGE_METRICS: [(&str, &str); 4] = [
+    (METRIC_CORES_OVERLAID, "perf-widget-metric-cores-overlaid"),
+    (METRIC_CORES_STACKED, "perf-widget-metric-cores-stacked"),
+    (METRIC_CLOCK, "perf-widget-metric-clock"),
+    (METRIC_FREQ_MAX, "perf-widget-metric-freq-max"),
+];
+
+/// The sources of the CPU page (ADR-019 phase 3 "Source lists"): the CPU box's list, then the
+/// phase 3 keys the CPU reports, then "Core load >" and "Core speed >". Add Widget offers "All
+/// cores >" as the box does.
+fn cpu_page_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
+    let mut groups = cpu_source_groups(snap, cx);
+    let Some(entry) = snap
+        .devices
+        .entries
+        .iter()
+        .find(|e| e.present && &*e.persistent_key == DEVICE_CPU)
+    else {
+        return groups;
+    };
+    for group in &mut groups {
+        for (key, name_key) in CPU_PAGE_METRICS {
+            let metric = MetricKey::new(key);
+            let (value, _) = box_reading(DeviceKind::Cpu, &metric, snap, entry.idx, None);
+            if value.validity == Validity::Unsupported {
+                continue;
+            }
+            group.items.push(SourceItem {
+                offered: MetricMeta::of(DeviceKind::Cpu, &metric).map_or(FormSet::empty(), |m| {
+                    m.offered_forms(Some((snap, entry.idx)))
+                }),
+                metric,
+                label: tr(cx, name_key),
+                engine: false,
+                device: None,
+            });
+        }
+    }
+    groups
+}
+
 /// The sources of the device page `container` on `snap` (ADR-019 phase 3 "Source lists"): the
 /// metrics of the page's own device, from the box lists. Only the CPU and GPU pages offer a
-/// group; the GPU page "All engines" (`tasklens-hzire.4`). A page kind whose page bead has not
-/// come yet lists nothing.
+/// group: the CPU page "All cores >" (`tasklens-hzire.5`), the GPU page "All engines"
+/// (`tasklens-hzire.4`). A page kind whose page bead has not come yet lists nothing.
 pub fn page_source_groups(container: &str, snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
     let Some(key) = tl_ui_settings::layout_pages::page_key(container) else {
         return Vec::new();
@@ -915,6 +959,7 @@ pub fn page_source_groups(container: &str, snap: &Snapshot, cx: &App) -> Vec<Sou
     let groups = match DeviceKind::of_key(key) {
         DeviceKind::Disk | DeviceKind::Disks => disk_source_groups(snap, cx),
         DeviceKind::Gpu => return gpu_page_source_groups(key, snap, cx),
+        DeviceKind::Cpu => return cpu_page_source_groups(snap, cx),
         _ => Vec::new(),
     };
     groups
@@ -1313,6 +1358,29 @@ pub fn confirm_reset_now(
         tr(cx, "perf-widget-reset-confirm"),
     )
     .heading(title);
+    open(dialog, window, cx, on_ok);
+}
+
+/// "Replace your widgets?" of a device page (UI-PRF-061 phase 3): a preset chosen in the page
+/// header or menu over a grid layout. `page` is the page's header word, `preset` the preset's
+/// shown name.
+pub fn confirm_preset_page(
+    page: SharedString,
+    preset: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+    on_ok: impl FnOnce(&mut Window, &mut App) + 'static,
+) {
+    let body = tr_args(
+        cx,
+        "perf-widget-preset-page-body",
+        &[
+            ("page", FluentValue::from(page.to_string())),
+            ("preset", FluentValue::from(preset.to_string())),
+        ],
+    );
+    let dialog = TlDialog::confirm(body, tr(cx, "perf-widget-preset-confirm"))
+        .heading(tr(cx, "perf-widget-preset-title"));
     open(dialog, window, cx, on_ok);
 }
 

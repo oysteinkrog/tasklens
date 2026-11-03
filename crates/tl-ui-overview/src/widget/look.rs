@@ -20,7 +20,8 @@
 //! ADR-019 phase 3 "Page style"): the name as its heading, the value at the right of the
 //! heading, the legend, and the range text under the plot. A metric that has a 1.3.0 page chart
 //! keeps that chart's heading, range word and legend (a disk's Active time and Transfer rate,
-//! a GPU's Memory, Temperature, Power and Clocks).
+//! a GPU's Memory, Temperature, Power and Clocks, the CPU page's Utilization charts and its
+//! secondary charts).
 //!
 //! Pure functions: no drawing, no state.
 
@@ -31,11 +32,13 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{MetricId, SeriesId};
 use tl_ui_settings::layout::{FormSet, METRIC_POWER, METRIC_TEMP, WidgetOptions};
 use tl_ui_settings::layout_boxes::{
-    DeviceKind, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_MEM_AVAILABLE,
-    METRIC_MEM_CACHED, METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED,
-    METRIC_NET_TX,
+    DeviceKind, METRIC_CORE_CLOCKS, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO,
+    METRIC_MEM_AVAILABLE, METRIC_MEM_CACHED, METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION,
+    METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_TX, METRIC_POWER_DRAW,
 };
-use tl_ui_settings::layout_pages::{METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY};
+use tl_ui_settings::layout_pages::{
+    METRIC_CLOCK, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED, METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY,
+};
 
 use super::meta::Lines;
 use crate::overview::cpu_box::SPARK_MEAN_NS;
@@ -391,7 +394,30 @@ impl ChartLook {
         let mut labels = self.labels(format, true, cx);
         let disk = matches!(self.kind, DeviceKind::Disk | DeviceKind::Disks);
         let gpu = self.kind == DeviceKind::Gpu;
+        let cpu = self.kind == DeviceKind::Cpu;
         let heading = match &*self.metric {
+            // The 1.3.0 CPU page's Overall chart: Utilization, Total and Kernel, no axis text.
+            METRIC_CPU_TOTAL if cpu => {
+                labels.show_axis_max = false;
+                tr(cx, KEY_CPU_RANGE)
+            }
+            // The all-cores charts are Utilization charts too; the stacked one shows its axis
+            // max ("1600%").
+            METRIC_CORES_OVERLAID | METRIC_CORES_STACKED if cpu => {
+                let word = tr(cx, KEY_CPU_RANGE);
+                labels.range_word = word.clone();
+                labels.legend = SmallVec::new();
+                labels.show_axis_max = &*self.metric == METRIC_CORES_STACKED;
+                word
+            }
+            // The secondary charts (UI-PRF-025): the name as heading and range word, the axis
+            // max shown.
+            METRIC_POWER_DRAW | METRIC_TEMP | METRIC_CLOCK | METRIC_CORE_CLOCKS if cpu => {
+                labels.range_word = page.name.clone();
+                labels.legend = SmallVec::new();
+                labels.show_axis_max = true;
+                page.name.clone()
+            }
             METRIC_GPU_MEMORY if gpu => {
                 labels.range_word = tr(cx, KEY_GPU_MEMORY_RANGE);
                 labels.legend = smallvec![(tr(cx, KEY_GPU_DEDICATED), LegendStyle::Solid)];

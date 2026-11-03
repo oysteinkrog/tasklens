@@ -968,6 +968,7 @@ perf-widget-reset-page = Reset Page
 perf-widget-reset-page-title = Reset the {$page} page?
 perf-widget-reset-page-body = The page goes back to its default widgets. You can still undo this until you click Apply.
 perf-widget-reset-page-now-body = The page goes back to its default widgets. Your widgets cannot be restored.
+perf-widget-preset-page-body = The {$page} page will use the {$preset} layout instead of your widgets.
 perf-widget-nothing-to-show = Nothing to show on this device
 perf-widget-fixed-details = Details
 perf-widget-fixed-cpu-core-grid = Per-core charts

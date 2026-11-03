@@ -594,6 +594,10 @@ struct SourceState {
     /// texts of 1.3.0, or the probe's text while the probe is not Ok (UI-PRF-032). Always
     /// `None` in an Overview box.
     tip: Option<SharedString>,
+    /// The tooltip the page gives the name, which wins over `tip`: the CPU page's "Power draw
+    /// is not available. Showing Temperature." on the secondary chart that stands in for Power
+    /// draw (ADR-019 phase 3 "CPU secondary graph"). Set by the page with [`SourceData::set_page_tip`].
+    page_tip: Option<SharedString>,
 }
 
 /// One source in use: its device, its current value and its stats over the Overview range.
@@ -673,6 +677,7 @@ impl SourceData {
                 page: false,
                 page_state: ChartState::Live,
                 tip: None,
+                page_tip: None,
             },
             name: SharedString::default(),
             value_text: SharedString::default(),
@@ -821,10 +826,21 @@ impl SourceData {
         self.state.page_state.clone()
     }
 
-    /// The tooltip on the widget's name on a device page: the GPU Power and Clocks headings'
-    /// texts, or the GPU probe's text while it is not Ok. `None` for every other source.
+    /// The tooltip on the widget's name on a device page: the one the page gave
+    /// ([`Self::set_page_tip`]), else the GPU Power and Clocks headings' texts, or the GPU
+    /// probe's text while it is not Ok. `None` for every other source.
     pub fn tip(&self) -> Option<&SharedString> {
-        self.state.tip.as_ref()
+        self.state.page_tip.as_ref().or(self.state.tip.as_ref())
+    }
+
+    /// The tooltip the page puts on the widget's name, or `None` to drop it. Notifies the
+    /// widgets only when it changed.
+    pub fn set_page_tip(&mut self, tip: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.state.page_tip == tip {
+            return;
+        }
+        let snap = box_snapshot(&self.hub, cx);
+        self.update(&snap, false, cx, |this, _| this.state.page_tip = tip);
     }
 
     /// Bumped each time the source notifies.
