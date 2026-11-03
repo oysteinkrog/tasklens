@@ -45,7 +45,11 @@ pub(crate) async fn timeout_at<F: Future>(
     let mut fut = pin!(fut);
     let mut sleep = pin!(time::sleep_until(deadline));
     poll_fn(|task| {
-        // Completed work wins at the deadline, as in `time::timeout`.
+        // As in `time::timeout`: past the deadline the wait has elapsed, even if the inner
+        // future is ready now. Exactly at the deadline, completed work wins.
+        if cx.now() > deadline {
+            return Poll::Ready(Err(WaitEnd::Elapsed));
+        }
         if let Poll::Ready(out) = fut.as_mut().poll(task) {
             return Poll::Ready(Ok(out));
         }
