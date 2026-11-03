@@ -18,17 +18,19 @@ use std::time::Duration;
 use asupersync::Cx;
 use asupersync::channel::{mpsc, watch};
 use asupersync::runtime::TaskHandle;
+use asupersync::supervision::ManagedGeneration;
 use asupersync::time::{TimeSource, VirtualClock};
 use fake_sources::{FakeLab, channels, drain, io};
 use tl_collect::SysRoot;
 use tl_collect::apps::AppPaths;
 use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::session::engine_root;
-use tl_engine::source::{self, WorkerControl};
+use tl_engine::source::{self, WorkerControl, WorkerIo};
+use tl_engine::supervise::WorkerFactory;
 use tl_engine::update::{EngineMsg, ProcessSweep, SourceUpdate};
 use tl_engine::workers::memory;
 use tl_engine::workers::processes::{self, ProcessesSource};
-use tl_engine::workers::workers_for;
+use tl_engine::workers::{WorkerSpec, workers_for};
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, MetricId, ProcessKey, SeriesId};
@@ -688,6 +690,188 @@ fn mem_group_series_every_10s() {
     assert!(times.windows(2).all(|w| w[1] - w[0] == 1_000), "{times:?}");
     let other = band_series(&ui.latest.load_full(), "other").expect("other band");
     assert_eq!(other.period_ns, 1_000_000_000);
+
+    handle.abort();
+    fl.advance(Duration::from_millis(10));
+    assert!(handle.is_finished(), "engine_root returned after cancel");
+    drop(ui);
+    fl.finish();
+}
+
+/// The real `ProcessesSource` on the lab clock, so its CPU rates use lab time.
+fn lab_processes_factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+        let io = io.clone();
+        let src = ProcessesSource::new(Arc::clone(&cfg))
+            .expect("fixture source opens")
+            .with_clock(lab_clock);
+        async move { source::run(cx, io, src).await }
+    })
+}
+
+fn lab_processes_spec() -> WorkerSpec {
+    WorkerSpec {
+        id: SourceId::Processes,
+        name: "processes",
+        modes: &[EngineMode::Full],
+        factory: lab_processes_factory,
+    }
+}
+
+/// Adds `utime` and `stime` clock ticks to the `stat` of `pid`.
+fn add_pid_ticks(root: &FixtureRoot, pid: u32, utime: u64, stime: u64) {
+    let stat = root.read(pid, "stat");
+    let close = stat.rfind(')').expect("stat has a close paren");
+    let mut fields: Vec<String> = stat[close + 1..]
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    // fields[0] is field 3 (state), so utime (field 14) is fields[11] and stime fields[12].
+    for (i, add) in [(11, utime), (12, stime)] {
+        let ticks: u64 = fields[i].parse().expect("tick count");
+        fields[i] = (ticks + add).to_string();
+    }
+    root.write(
+        pid,
+        "stat",
+        format!("{} {}\n", &stat[..=close], fields.join(" ")),
+    );
+}
+
+/// Adds `delta` to the first fields of the `cpu` line of `/proc/stat` (user, nice, system,
+/// idle, iowait, irq, softirq, steal).
+fn add_stat_ticks(root: &FixtureRoot, delta: [u64; 8]) {
+    let path = root.root().join("proc/stat");
+    let text = fs::read_to_string(&path).expect("read /proc/stat");
+    let (first, rest) = text.split_once('\n').expect("/proc/stat has lines");
+    let mut fields: Vec<u64> = first
+        .strip_prefix("cpu ")
+        .expect("first line is the cpu line")
+        .split_whitespace()
+        .map(|f| f.parse().expect("tick count"))
+        .collect();
+    for (field, add) in fields.iter_mut().zip(delta) {
+        *field += add;
+    }
+    let line: Vec<String> = fields.iter().map(u64::to_string).collect();
+    fs::write(&path, format!("cpu  {}\n{rest}", line.join(" "))).expect("write /proc/stat");
+}
+
+/// The last `CPU_GROUP` value of every band in `snap.system.cpu.groups`, by key.
+fn cpu_band_values(snap: &Snapshot) -> Vec<(Arc<str>, f64)> {
+    snap.system
+        .cpu
+        .groups
+        .iter()
+        .map(|b| {
+            let id = SeriesId {
+                device: b.device,
+                metric: MetricId::CPU_GROUP,
+            };
+            let last = snap
+                .series
+                .get(id)
+                .and_then(|v| v.samples.last().copied())
+                .expect("a published band has a sample");
+            assert!(last.is_valid(), "band {} is a gap", b.key);
+            (Arc::clone(&b.key), f64::from(last.value))
+        })
+        .collect()
+}
+
+/// D-042, UI-PRF-062 "Sweep rate": with only device history on and no window, the 10 s group
+/// sweep keeps each pid's CPU baseline, so the `CPU_GROUP` series get a sample every 10 s with
+/// the process CPU in the groups. Every sample sums to busy CPU of the sweep's `/proc/stat`
+/// window. These are the samples the metric history worker stores in its tiers.
+#[test]
+fn cpu_group_history_only_sweep() {
+    let root = FixtureRoot::new(&["owner-desktop"]);
+    fs::create_dir_all(root.root().join("sys/fs/cgroup")).expect("create cgroup dir");
+    let mut fl = FakeLab::new();
+    CLOCK.with(|c| *c.borrow_mut() = Some(Arc::clone(&fl.clock)));
+    let (ep, ui) = fake_sources::root_endpoints(root.config(), vec![lab_processes_spec()]);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        engine_root(cx, ep).await;
+    });
+    ui.demand_tx
+        .send(history_demand())
+        .expect("watch has receivers");
+
+    // Each second of lab time, on the fixture's 32 online CPUs: systemd (pid 1) uses 1% of all
+    // CPUs, the kernel thread ksoftirqd/0 (pid 15) 0.5%. The `cpu` line moves by 3200 ticks:
+    // user 20%, system 10%, irq 1%, softirq 2%, the rest idle. So busy is 33% and
+    // "Short-lived processes" is 30% minus the 1.5% of the two processes.
+    let one_pct = rustix::param::clock_ticks_per_second() * 32 / 100;
+    let stat_delta = [640, 0, 320, 2144, 0, 32, 64, 0];
+    let close = |got: f64, want: f64, what: &str| {
+        assert!((got - want).abs() <= 1e-3, "{what} is {got}, want {want}");
+    };
+    let other_len = |snap: &Snapshot| {
+        let band = snap.system.cpu.groups.iter().find(|b| &*b.key == "other")?;
+        let id = SeriesId {
+            device: band.device,
+            metric: MetricId::CPU_GROUP,
+        };
+        snap.series.get(id).map(|v| v.samples.len())
+    };
+
+    let mut seen = 0;
+    let mut times = Vec::new();
+    while fl.now_ms() < 60_000 {
+        fl.advance(Duration::from_millis(100));
+        // On the half second, so every 10 s sweep window holds exactly ten of these.
+        if fl.now_ms() % 1_000 == 500 {
+            add_pid_ticks(&root, 1, one_pct, 0);
+            add_pid_ticks(&root, 15, 0, one_pct / 2);
+            add_stat_ticks(&root, stat_delta);
+        }
+        let snap = ui.latest.load_full();
+        let Some(n) = other_len(&snap) else { continue };
+        if n == seen {
+            continue;
+        }
+        seen = n;
+        times.push(fl.now_ms());
+        let bands = cpu_band_values(&snap);
+        let value = |key: &str| {
+            bands
+                .iter()
+                .find(|(k, _)| &**k == key)
+                .map(|(_, v)| *v)
+                .unwrap_or_else(|| panic!("no band {key}"))
+        };
+        assert!(bands.iter().all(|(_, v)| *v >= 0.0), "{bands:?}");
+        close(
+            bands.iter().map(|(_, v)| v).sum(),
+            33.0,
+            "the sum of the bands",
+        );
+        close(value("cpu:irq"), 1.0, "Hardware interrupts");
+        close(value("cpu:softirq"), 2.0, "Software interrupts");
+        close(value("cpu:steal"), 0.0, "Steal");
+        close(value("cpu:kthreads"), 0.5, "Kernel threads");
+        close(value("cpu:short"), 28.5, "Short-lived processes");
+        let apps: f64 = bands
+            .iter()
+            .filter(|(k, _)| !k.starts_with("cpu:"))
+            .map(|(_, v)| v)
+            .sum();
+        close(apps, 1.0, "the groups and Other apps");
+    }
+    // The first sweep has no window, so 5 of the 6 sweeps in 60 s carry CPU values.
+    assert_eq!(times.len(), 5, "{times:?}");
+    assert!(times.windows(2).all(|w| w[1] - w[0] == 10_000), "{times:?}");
+    let snap = ui.latest.load_full();
+    let band = snap.system.cpu.groups.first().expect("a CPU band");
+    let id = SeriesId {
+        device: band.device,
+        metric: MetricId::CPU_GROUP,
+    };
+    assert_eq!(
+        snap.series.get(id).expect("series").period_ns,
+        10_000_000_000
+    );
 
     handle.abort();
     fl.advance(Duration::from_millis(10));

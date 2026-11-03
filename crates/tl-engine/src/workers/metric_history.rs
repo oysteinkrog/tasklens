@@ -1921,6 +1921,165 @@ mod tests {
         );
     }
 
+    /// D-042, ADR-017 "CPU group series": `CPU_GROUP` is stored like `MEM_GROUP`, on the same
+    /// `memgroup:<key>` devices and next to it. A group's CPU series continues after an engine
+    /// restart under a new `DeviceIdx`, a group outside the CPU top 20 is a gap on `CPU_GROUP`
+    /// while its `MEM_GROUP` series goes on, and the 24 h and 7 d reads return band means.
+    #[test]
+    fn cpu_group_series_survive_restart() {
+        let (mem, cpu) = (MetricId::MEM_GROUP, MetricId::CPU_GROUP);
+        let group = |idx: u16, key: &str, name: &str| DeviceEntry {
+            display_name: Arc::from(name),
+            ..entry(
+                idx,
+                DeviceIdentity::MemGroup {
+                    key: Arc::from(key),
+                },
+                &format!("memgroup:{key}"),
+                true,
+            )
+        };
+        // 1 s values alternate between `low` and `low + 20`: every 10 s, 1 min and read bucket
+        // has the mean `low + 10` and the maximum `low + 20`.
+        let alternate = |i: u64, low: f32| if i.is_multiple_of(2) { low } else { low + 20.0 };
+        // Bucket edges on whole multiples of 1800 s, as in `memory_group_series_survive_restart`.
+        let offset = 1_699_999_200 * SEC as i64;
+        let gap_at = |h: &DeviceHistory, id: SeriesId, t: TimeNs| -> bool {
+            h.get(id)
+                .expect("series")
+                .iter()
+                .find(|p| p.t_realtime_ns == t as i64 + offset)
+                .expect("bucket")
+                .is_gap()
+        };
+        let valid = |h: &DeviceHistory, id: SeriesId, f: fn(&HistPoint) -> f32| -> Vec<f32> {
+            h.get(id)
+                .map(|p| p.iter().filter(|p| !p.is_gap()).map(f).collect())
+                .unwrap_or_default()
+        };
+
+        // Session 1, 120 s: rustc and node in the memory top 20 the whole time; node in the
+        // CPU top 20 for the first 60 s only. "Other apps" and "Short-lived processes" carry
+        // CPU_GROUP alone.
+        let dir = tempdir();
+        let t0 = 1_800 * SEC;
+        let mut st = open(dir.path(), 1, offset, t0);
+        st.set_catalog(catalog(
+            1,
+            vec![
+                entry(0, DeviceIdentity::Memory, "memory", true),
+                group(1, "exe:rustc", "rustc"),
+                group(2, "exe:node", "node"),
+                group(3, "other", "Other apps"),
+                group(4, "cpu:short", "Short-lived processes"),
+            ],
+        ));
+        for i in 0..120 {
+            let t = t0 + i * SEC;
+            let mut batch = vec![
+                (sid(1, mem), sample(t, 100.0)),
+                (sid(1, cpu), sample(t, alternate(i, 10.0))),
+                (sid(2, mem), sample(t, 40.0)),
+                (sid(3, cpu), sample(t, 50.0)),
+                (sid(4, cpu), sample(t, 5.0)),
+            ];
+            match i {
+                0..60 => batch.push((sid(2, cpu), sample(t, 15.0))),
+                // The reducer's one gap sample when node leaves the CPU top 20.
+                60 => batch.push((
+                    sid(2, cpu),
+                    Sample {
+                        t_ns: t,
+                        value: 0.0,
+                        flags: SampleFlags::empty(),
+                    },
+                )),
+                _ => {}
+            }
+            st.push(&batch);
+        }
+        let now = t0 + 125 * SEC;
+        let h = st
+            .answer(live(DeviceRange::H24), now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(h.step_ns, 90 * SEC);
+        assert_eq!(valid(&h, sid(2, cpu), |p| p.mean), [15.0]);
+        assert!(gap_at(&h, sid(2, cpu), t0 + 90 * SEC));
+        assert_eq!(valid(&h, sid(2, mem), |p| p.mean), [40.0, 40.0]);
+        st.close(now).expect("close");
+
+        // Session 2: the engine restarts 15 minutes later on the same boot and numbers its
+        // devices again. node stays in the memory top 20 but not in the CPU top 20.
+        let t1 = t0 + 900 * SEC;
+        let mut st = open(dir.path(), 1, offset, t1);
+        st.set_catalog(catalog(
+            1,
+            vec![
+                entry(0, DeviceIdentity::Memory, "memory", true),
+                group(1, "cpu:short", "Short-lived processes"),
+                group(2, "other", "Other apps"),
+                group(3, "exe:node", "node"),
+                group(4, "exe:rustc", "rustc"),
+            ],
+        ));
+        // Second 120 stays open, so seconds 0 to 119 are readable.
+        for i in 0..=120 {
+            let t = t1 + i * SEC;
+            st.push(&[
+                (sid(1, cpu), sample(t, 5.0)),
+                (sid(2, cpu), sample(t, 50.0)),
+                (sid(3, mem), sample(t, 40.0)),
+                (sid(4, mem), sample(t, 100.0)),
+                (sid(4, cpu), sample(t, alternate(i, 50.0))),
+            ]);
+        }
+        let now = t1 + 125 * SEC;
+        st.tick(now).expect("tick");
+        let (short, other, node, rustc) = (sid(1, cpu), sid(2, cpu), sid(3, cpu), sid(4, cpu));
+
+        // 1 h: the 1 s tier in 4 s buckets, both sessions under the new numbers.
+        let h = st
+            .answer(live(DeviceRange::H1), now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(h.step_ns, 4 * SEC);
+        let mut want = vec![20.0; 30];
+        want.extend([60.0; 30]);
+        assert_eq!(valid(&h, rustc, |p| p.mean), want);
+        assert!(gap_at(&h, rustc, t0 + 600 * SEC));
+        assert_eq!(valid(&h, sid(4, mem), |p| p.mean), [100.0; 60]);
+        assert_eq!(valid(&h, other, |p| p.mean), [50.0; 60]);
+        assert_eq!(valid(&h, short, |p| p.mean), [5.0; 60]);
+        assert_eq!(valid(&h, node, |p| p.mean), [15.0; 15]);
+        assert_eq!(valid(&h, sid(3, mem), |p| p.mean), [40.0; 60]);
+
+        // 24 h: the 10 s tier in 90 s buckets: band means, with the per-second extremes in
+        // min and max.
+        let h = st
+            .answer(live(DeviceRange::H24), now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(h.step_ns, 90 * SEC);
+        assert_eq!(valid(&h, rustc, |p| p.mean), [20.0, 20.0, 60.0, 60.0]);
+        assert_eq!(valid(&h, rustc, |p| p.min), [10.0, 10.0, 50.0, 50.0]);
+        assert_eq!(valid(&h, rustc, |p| p.max), [30.0, 30.0, 70.0, 70.0]);
+        assert_eq!(valid(&h, other, |p| p.mean), [50.0; 4]);
+        assert_eq!(valid(&h, node, |p| p.mean), [15.0]);
+        assert_eq!(valid(&h, sid(3, mem), |p| p.mean), [40.0; 4]);
+
+        // 7 d: the 1 min tier in 600 s buckets.
+        let h = st
+            .answer(live(DeviceRange::D7), now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(h.step_ns, 600 * SEC);
+        assert_eq!(valid(&h, rustc, |p| p.mean), [20.0, 60.0]);
+        assert_eq!(valid(&h, rustc, |p| p.max), [30.0, 70.0]);
+        assert_eq!(valid(&h, short, |p| p.mean), [5.0, 5.0]);
+        assert_eq!(valid(&h, node, |p| p.mean), [15.0]);
+    }
+
     /// tasklens-o55.56: a 100 ms boost of one core's clock survives every tier, and so does
     /// the mean. The 1 s tier keeps each second's mean and maximum, so every bucket reads the
     /// mean of its samples with the boost as its maximum.
