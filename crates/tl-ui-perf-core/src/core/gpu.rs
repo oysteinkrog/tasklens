@@ -1,16 +1,20 @@
 //! The GPU engine model the Overview, the widgets and the GPU page share: the vendor, the
 //! engines each vendor reports, and the snapshot lookups for a GPU's record and adapter
-//! (PERF-062, PERF-063). Moved from `gpu.rs` (tasklens-zljr5.22).
+//! (PERF-062, PERF-063). Moved from `gpu.rs` (tasklens-zljr5.22). The probe state and the
+//! Power and Clocks heading tooltips moved here too (`tasklens-hzire.4`), so the GPU page's
+//! chart widgets read them from their source.
 
 use std::sync::Arc;
 
-use gpui_kit::SharedString;
+use fluent_bundle::FluentValue;
+use gpui_kit::{App, SharedString};
+use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId};
 use tl_model::snapshot::{GraphicsAdapter, Snapshot};
-use tl_model::system::{GpuEngine, GpuTotals};
+use tl_model::system::{ClockEventReasons, GpuEngine, GpuTotals, Metric};
 use tl_model::validity::Validity;
 
-use tl_ui_base::i18n::tr_en;
+use tl_ui_base::i18n::{tr, tr_args, tr_en};
 
 /// The GPU maker. Only NVIDIA has a probe, so only NVIDIA shows probe states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,4 +302,125 @@ pub fn gpu_totals(snap: &Snapshot, device: DeviceIdx) -> Option<&GpuTotals> {
     gpus.binary_search_by_key(&device, |(i, _)| *i)
         .ok()
         .map(|i| &gpus[i].1)
+}
+
+/// The `last_error` of the GPU source when the probe binary is missing. The engine's
+/// `gpu::NOT_INSTALLED` holds the same text.
+pub const PROBE_NOT_INSTALLED: &str = "GPU probe not installed";
+
+/// The state of the NVIDIA probe as the GPU page shows it (PERF-062). Moved from the GPU page
+/// (`tasklens-hzire.4`), so the page's chart widgets show it too.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProbeState {
+    #[default]
+    Ok,
+    /// The GPU source is in backoff: values `!`, plots stop.
+    Restarting,
+    /// The probe binary is not installed: values `n/a`, one placeholder engine cell.
+    Missing,
+}
+
+/// The probe state for a GPU of `vendor` from the snapshot's source health. AMD, Intel and
+/// unknown GPUs are always `Ok`.
+pub fn probe_state(vendor: GpuVendor, snap: &Snapshot) -> ProbeState {
+    if vendor != GpuVendor::Nvidia {
+        return ProbeState::Ok;
+    }
+    let h = snap.health.get(SourceId::GpuNvidia);
+    match h.state {
+        SourceState::Failed | SourceState::Disabled { .. } => ProbeState::Restarting,
+        SourceState::Unsupported
+            if h.last_error
+                .as_deref()
+                .is_some_and(|e| e.contains(PROBE_NOT_INSTALLED)) =>
+        {
+            ProbeState::Missing
+        }
+        _ => ProbeState::Ok,
+    }
+}
+
+/// The `en-US.ftl` key of the tooltip every GPU chart shows in `probe`, `None` while it is Ok.
+pub fn probe_tooltip_key(probe: ProbeState) -> Option<&'static str> {
+    match probe {
+        ProbeState::Ok => None,
+        ProbeState::Restarting => Some(KEY_RESTARTING),
+        ProbeState::Missing => Some(KEY_MISSING),
+    }
+}
+
+/// "The GPU probe is restarting" and "The GPU probe is not installed".
+pub const KEY_RESTARTING: &str = "perf-gpu-probe-restarting";
+pub const KEY_MISSING: &str = "perf-gpu-probe-missing";
+
+/// The `en-US.ftl` keys of the reasons the clocks are held down, in bit order. Idle is not a
+/// throttle, so it has no word.
+const REASON_WORDS: [(ClockEventReasons, &str); 8] = [
+    (ClockEventReasons::APP_CLOCKS, "perf-gpu-reason-app-clocks"),
+    (ClockEventReasons::POWER_CAP, "perf-gpu-reason-power-cap"),
+    (
+        ClockEventReasons::HW_SLOWDOWN,
+        "perf-gpu-reason-hw-slowdown",
+    ),
+    (ClockEventReasons::SYNC_BOOST, "perf-gpu-reason-sync-boost"),
+    (ClockEventReasons::SW_THERMAL, "perf-gpu-reason-sw-thermal"),
+    (ClockEventReasons::HW_THERMAL, "perf-gpu-reason-hw-thermal"),
+    (
+        ClockEventReasons::HW_POWER_BRAKE,
+        "perf-gpu-reason-hw-power-brake",
+    ),
+    (
+        ClockEventReasons::DISPLAY_CLOCKS,
+        "perf-gpu-reason-display-clocks",
+    ),
+];
+
+fn shown<T: Copy + Default>(m: Metric<T>) -> Option<T> {
+    matches!(m.validity, Validity::Valid | Validity::Stale).then_some(m.value)
+}
+
+/// The Power heading's tooltip (UI-PRF-032): "Limit range 100 to 350 W · 1.24 kWh since
+/// boot"; "max 350 W · 1.24 kWh since boot" while the card's lowest limit is unknown. `None`
+/// without the highest limit or the energy.
+pub fn power_tooltip_text(totals: Option<&GpuTotals>, cx: &App) -> Option<SharedString> {
+    let t = totals?;
+    let max = t.info.power_max_limit_w?;
+    let joules = shown(t.energy_since_boot)?;
+    let arg = |v: String| FluentValue::from(v);
+    let kwh = ("kwh", arg(format!("{:.2}", joules / 3.6e6)));
+    let max = ("max", arg(format!("{max:.0}")));
+    Some(match t.info.power_min_limit_w {
+        Some(min) => tr_args(
+            cx,
+            "perf-gpu-power-tooltip",
+            &[("min", arg(format!("{min:.0}"))), max, kwh],
+        ),
+        None => tr_args(cx, "perf-gpu-power-row-tooltip", &[max, kwh]),
+    })
+}
+
+/// The Clocks heading's tooltip (UI-PRF-032): "P3 · Throttled: power cap", reasons joined by
+/// ", "; "P3" while none is set or the reasons are not reported. `None` without a P-state.
+pub fn clocks_tooltip_text(totals: Option<&GpuTotals>, cx: &App) -> Option<SharedString> {
+    let t = totals?;
+    let pstate = ("pstate", FluentValue::from(shown(t.pstate)?.to_string()));
+    let reasons = shown(t.clock_event_reasons).unwrap_or_default();
+    let words: Vec<SharedString> = REASON_WORDS
+        .iter()
+        .filter(|(bit, _)| reasons.contains(*bit))
+        .map(|(_, key)| tr(cx, key))
+        .collect();
+    if words.is_empty() {
+        return Some(tr_args(cx, "perf-gpu-clocks-tooltip-plain", &[pstate]));
+    }
+    let joined = words
+        .iter()
+        .map(|w| w.as_ref())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(tr_args(
+        cx,
+        "perf-gpu-clocks-tooltip",
+        &[pstate, ("reasons", FluentValue::from(joined))],
+    ))
 }

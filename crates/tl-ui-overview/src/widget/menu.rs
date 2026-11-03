@@ -57,6 +57,9 @@ use tl_ui_settings::layout_boxes::{
     METRIC_NET_RX, METRIC_NET_TRAFFIC, METRIC_NET_TX, METRIC_POWER_CORES, METRIC_POWER_DRAW,
     METRIC_PRESSURE,
 };
+use tl_ui_settings::layout_pages::{
+    METRIC_FAN, METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_VRAM_SHARED,
+};
 
 use super::grid::{self, InnerGrid, SlotDevice};
 use super::members::{Members, members};
@@ -847,16 +850,71 @@ pub fn add_items(
     menu
 }
 
+/// The metrics phase 3 adds on a GPU, after the box's, in the order of the ADR-019 phase 3 key
+/// table, with their name keys. `memory` lists by its menu label, "Memory (dedicated and
+/// shared)", so it does not share an item text with VRAM.
+const GPU_PAGE_METRICS: [(&str, &str); 4] = [
+    (METRIC_GPU_MEMORY, "perf-widget-menu-gpu-memory"),
+    (METRIC_VRAM_SHARED, "perf-widget-metric-vram-shared"),
+    (METRIC_GPU_CLOCKS, "perf-widget-metric-gpu-clocks"),
+    (METRIC_FAN, "perf-widget-metric-fan"),
+];
+
+/// The sources of the GPU page of `key` (ADR-019 phase 3 "Source lists"): the GPU box's list
+/// for that GPU, then the phase 3 keys the GPU reports. Add Widget offers "All engines" for it
+/// (`add_group` stays `None`, as for a GPU of the box).
+fn gpu_page_source_groups(key: &str, snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
+    let slot = SlotDevice {
+        key: Arc::from(key),
+        name: Arc::from(""),
+    };
+    let mut groups = source_groups(std::slice::from_ref(&slot), snap, cx);
+    for group in &mut groups {
+        let Some(entry) = snap
+            .devices
+            .entries
+            .iter()
+            .filter(|e| e.present)
+            .find(|e| DeviceKey::from_identity(&e.identity).is_some_and(|k| *k.0 == *key))
+        else {
+            continue;
+        };
+        let Some(t) = gpu_totals(snap, entry.idx) else {
+            continue;
+        };
+        for (metric_key, name_key) in GPU_PAGE_METRICS {
+            let metric = MetricKey::new(metric_key);
+            // Shared memory is listed only on a GPU that reports a shared total.
+            let reported = match metric_key {
+                METRIC_VRAM_SHARED => t.shared_total.validity != Validity::Unsupported,
+                _ => reading(&metric, t).validity != Validity::Unsupported,
+            };
+            if !reported {
+                continue;
+            }
+            group.items.push(SourceItem {
+                offered: offered(&metric, snap, entry.idx),
+                metric,
+                label: tr(cx, name_key),
+                engine: false,
+                device: None,
+            });
+        }
+    }
+    groups
+}
+
 /// The sources of the device page `container` on `snap` (ADR-019 phase 3 "Source lists"): the
-/// metrics of the page's own device, from the box lists, with no group (only the CPU and GPU
-/// pages offer one, added by their page beads). A page kind whose page bead has not come yet
-/// lists nothing.
+/// metrics of the page's own device, from the box lists. Only the CPU and GPU pages offer a
+/// group; the GPU page "All engines" (`tasklens-hzire.4`). A page kind whose page bead has not
+/// come yet lists nothing.
 pub fn page_source_groups(container: &str, snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
     let Some(key) = tl_ui_settings::layout_pages::page_key(container) else {
         return Vec::new();
     };
     let groups = match DeviceKind::of_key(key) {
         DeviceKind::Disk | DeviceKind::Disks => disk_source_groups(snap, cx),
+        DeviceKind::Gpu => return gpu_page_source_groups(key, snap, cx),
         _ => Vec::new(),
     };
     groups

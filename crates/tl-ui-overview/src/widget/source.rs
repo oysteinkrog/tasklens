@@ -71,7 +71,10 @@ use tl_ui_chart::net_totals::NetTotal;
 use tl_ui_kit::components::validity::copy_text;
 use tl_ui_perf_core::core::DeviceKey;
 use tl_ui_perf_core::core::core_clocks::core_lines;
-use tl_ui_perf_core::core::gpu::{GpuVendor, gpu_totals};
+use tl_ui_perf_core::core::gpu::{
+    GpuVendor, ProbeState, clocks_tooltip_text, gpu_totals, power_tooltip_text, probe_state,
+    probe_tooltip_key,
+};
 use tl_ui_perf_core::core::logical_devices;
 use tl_ui_perf_core::core::sensors::{default_sensor, sensor_device};
 
@@ -581,9 +584,15 @@ struct SourceState {
     /// The source serves a device page: the value is written in the page format
     /// (`MetricMeta::value_text_in`, ADR-019 phase 3).
     page: bool,
-    /// On a device page, the error of the collector of the source's kind while it has failed
-    /// ([`failed_of`]). Always `None` in an Overview box, which shows no failed state.
-    failed: Option<SharedString>,
+    /// On a device page, the state a chart shows over its data: Failed with the error of the
+    /// collector of the source's kind while it has failed ([`failed_of`]), and on a GPU the
+    /// probe state (Failed while the probe restarts, Unsupported while it is missing). Always
+    /// Live in an Overview box, which shows no failed state.
+    page_state: ChartState,
+    /// On a device page, the tooltip on the widget's name: the GPU Power and Clocks headings'
+    /// texts of 1.3.0, or the probe's text while the probe is not Ok (UI-PRF-032). Always
+    /// `None` in an Overview box.
+    tip: Option<SharedString>,
 }
 
 /// One source in use: its device, its current value and its stats over the Overview range.
@@ -661,7 +670,8 @@ impl SourceData {
                 },
                 strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
                 page: false,
-                failed: None,
+                page_state: ChartState::Live,
+                tip: None,
             },
             name: SharedString::default(),
             value_text: SharedString::default(),
@@ -807,10 +817,13 @@ impl SourceData {
     /// while the collector of the source's kind has failed on a device page (the 1.3.0 pages'
     /// `health_state`), else Live. The chart works out WarmingUp and Stale itself.
     pub fn chart_state(&self) -> ChartState {
-        match &self.state.failed {
-            Some(error) => ChartState::Failed(error.clone()),
-            None => ChartState::Live,
-        }
+        self.state.page_state.clone()
+    }
+
+    /// The tooltip on the widget's name on a device page: the GPU Power and Clocks headings'
+    /// texts, or the GPU probe's text while it is not Ok. `None` for every other source.
+    pub fn tip(&self) -> Option<&SharedString> {
+        self.state.tip.as_ref()
     }
 
     /// Bumped each time the source notifies.
@@ -1062,12 +1075,6 @@ impl SourceData {
     /// stats are worked out again with `stats`, and after a new lookup, whose series or minus
     /// list may differ.
     fn refresh(&mut self, snap: &Snapshot, mut stats: bool, cx: &App) {
-        // The collector's health is read live, as the 1.3.0 pages read it.
-        self.state.failed = if self.state.page {
-            failed_of(self.kind, self.hub.read(cx).current())
-        } else {
-            None
-        };
         if self.catalog_version != Some(snap.devices.version) {
             self.catalog_version = Some(snap.devices.version);
             self.state.device = self.resolve_device(snap);
@@ -1079,6 +1086,14 @@ impl SourceData {
         self.state.vendor = match (self.kind, idx) {
             (DeviceKind::Gpu, Some(i)) => GpuVendor::of(snap, i),
             _ => GpuVendor::Unknown,
+        };
+        if let Some(i) = idx {
+            self.sync_shared_line(snap, i);
+        }
+        (self.state.page_state, self.state.tip) = if self.state.page {
+            self.page_extras(idx, cx)
+        } else {
+            (ChartState::Live, None)
         };
         let metric = &self.selector.metric;
         let (mut value, second) = match idx {
@@ -1139,6 +1154,55 @@ impl SourceData {
             offered: meta.offered_forms(on),
             figures,
         };
+    }
+
+    /// A GPU's `memory` chart draws the shared line only while the GPU reports shared memory,
+    /// as the 1.3.0 Memory chart does (never on NVIDIA). The legend follows the line count.
+    fn sync_shared_line(&mut self, snap: &Snapshot, idx: DeviceIdx) {
+        if self.kind != DeviceKind::Gpu || self.selector.metric.as_str() != METRIC_GPU_MEMORY {
+            return;
+        }
+        let shared = gpu_totals(snap, idx).is_some_and(|t| {
+            t.shared_total.validity == Validity::Valid && t.shared_total.value > 0
+        });
+        match (shared, self.state.series.len()) {
+            (false, 2) => self.state.series.truncate(1),
+            (true, 1) => self.state.series.push(SeriesId {
+                device: idx,
+                metric: MetricId::GPU_MEM_SHARED,
+            }),
+            _ => {}
+        }
+    }
+
+    /// The chart state and the name's tooltip on a device page. The health is read live, as the
+    /// 1.3.0 pages read it. A GPU shows its probe state on every chart, with the probe's text
+    /// as the tooltip; while the probe is Ok, Power and Clocks carry their 1.3.0 heading texts.
+    fn page_extras(&self, idx: Option<DeviceIdx>, cx: &App) -> (ChartState, Option<SharedString>) {
+        let live = self.hub.read(cx).current();
+        if self.kind != DeviceKind::Gpu {
+            let state = failed_of(self.kind, live).map_or(ChartState::Live, ChartState::Failed);
+            return (state, None);
+        }
+        let Some(idx) = idx else {
+            return (ChartState::Live, None);
+        };
+        let probe = probe_state(self.state.vendor, live);
+        if let Some(key) = probe_tooltip_key(probe) {
+            let text = tr(cx, key);
+            let state = match probe {
+                ProbeState::Restarting => ChartState::Failed(text.clone()),
+                _ => ChartState::Unsupported,
+            };
+            return (state, Some(text));
+        }
+        let totals = gpu_totals(live, idx);
+        let tip = match self.selector.metric.as_str() {
+            METRIC_POWER => power_tooltip_text(totals, cx),
+            METRIC_GPU_CLOCKS => clocks_tooltip_text(totals, cx),
+            _ => None,
+        };
+        (ChartState::Live, tip)
     }
 
     /// The metric's name, by the ADR-019 phase 2 rule: the metric's name on a CPU, memory, an
@@ -1241,10 +1305,11 @@ fn line_minus(minus: &[SeriesId], line: SeriesId) -> SmallVec<[SeriesId; 5]> {
 fn snap_swap_total_is_zero(total: Option<f32>) -> bool {
     total.is_none_or(|t| t <= 0.0)
 }
+
 /// The error of the collector that reads devices of `kind` while it has failed, as the 1.3.0
 /// CPU, Memory, Disk and Network pages show it on their charts (`health_state`). `None` while it
 /// runs, and for a kind whose page shows another state: the GPU pages show their probe state
-/// (`gpu::probe_chart_state`), and fans, batteries and other keys have no failed chart.
+/// ([`SourceData::page_extras`]), and fans, batteries and other keys have no failed chart.
 fn failed_of(kind: DeviceKind, snap: &Snapshot) -> Option<SharedString> {
     let source = match kind {
         DeviceKind::Cpu | DeviceKind::CpuLogical => SourceId::Cpu,

@@ -19,7 +19,8 @@
 //! In a device page container a Cell's chart is a 1.3.0 page chart ([`ChartLook::page_labels`],
 //! ADR-019 phase 3 "Page style"): the name as its heading, the value at the right of the
 //! heading, the legend, and the range text under the plot. A metric that has a 1.3.0 page chart
-//! keeps that chart's heading, range word and legend (a disk's Active time and Transfer rate).
+//! keeps that chart's heading, range word and legend (a disk's Active time and Transfer rate,
+//! a GPU's Memory, Temperature, Power and Clocks).
 //!
 //! Pure functions: no drawing, no state.
 
@@ -28,12 +29,13 @@ use std::sync::Arc;
 use gpui_kit::{App, Hsla, SharedString, px, white};
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{MetricId, SeriesId};
-use tl_ui_settings::layout::{FormSet, WidgetOptions};
+use tl_ui_settings::layout::{FormSet, METRIC_POWER, METRIC_TEMP, WidgetOptions};
 use tl_ui_settings::layout_boxes::{
     DeviceKind, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_MEM_AVAILABLE,
     METRIC_MEM_CACHED, METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED,
     METRIC_NET_TX,
 };
+use tl_ui_settings::layout_pages::{METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY};
 
 use super::meta::Lines;
 use crate::overview::cpu_box::SPARK_MEAN_NS;
@@ -60,6 +62,19 @@ const KEY_DISK_TRANSFER: &str = "perf-disk-heading-transfer";
 const KEY_DISK_THROUGHPUT: &str = "perf-disk-range-throughput";
 const KEY_DISK_READ: &str = "perf-disk-legend-read";
 const KEY_DISK_WRITE: &str = "perf-disk-legend-write";
+/// The GPU page charts' headings, range words and legends (`gpu::memory_labels`,
+/// `gpu::temperature_labels`, `gpu::power_labels`, `gpu::clocks_labels`).
+const KEY_GPU_MEMORY: &str = "perf-gpu-heading-memory";
+const KEY_GPU_MEMORY_RANGE: &str = "perf-gpu-range-memory";
+const KEY_GPU_DEDICATED: &str = "perf-gpu-legend-dedicated";
+const KEY_GPU_SHARED: &str = "perf-gpu-legend-shared";
+const KEY_GPU_TEMPERATURE: &str = "perf-gpu-heading-temperature";
+const KEY_GPU_POWER: &str = "perf-gpu-heading-power";
+const KEY_GPU_POWER_RANGE: &str = "perf-gpu-row-power";
+const KEY_GPU_CLOCKS: &str = "perf-gpu-heading-clocks";
+const KEY_GPU_CLOCKS_RANGE: &str = "perf-gpu-row-clock";
+const KEY_GPU_CLOCK: &str = "perf-gpu-legend-gpu-clock";
+const KEY_GPU_MEM_CLOCK: &str = "perf-gpu-legend-mem-clock";
 
 /// What a page style Cell's chart shows besides the plot: the widget's name, which of the name
 /// and the value its forms keep, and whether the value is the sum of the chart's lines.
@@ -375,7 +390,40 @@ impl ChartLook {
     pub fn page_labels(&self, format: ValueFormat, page: &PageChart, cx: &App) -> ChartLabels {
         let mut labels = self.labels(format, true, cx);
         let disk = matches!(self.kind, DeviceKind::Disk | DeviceKind::Disks);
+        let gpu = self.kind == DeviceKind::Gpu;
         let heading = match &*self.metric {
+            METRIC_GPU_MEMORY if gpu => {
+                labels.range_word = tr(cx, KEY_GPU_MEMORY_RANGE);
+                labels.legend = smallvec![(tr(cx, KEY_GPU_DEDICATED), LegendStyle::Solid)];
+                // The shared line and its legend only while the GPU reports shared memory.
+                if self.series.len() > 1 {
+                    labels
+                        .legend
+                        .push((tr(cx, KEY_GPU_SHARED), LegendStyle::Dashed));
+                }
+                labels.show_axis_max = false;
+                tr(cx, KEY_GPU_MEMORY)
+            }
+            METRIC_TEMP if gpu => {
+                let word = tr(cx, KEY_GPU_TEMPERATURE);
+                labels.range_word = word.clone();
+                labels.show_axis_max = true;
+                word
+            }
+            METRIC_POWER if gpu => {
+                labels.range_word = tr(cx, KEY_GPU_POWER_RANGE);
+                labels.show_axis_max = true;
+                tr(cx, KEY_GPU_POWER)
+            }
+            METRIC_GPU_CLOCKS if gpu => {
+                labels.range_word = tr(cx, KEY_GPU_CLOCKS_RANGE);
+                labels.legend = smallvec![
+                    (tr(cx, KEY_GPU_CLOCK), LegendStyle::Solid),
+                    (tr(cx, KEY_GPU_MEM_CLOCK), LegendStyle::Dashed),
+                ];
+                labels.show_axis_max = false;
+                tr(cx, KEY_GPU_CLOCKS)
+            }
             METRIC_DISK_ACTIVE if disk => {
                 let word = tr(cx, KEY_DISK_ACTIVE);
                 labels.range_word = word.clone();

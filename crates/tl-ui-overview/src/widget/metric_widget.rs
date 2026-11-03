@@ -82,6 +82,7 @@ use tl_ui_base::text::style::{numeric_style, t_lg, t_sm, t_xs};
 use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 use tl_ui_chart::chart::labels::LABEL_ROW;
 use tl_ui_chart::chart::{ChartBg, ChartSpec, ChartView, GridStyle, ValueFormat, YScale};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use tl_ui_kit::components::validity::copy_text;
 use tl_ui_perf_core::core::actions::PerfShowMiniWindow;
 
@@ -245,6 +246,8 @@ struct Shown {
     fraction: Option<f32>,
     reason: SharedString,
     series: Option<SeriesId>,
+    /// The tooltip on the page chart's heading (`SourceData::tip`), while the name shows.
+    tip: Option<SharedString>,
 }
 
 /// What the chart's spec and labels are built from: the metric's lines, the widget's options and
@@ -345,6 +348,7 @@ impl MetricWidget {
                 fraction: None,
                 reason: SharedString::default(),
                 series: None,
+                tip: None,
             },
             chart: None,
             chart_key: None,
@@ -657,6 +661,10 @@ impl MetricWidget {
                 .contains(FormSet::CHART)
                 .then(|| src.series())
                 .flatten(),
+            tip: kept
+                .contains(FormSet::LABEL)
+                .then(|| src.tip().cloned())
+                .flatten(),
         }
     }
 
@@ -697,6 +705,7 @@ impl MetricWidget {
             reason: SharedString::default(),
             // The host's chart: the widget builds none.
             series: None,
+            tip: None,
         }
     }
 
@@ -737,9 +746,28 @@ impl MetricWidget {
         let made = self.sync_spec(cx);
         if let Some(chart) = &self.chart {
             let state = self.source.read(cx).chart_state();
-            chart.update(cx, |v, cx| v.set_state(state, cx));
+            let page = self.chart_key.as_ref().is_some_and(|k| k.page.is_some());
+            let text = page.then(|| self.page_value_text(cx)).flatten();
+            chart.update(cx, |v, cx| {
+                v.set_state(state, cx);
+                if page {
+                    v.set_value_text(text, cx);
+                }
+            });
         }
         made
+    }
+
+    /// The value a page chart shows at the right of its heading when it is not the newest
+    /// sample of its line: a value of a total ("2.80 GiB / 15.92 GiB", "31.9 / 300 W",
+    /// "1905 / 3105 MHz"), as the 1.3.0 GPU page charts show it. `None` lets the chart write
+    /// its newest sample, as it does while the value is not known.
+    fn page_value_text(&self, cx: &App) -> Option<SharedString> {
+        let src = self.source.read(cx);
+        let meta = src.meta()?;
+        (meta.value_text_in(true) == ValueText::OfTotal && src.value().is_some())
+            .then(|| src.value_text().clone())
+            .filter(|t| !t.is_empty())
     }
 
     fn sync_spec(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1172,6 +1200,58 @@ impl MetricWidget {
             el = el.child(clock.child(self.clock.clone()));
         }
         el
+    }
+
+    /// The hover area over a page chart's heading that shows the name's tooltip (the GPU
+    /// Power and Clocks texts, or the GPU probe's text), as the 1.3.0 GPU page charts do
+    /// (UI-PRF-032). Only on a page style Cell with its name, outside Edit Widgets.
+    fn heading_tip(
+        &self,
+        available: bool,
+        m: &UiMetrics,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        let text = self.shown.tip.clone()?;
+        if !self.page
+            || !available
+            || self.edit_inset
+            || self.composed.composition != Composition::Cell
+        {
+            return None;
+        }
+        let s = m.ui_scale;
+        let kept = self.composed.forms;
+        let mut top = 0.;
+        if kept.contains(FormSet::STATS) {
+            top += CELL_STATS_H;
+        }
+        if kept.contains(FormSet::BAR) {
+            top += METER_H + 2. * CELL_BAR_PAD;
+        }
+        let id = part_id(&self.container, self.setting.id, "tip");
+        let trigger = div()
+            .tl_selector({
+                let id = id.clone();
+                move || id
+            })
+            .absolute()
+            .top(px(top * s))
+            .left_0()
+            .w_1_2()
+            .h(px(LABEL_ROW * s) + m.sp[3]);
+        let state = HoverTooltip::state(SharedString::from(id), window, cx);
+        Some(
+            HoverTooltip::attach(
+                &state,
+                trigger,
+                DELAY_CONTROL,
+                TlTooltip::text(text).build(),
+                window,
+                cx,
+            )
+            .into_any_element(),
+        )
     }
 
     fn chart_part(&self, id: u32) -> gpui_kit::Div {
@@ -1637,13 +1717,16 @@ impl Render for MetricWidget {
         } else {
             body
         };
-        let root = div()
+        let mut root = div()
             .tl_selector(move || id)
             .relative()
             .size_full()
             .overflow_hidden()
             .child(body)
             .child(probe);
+        if let Some(trigger) = self.heading_tip(available, &m, window, cx) {
+            root = root.child(trigger);
+        }
         // A double-click on a page chart opens the mini window, as the 1.3.0 graph area does
         // (ADR-019 phase 3 "Double-click"). Not in Edit Widgets.
         if self.page && !self.edit_inset && self.chart.is_some() {
