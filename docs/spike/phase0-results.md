@@ -216,6 +216,106 @@ The log has no `frame stall` line.
 
 `frame_cpu_ms` is 0 because the soak runs without the frame probe (it would force frames).
 
+## Static scene idle CPU (tasklens-wlf.27, 2026-11-04)
+
+Result: FAIL. The static scene used a median 13.27% process CPU of one core over 30 s
+(nested KWin, not the 144 Hz screen). The UI-PRF-053 gate is at most 2%. The fix goes to a
+new bead with the profile below (owner decision, wlf.27 comment 1005).
+
+The other two acceptance points pass. The bench requested no frames (a static run that
+requests frames fails before it writes a report, `scenes.rs:702`), and the report's `frames` field counts window
+paints: 300 in 30 s, so 10 Hz, as UI-PRF-053 expects.
+
+### Setup
+
+- Hidden nested KWin (`kwin_wayland --virtual`, 1920x1200, 60 Hz output) started by
+  `/var/tmp/claude/tl-smoke/harness.sh start wlf27`. The app ran on the nested Xwayland
+  (X11), with its own `XDG_*` folders. Office PC, RTX 5070 Ti, NVIDIA 615.78.08. Session 2
+  (the real desktop) was unlocked for every run.
+- Build: `cargo build --locked --profile perf -p tl-app --features bench` at `f62a4d71a`
+  (the UI and chart crates last changed in `0eb55edda`). Binary `target/perf/tasklens`.
+- Command per run: `tasklens --bench static --duration 30 --warmup 5 --json <file>`, no
+  perf attached. Scripts and output are in `/var/tmp/claude/wlf27/`.
+- The 60 Hz output does not affect this gate: the static scene draws when data arrives
+  (10 Hz), and it starts no frame probe.
+- The driver started each run only when the 1-minute load average was below 8.
+
+### Runs
+
+| Run | Start (local) | Load at start (1, 5, 15 min) | Frames | Process CPU (nested KWin, not the 144 Hz screen) | RSS |
+|---|---|---|---|---|---|
+| 1 | 12:30:01 | 7.40, 21.15, 21.98 | 300 | 14.38% | 300 MB |
+| 2 | 12:42:08 | 7.44, 11.46, 16.31 | 300 | 12.49% | 301 MB |
+| 3 | 12:42:45 | 6.64, 10.74, 15.86 | 300 | 13.27% | 305 MB |
+| Median | | | 300 | 13.27% | |
+
+`window_active` was true and `stalls` was 0 in every run. 13.27% of one core over 30 s is
+4.0 s of CPU for 300 paints, so about 13 ms of CPU per paint. To pass at 10 Hz, a paint
+must cost at most 2 ms.
+
+Earlier readings of the same scene: 21.9% on the owner screen in wlf.1 (2026-10-07,
+release build, before the chart fixes), and 18.0% when wlf.33 closed. The fixes in wlf.33,
+wlf.34, wlf.35, wlf.36 and wlf.37 removed lyon tessellation and the repaint of unchanged
+cards, but the scene is still about 6.6 times over the gate.
+
+### Profile
+
+One more 30 s run under `perf record -e cpu-clock:u -F 499 --call-graph dwarf,16384`
+(12:43:21, load 6.38): 12.66% process CPU, 300 frames, 1950 user-space samples. Perf added
+little (12.66% against the 13.27% median), since it sampled user space only. 98.8% of the samples are on the UI main
+thread (`tasklens`); the bench publisher thread has 0.8%.
+
+Top 10 self symbols:
+
+| Share | Symbol |
+|---|---|
+| 9.90% | `gpui_wgpu::wgpu_renderer::WgpuRendererCore::render_frame` |
+| 5.59% | `gpui::bounds_tree::BoundsTree<ScaledPixels>::insert` |
+| 4.77% | `gpui::scene::Scene::insert_primitive::<Path<ScaledPixels>>` |
+| 4.77% | `tl_ui_chart::chart::geometry::StrokeMesh::stroke_line` |
+| 4.36% | `tl_ui_chart::chart::geometry::StrokeMesh::tri` |
+| 3.69% | `Vec<PathVertex<Pixels>>` from iterator (vertex copy) |
+| 3.69% | libc `0x1b1b4a` (memcpy family) |
+| 3.18% | `Vec<PathVertex<ScaledPixels>>` from iterator (vertex copy) |
+| 2.46% | `tl_ui_chart::chart::geometry::FillMesh::tri` |
+| 1.64% | libc `0x1b1b29` (memcpy family) |
+
+By phase (script `phases.py` from wlf.28):
+
+| Phase | Share |
+|---|---|
+| libc (malloc, free, memcpy) | 21.8% |
+| GPU submit (gpui_wgpu, NVIDIA driver) | 16.6% |
+| Chart geometry (`tl_ui_chart`) | 15.7% |
+| Other gpui (element tree, window, app) | 12.0% |
+| Scene build (BoundsTree, scene insert) | 10.9% |
+| Chart paint copies (`translated`, `Path::scale`, `paint_path`) | 6.9% |
+| Layout (taffy) | 6.4% |
+| Text (shaping, glyphs) | 3.0% |
+| Other tasklens UI code | 2.5% |
+| Lyon tessellation | 0.0% |
+
+Reading: the cost now follows the number of path vertices per paint. Each paint rebuilds
+stroke and fill meshes (15.7%, chart geometry), copies the vertex buffers twice on their way
+into the scene (`Pixels`, then `ScaledPixels`: 6.9%, and likely much of the 21.8% in libc,
+which I did not attribute), inserts each
+path into the scene's bounds tree (10.4%), and uploads it all to the GPU (16.6%). The call
+stacks did not unwind past one frame (children equal self), so which chart owns which
+share is inferred from the code, not measured.
+
+### Redraw counters
+
+The ignored test `bench_scenes::redraw_work_static` (test platform, no GPU) counts work
+per draw. Before is wlf.27 comment 187 (2026-10-07), after is this run.
+
+| Per draw | Before | After |
+|---|---|---|
+| Window paints | 3.3 | 2.2 |
+| Sidebar renders | 2.3 | 2.2 |
+| 9 card charts: renders, geometry builds, path paints | 20.7, 3.9, 48.3 | 2.5, 2.0, 6.5 |
+| Overall chart: renders, builds, paths | 2.3, 2.3, 6.9 | 1.2, 1.2, 3.6 |
+| CPU grid: renders, builds, paths, text shapes | 2.3, 2.3, 6.9, 61.5 | 1.2, 1.2, 3.6, 35.2 |
+
 ## Unverified items settled in phase 0
 
 - U-9 not needed: the soak passed without the patch.
