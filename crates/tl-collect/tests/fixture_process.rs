@@ -1089,7 +1089,7 @@ fn meta_comm_falls_back_to_stat() {
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tl_collect::proc::fdcount::fd_count_fallbacks;
-use tl_collect::proc::sweep::{CpuWindow, IoState, SweepCore, SweepCtx, SweptProc};
+use tl_collect::proc::sweep::{CpuWindow, IoState, PidDir, SweepCore, SweepCtx, SweptProc};
 use tl_model::validity::{ProcessField, Validity};
 
 /// A settable clock for `SweepCore::with_clock`, one per test so parallel tests do not share it.
@@ -1352,6 +1352,52 @@ fn sweep_fd_count_only_when_wanted() {
     core.sweep_core(&sweep_ctx(true), &mut out);
     assert!(only(&out).fd_count.is_some());
     assert_eq!(fd_count_fallbacks(), before + 1);
+}
+
+/// tasklens-yms.26 review: files are opened by pid (R-286), so a pid reused after the sweep's
+/// reads must not reach the old key through a later read. `PidDir::same_process` reads the `stat`
+/// fd the sweep kept, or a fresh `stat` without it: a new start time means another process holds
+/// the pid.
+#[test]
+fn sweep_pid_reused_after_reads_is_caught() {
+    let (_tmp, root) = sweep_root();
+    set_stat(&root, 8812, 1204, 351_220);
+    let mut core = SweepCore::new(root.clone());
+    let ctx = sweep_ctx(false);
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    core.sweep_core_with(&ctx, &mut out, &mut |p, dir| {
+        assert!(dir.stat_fd.is_some(), "the sweep hands over its stat fd");
+        let mut buf = Vec::new();
+        let before = dir.same_process(p.key.start_ticks, &mut buf);
+        // The process exits and a new one gets pid 4201.
+        set_stat(&root, 0, 0, 999_999);
+        let kept = dir.same_process(p.key.start_ticks, &mut buf);
+        let fresh = PidDir {
+            stat_fd: None,
+            ..dir
+        }
+        .same_process(p.key.start_ticks, &mut buf);
+        let new_process = dir.same_process(999_999, &mut buf);
+        seen.push((before, kept, fresh, new_process));
+    });
+    assert_eq!(seen, [(true, false, false, true)]);
+    assert_eq!(only(&out).key.start_ticks, 351_220);
+}
+
+/// tasklens-yms.26 review: without its `statm` (the anchor) a process is still swept, checked
+/// by a second read of its kept `stat`, and its RssAnon and VmRSS show the missing file.
+#[test]
+fn sweep_without_statm_checks_stat_again() {
+    let (_tmp, root) = sweep_root();
+    fs::remove_file(root.proc_path("4201/statm")).expect("remove statm");
+    let mut core = SweepCore::new(root);
+    let mut out = Vec::new();
+    core.sweep_core(&sweep_ctx(false), &mut out);
+    let p = only(&out);
+    assert_eq!(p.validity.get(ProcessField::RssAnon), Validity::Missing);
+    assert_eq!(p.validity.get(ProcessField::Rss), Validity::Missing);
+    assert_eq!(p.rss_bytes, 0);
 }
 
 /// tasklens-8fx.45: in memory-only mode every sweep reads `stat` and `status` and no `statm` or
@@ -3472,7 +3518,6 @@ use std::time::{Duration, Instant};
 use tl_collect::pkg::{PackageIndex, PathOwners, PkgBackend, VerifyOutcome};
 use tl_collect::proc::extras_p2::{ExtrasP2Reader, elf_reads};
 use tl_collect::proc::meta::RawMeta;
-use tl_collect::proc::sweep::PidDir;
 use tl_model::process::{PackageInfo, PackageStatus, ProcessExtrasP2};
 
 /// Package backend that owns nothing and counts `owners` calls.
@@ -3546,6 +3591,7 @@ fn read_p2(
         PidDir {
             proc_fd: proc_fd.as_fd(),
             pid,
+            stat_fd: None,
         },
         rollup_key(pid, st.start_ticks),
         &st,

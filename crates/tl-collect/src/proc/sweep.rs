@@ -7,6 +7,13 @@
 //! demanded), `io` only when demanded. Rates follow the ADR-008 counter rules: no rate on the first sample,
 //! after a counter reset or across a suspend. Nothing here logs above `trace` per process.
 //!
+//! Since files are opened by pid, a pid freed and reused during a process's reads could put
+//! another process's files under its key. `sweep_one` opens its anchor file (`statm`, or `status`
+//! in memory-only mode) before `stat` and reads it last; a good read proves one process held the
+//! pid for every open in between. The metadata and P2 reads come later, so `ProcessSampler`
+//! re-reads the kept `stat` fd ([`PidDir::same_process`]) after them and leaves the process out
+//! of the sweep when it is gone.
+//!
 //! At the end of each sweep the sweep reads the `cpu` line of `/proc/stat` once (a kept file,
 //! first line only) and keeps the previous read. [`CpuWindow`] is the share of all CPUs per
 //! field between the two reads (D-042, UI-PRF-062 "Sweep window"). There is no window on the
@@ -384,8 +391,10 @@ impl SweepCore {
         self.sweep_core_with(ctx, out, &mut |_, _| {})
     }
 
-    /// `sweep_core` that also calls `per_pid` for each process with the `/proc` dirfd, right
-    /// after its files are read, so metadata is read from the same process.
+    /// `sweep_core` that also calls `per_pid` for each process with the `/proc` dirfd and its
+    /// kept `stat` fd, right after its files are read. A `per_pid` that opens more files of the
+    /// process calls [`PidDir::same_process`] before it publishes what they gave, so a pid reused
+    /// in between cannot put another process's files under this key.
     pub fn sweep_core_with(
         &mut self,
         ctx: &SweepCtx,
@@ -412,6 +421,7 @@ impl SweepCore {
                 let dir = PidDir {
                     proc_fd: proc_fd.as_fd(),
                     pid,
+                    stat_fd: None,
                 };
                 let mut core = SweepIo {
                     sweep: self.sweeps,
@@ -425,7 +435,11 @@ impl SweepCore {
                     stat: &mut self.stat,
                     mem_only: self.mem_only,
                 };
-                if let Some(p) = sweep_one(ctx, dir, &mut core) {
+                if let Some((p, stat_fd)) = sweep_one(ctx, dir, &mut core) {
+                    let dir = PidDir {
+                        stat_fd: Some(stat_fd.as_fd()),
+                        ..dir
+                    };
                     per_pid(&p, dir);
                     out.push(p);
                 }
@@ -471,9 +485,45 @@ fn parse_pid(name: &[u8]) -> Option<u32> {
 pub struct PidDir<'a> {
     pub proc_fd: BorrowedFd<'a>,
     pub pid: u32,
+    /// The process's `stat`, opened before any other file the sweep read for it. `None` gives
+    /// [`Self::same_process`] a fresh open of `"<pid>/stat"`.
+    pub stat_fd: Option<BorrowedFd<'a>>,
 }
 
 impl PidDir<'_> {
+    /// True when the process with `start_ticks` still holds this pid, checked by reading its
+    /// `stat` again. Call it after opening more files by pid and before publishing what they
+    /// gave: a good answer means every file opened since the first read belongs to that process.
+    ///
+    /// A `/proc/<pid>` fd stays bound to the process it was opened for, and its read fails with
+    /// ESRCH once that process is gone, so a read of the kept `stat_fd` proves the process was
+    /// alive through every open since. Without `stat_fd`, the pid's current `stat` must give
+    /// `start_ticks`, which no other process of this boot can have.
+    pub fn same_process(&self, start_ticks: u64, buf: &mut Vec<u8>) -> bool {
+        let read = match self.stat_fd {
+            Some(fd) => pread_once(fd, buf, SMALL_FILE_LIMIT),
+            None => {
+                let mut path = String::new();
+                read_once(
+                    self.proc_fd,
+                    pid_path(&mut path, self.pid, "stat"),
+                    buf,
+                    SMALL_FILE_LIMIT,
+                )
+            }
+        };
+        let mut stat = PidStat::default();
+        let same = read.and_then(|()| parse_pid_stat(buf, &mut stat)).is_ok()
+            && stat.start_ticks == start_ticks;
+        if !same {
+            tracing::trace!(
+                pid = self.pid,
+                "pid now names another process, not published"
+            );
+        }
+        same
+    }
+
     /// Opens `/proc/<pid>` as an `O_DIRECTORY` fd. `None` when the process is gone.
     pub fn open(&self) -> Option<OwnedFd> {
         let name = self.pid.to_string();
@@ -511,10 +561,34 @@ fn read_once(
     buf: &mut Vec<u8>,
     limit: usize,
 ) -> Result<(), CollectError> {
+    let fd = open_file(dir, name)?;
+    read_fd(fd.as_fd(), buf, limit)
+}
+
+/// Opens `name` relative to `dir` for reading.
+fn open_file(dir: BorrowedFd<'_>, name: &str) -> Result<OwnedFd, CollectError> {
+    Ok(rustix::fs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?)
+}
+
+/// The read half of [`read_once`], for a file opened earlier.
+fn read_fd(fd: BorrowedFd<'_>, buf: &mut Vec<u8>, limit: usize) -> Result<(), CollectError> {
     buf.clear();
     buf.reserve(limit + 1);
-    let fd = rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
-    rustix::io::read(&fd, spare_capacity(buf))?;
+    rustix::io::read(fd, spare_capacity(buf))?;
+    buf.truncate(limit);
+    Ok(())
+}
+
+/// [`read_fd`] from offset 0, for a file that was read before.
+fn pread_once(fd: BorrowedFd<'_>, buf: &mut Vec<u8>, limit: usize) -> Result<(), CollectError> {
+    buf.clear();
+    buf.reserve(limit + 1);
+    rustix::io::pread(fd, spare_capacity(buf), 0)?;
     buf.truncate(limit);
     Ok(())
 }
@@ -526,9 +600,23 @@ fn pid_path<'p>(path: &'p mut String, pid: u32, file: &str) -> &'p str {
     path
 }
 
-/// Reads one process and computes its rates. `None` when the process is gone or its `stat`
-/// cannot be read, since then it has no key.
-fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<SweptProc> {
+/// Reads one process and computes its rates. Returns it with its open `stat` fd, which
+/// [`PidDir::same_process`] reads again after later opens. `None` when the process is gone, its
+/// `stat` cannot be read (then it has no key), or its pid named another process before the reads
+/// ended.
+///
+/// Every file is opened by pid (R-286), so a pid freed and reused between two opens would mix two
+/// processes under one key. The anchor file is opened before `stat` and read after every other
+/// file. A `/proc` fd stays bound to the process it was opened for and its read fails once that
+/// process is gone, so a good anchor read proves one process held the pid for every open in
+/// between. The anchor is `statm`, or `status` in memory-only mode. Both are read every sweep, so
+/// the check costs no extra read. When the anchor cannot be opened or read, a second read of the
+/// kept `stat` fd does the check.
+fn sweep_one(
+    ctx: &SweepCtx,
+    dir: PidDir<'_>,
+    core: &mut SweepIo<'_>,
+) -> Option<(SweptProc, OwnedFd)> {
     let SweepIo {
         sweep,
         page_size,
@@ -545,17 +633,25 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
     let (proc_fd, pid) = (dir.proc_fd, dir.pid);
     let (t_ns, mono_ns) = clock();
 
-    let stat_read = read_once(
-        proc_fd,
-        pid_path(path, pid, "stat"),
-        &mut bufs.small,
-        SMALL_FILE_LIMIT,
-    )
-    .and_then(|()| parse_pid_stat(&bufs.small, stat));
-    if let Err(e) = stat_read {
-        tracing::trace!(pid, error = %e, "stat not read, process skipped");
-        return None;
-    }
+    let (anchor_name, anchor_limit) = if mem_only {
+        ("status", STATUS_READ_MAX)
+    } else {
+        ("statm", SMALL_FILE_LIMIT)
+    };
+    let anchor = open_file(proc_fd, pid_path(path, pid, anchor_name));
+
+    let stat_read = open_file(proc_fd, pid_path(path, pid, "stat")).and_then(|fd| {
+        read_fd(fd.as_fd(), &mut bufs.small, SMALL_FILE_LIMIT)?;
+        parse_pid_stat(&bufs.small, stat)?;
+        Ok(fd)
+    });
+    let stat_fd = match stat_read {
+        Ok(fd) => fd,
+        Err(e) => {
+            tracing::trace!(pid, error = %e, "stat not read, process skipped");
+            return None;
+        }
+    };
     let key = ProcessKey {
         start_ticks: stat.start_ticks,
         boot_id: ctx.boot_id,
@@ -566,63 +662,22 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
     let mut validity = FieldValidity::default();
     validity.set(ProcessField::Threads, Validity::Valid);
 
-    // RssAnon, VmRSS, commit and VmSize come from statm every sweep (R-286). Memory-only mode
-    // takes them from status, which it reads every sweep anyway. A kernel thread has no mm: its
-    // status has no memory lines, so the fields stay Unsupported.
-    let mut statm = PidStatm::default();
-    if !mem_only {
-        let statm_validity = match read_once(
-            proc_fd,
-            pid_path(path, pid, "statm"),
-            &mut bufs.small,
-            SMALL_FILE_LIMIT,
-        )
-        .and_then(|()| parse_statm(&bufs.small, &mut statm))
-        {
-            Ok(()) if kernel_thread => Validity::Unsupported,
-            Ok(()) => Validity::Valid,
-            Err(e) => {
-                statm = PidStatm::default();
-                e.validity()
-            }
-        };
-        validity.set(ProcessField::RssAnon, statm_validity);
-        validity.set(ProcessField::Rss, statm_validity);
-    }
-
     // status: on first sight, when a status-only field is demanded, or for this sweep's tenth.
     // Otherwise the last read's values and validity stand (R-286). Memory-only mode reads it
-    // every sweep: the memory groups need its RssAnon and uid.
+    // every sweep, as the anchor: the memory groups need its RssAnon and uid.
     let staggered = u64::from(pid) % STATUS_STAGGER == *sweep % STATUS_STAGGER;
     let due = mem_only || ctx.want_status_fields || staggered || !status_cache.contains_key(&key);
     if due {
         count(&STATUS_READS);
-        let slot = status_cache.entry(key).or_default();
-        slot.1 = match read_once(
+    }
+    if due && !mem_only {
+        let read = read_once(
             proc_fd,
             pid_path(path, pid, "status"),
             &mut bufs.small,
             STATUS_READ_MAX,
-        ) {
-            Ok(()) => parse_status(&bufs.small, &mut slot.0)
-                .err()
-                .map(|e| e.validity()),
-            Err(e) => Some(e.validity()),
-        };
-        if slot.1.is_some() {
-            slot.0 = PidStatus::default();
-        }
-    }
-    let (status, mem_validity) = status_cache.get(&key)?;
-    let present = |v: Option<u64>| match (*mem_validity, v) {
-        (Some(failed), _) => failed,
-        (None, Some(_)) => Validity::Valid,
-        (None, None) => Validity::Unsupported,
-    };
-    validity.set(ProcessField::Swap, present(status.vm_swap));
-    if mem_only {
-        validity.set(ProcessField::RssAnon, present(status.rss_anon));
-        validity.set(ProcessField::Rss, present(status.vm_rss));
+        );
+        store_status(status_cache.entry(key).or_default(), read, &bufs.small);
     }
 
     let (io, io_validity) = if ctx.want_io && !mem_only {
@@ -644,6 +699,54 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
     } else {
         None
     };
+
+    // The anchor read ends the reads by pid (see the doc above).
+    let anchor_read = anchor.and_then(|fd| read_fd(fd.as_fd(), &mut bufs.small, anchor_limit));
+    if anchor_read.is_err() {
+        let check = PidDir {
+            stat_fd: Some(stat_fd.as_fd()),
+            ..dir
+        };
+        if !check.same_process(key.start_ticks, &mut bufs.small) {
+            return None;
+        }
+    }
+
+    // RssAnon, VmRSS, commit and VmSize come from statm every sweep (R-286). Memory-only mode
+    // takes them from status, which it reads every sweep anyway. A kernel thread has no mm: its
+    // status has no memory lines, so the fields stay Unsupported.
+    let mut statm = PidStatm::default();
+    if mem_only {
+        store_status(
+            status_cache.entry(key).or_default(),
+            anchor_read,
+            &bufs.small,
+        );
+    } else {
+        let statm_validity = match anchor_read.and_then(|()| parse_statm(&bufs.small, &mut statm)) {
+            Ok(()) if kernel_thread => Validity::Unsupported,
+            Ok(()) => Validity::Valid,
+            Err(e) => {
+                statm = PidStatm::default();
+                e.validity()
+            }
+        };
+        validity.set(ProcessField::RssAnon, statm_validity);
+        validity.set(ProcessField::Rss, statm_validity);
+    }
+
+    let (status, mem_validity) = status_cache.get(&key)?;
+    let present = |v: Option<u64>| match (*mem_validity, v) {
+        (Some(failed), _) => failed,
+        (None, Some(_)) => Validity::Valid,
+        (None, None) => Validity::Unsupported,
+    };
+    validity.set(ProcessField::Swap, present(status.vm_swap));
+    if mem_only {
+        validity.set(ProcessField::RssAnon, present(status.rss_anon));
+        validity.set(ProcessField::Rss, present(status.vm_rss));
+    }
+
     let page = *page_size;
     let (rss_anon_bytes, rss_bytes, rss_shared_bytes, commit_bytes, vsize_bytes) = if mem_only {
         let or0 = |v: Option<u64>| v.unwrap_or(0);
@@ -725,7 +828,23 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
     });
     p.validity.set(ProcessField::IoRead, io_v);
     p.validity.set(ProcessField::IoWrite, io_v);
-    Some(p)
+    Some((p, stat_fd))
+}
+
+/// Stores one `status` read in its cache slot: the parsed values, or defaults and the validity
+/// of the failure.
+fn store_status(
+    slot: &mut (PidStatus, Option<Validity>),
+    read: Result<(), CollectError>,
+    buf: &[u8],
+) {
+    slot.1 = match read {
+        Ok(()) => parse_status(buf, &mut slot.0).err().map(|e| e.validity()),
+        Err(e) => Some(e.validity()),
+    };
+    if slot.1.is_some() {
+        slot.0 = PidStatus::default();
+    }
 }
 
 /// The previous sample and the elapsed seconds, or `None` when ADR-008 gives no rate: time did
@@ -1556,6 +1675,38 @@ impl Build<'_, '_> {
             return;
         };
 
+        // The P2 extras of a detail key are read by pid too.
+        let mut read_p2 = false;
+        let p2_entry = self.p2.as_mut().map(|b| {
+            if !b.detail.contains(&key) {
+                return ProcessExtrasP2::default();
+            }
+            read_p2 = true;
+            // A failed status read shows as the Swap validity; then the status fields are
+            // zeros, not values.
+            let status_ok = matches!(
+                p.validity.get(ProcessField::Swap),
+                Validity::Valid | Validity::Unsupported
+            );
+            b.reader.read(
+                b.root,
+                dir,
+                key,
+                &p.stat,
+                status_ok.then_some(&p.status),
+                raw,
+                b.pkg,
+                b.now,
+                self.bufs,
+            )
+        });
+        // Files opened after the sweep's own reads must still belong to this key.
+        if (change != MetaChange::Unchanged || read_p2)
+            && !dir.same_process(key.start_ticks, &mut self.bufs.small)
+        {
+            return;
+        }
+
         let owns_window = self.inp.window_pids.is_some_and(|s| s.contains(&pid));
         let wm_class = self.inp.wm_class.and_then(|m| m.get(&pid)).map(|c| &**c);
         let app = self.apps.resolve(
@@ -1684,28 +1835,7 @@ impl Build<'_, '_> {
             class: app.class,
             is_app_primary: primary,
         });
-        if let Some(b) = self.p2.as_mut() {
-            let entry = if b.detail.contains(&key) {
-                // A failed status read shows as the Swap validity; then the status fields are
-                // zeros, not values.
-                let status_ok = matches!(
-                    p.validity.get(ProcessField::Swap),
-                    Validity::Valid | Validity::Unsupported
-                );
-                b.reader.read(
-                    b.root,
-                    dir,
-                    key,
-                    &p.stat,
-                    status_ok.then_some(&p.status),
-                    raw,
-                    b.pkg,
-                    b.now,
-                    self.bufs,
-                )
-            } else {
-                ProcessExtrasP2::default()
-            };
+        if let Some(entry) = p2_entry {
             self.out.extras_p2.push(entry);
         }
     }

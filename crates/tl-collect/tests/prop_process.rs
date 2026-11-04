@@ -347,7 +347,7 @@ proptest! {
         let mut pkg = PackageIndex::new(Box::new(NoPackages));
         let p = ExtrasP2Reader::new().read(
             &root,
-            PidDir { proc_fd: proc_fd.as_fd(), pid: 7 },
+            PidDir { proc_fd: proc_fd.as_fd(), pid: 7, stat_fd: None },
             ProcessKey { start_ticks: 1, boot_id: BootId(1), pid: 7 },
             &st,
             Some(&parsed),
