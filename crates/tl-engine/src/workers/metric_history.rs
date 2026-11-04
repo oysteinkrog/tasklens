@@ -108,6 +108,9 @@ const TICK_NS: u64 = 1_000_000_000;
 const RETRY_NS: u64 = 60_000_000_000;
 /// `MetricHistory::open` stops loading the 1 s ring after this long (ADR-012 start budget).
 const LOAD_BUDGET: Duration = Duration::from_secs(2);
+/// How long shutdown waits for the store close. It leaves 250 ms of `DRAIN_BUDGET` for the
+/// worker to return and the region to drain.
+const CLOSE_WAIT: Duration = crate::bridge::DRAIN_BUDGET.saturating_sub(Duration::from_millis(250));
 const NS_PER_SEC: u64 = 1_000_000_000;
 /// The timeline is read again this often while shown (ADR-017).
 const TIMELINE_EVERY_NS: u64 = 60 * NS_PER_SEC;
@@ -1132,15 +1135,53 @@ impl Drop for SlotGuard {
     }
 }
 
-/// Cancellation: writes the open minutes and closes the store, masked. This runs on the
-/// engine's one async worker, so a slow close holds up every other source too. A blocking job is
-/// not admitted here: the region is already closing (tasklens-gd3ky).
-fn shut_down(cx: &Cx, state: &Mutex<State>) -> Outcome<(), WorkerError> {
+/// Cancellation: writes the open minutes and closes the store on a thread of its own, and waits
+/// for it at most `CLOSE_WAIT`, masked.
+///
+/// The close must not run on the engine's one async worker: it waits for the state lock, which
+/// a job may still hold, and for three `sync_all` calls. A 3 s close there kept all 21 sources
+/// from stopping and failed the 1.5 s shutdown (tasklens-gd3ky). A blocking job is not admitted
+/// here because the region is already closing, so the close gets a plain thread, as the
+/// sampling threads do (ADR-004). A close that runs past `CLOSE_WAIT` goes on by itself; the
+/// process exit cuts it as a crash would, and ADR-017 reads a segment up to its first bad block.
+async fn shut_down(cx: &Cx, state: &Arc<Mutex<State>>) -> Outcome<(), WorkerError> {
+    let (done_tx, done_rx) = async_channel::bounded::<()>(1);
+    let job_state = Arc::clone(state);
+    let running = crate::bridge::job_running("metric_history close");
+    let close = move || {
+        let _running = running;
+        close_at_shutdown(&job_state);
+        // A failed send means the worker stopped waiting.
+        let _ = done_tx.send_blocking(());
+    };
+    let spawned = std::thread::Builder::new()
+        .name("tl-history-close".into())
+        .spawn(close);
+    if let Err(e) = spawned {
+        // No thread: close here, on the worker, as before.
+        tracing::debug!("device history close thread: {e}");
+        cx.masked(|| close_at_shutdown(state));
+        return Outcome::Ok(());
+    }
+    let mut wait = std::pin::pin!(crate::time_util::timeout(cx, CLOSE_WAIT, done_rx.recv()));
+    let waited = std::future::poll_fn(|task| cx.masked(|| wait.as_mut().poll(task))).await;
+    if !matches!(waited, Ok(Ok(()))) {
+        tracing::debug!(
+            target: "tasklens::engine",
+            wait_ms = CLOSE_WAIT.as_millis() as u64,
+            "device history close still runs; shutdown goes on without it",
+        );
+    }
+    Outcome::Ok(())
+}
+
+/// Writes the open minutes and closes the store, if it is open. Blocks on the state lock.
+fn close_at_shutdown(state: &Mutex<State>) {
     let begin = Instant::now();
     let mut st = lock(state);
     let lock_wait = begin.elapsed();
     if st.is_open()
-        && let Err(e) = cx.masked(|| st.close(now_boot_ns()))
+        && let Err(e) = st.close(now_boot_ns())
     {
         // The error text holds a user path: debug level only.
         tracing::debug!("device history close failed: {e}");
@@ -1152,7 +1193,6 @@ fn shut_down(cx: &Cx, state: &Mutex<State>) -> Outcome<(), WorkerError> {
         close_ms = (begin.elapsed() - lock_wait).as_millis() as u64,
         "device history closed at shutdown",
     );
-    Outcome::Ok(())
 }
 
 /// One generation of the `MetricHistory` worker. Returns `Outcome::Ok(())` when `cx` is
@@ -1187,7 +1227,7 @@ pub async fn run_metric_history(
         ($outcome:expr) => {{
             let outcome = $outcome;
             if matches!(outcome, Outcome::Ok(())) {
-                return shut_down(&cx, &state);
+                return shut_down(&cx, &state).await;
             }
             return outcome;
         }};
@@ -1221,7 +1261,7 @@ pub async fn run_metric_history(
             }
         }
         if cx.checkpoint().is_err() {
-            return shut_down(&cx, &state);
+            return shut_down(&cx, &state).await;
         }
 
         let settings = io.settings.borrow_and_clone();
@@ -3084,5 +3124,84 @@ mod tests {
         sink.on_system_sample(3 * SEC, &batch);
         assert!(matches!(rx.try_recv(), Ok(MetricMsg::Catalog(_))));
         assert!(matches!(rx.try_recv(), Ok(MetricMsg::System(_))));
+    }
+
+    /// Regression (tasklens-gd3ky): shutdown while the state lock is held for 3 s, as by a slow
+    /// close or a job that still holds the state. On the engine's runtime, with its one async
+    /// worker, the root region drains inside `DRAIN_BUDGET` and a second task is not held up.
+    /// The close still runs once the lock is free. With the close on the worker, the worker
+    /// waited the whole 3 s and the drain ran out.
+    #[test]
+    fn shutdown_close_keeps_off_the_async_worker() {
+        use asupersync::runtime::RootDrainOutcome;
+
+        use crate::bridge::{DRAIN_BUDGET, TEARDOWN_BUDGET};
+
+        const HOLD: Duration = Duration::from_secs(3);
+        const START_WAIT: Duration = Duration::from_secs(5);
+        let dir = tempdir();
+        let state = Arc::new(Mutex::new(open(dir.path(), 1, OFFSET, 10 * SEC)));
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let holder_state = Arc::clone(&state);
+        let holder = std::thread::spawn(move || {
+            let _held = lock(&holder_state);
+            let _ = held_tx.send(());
+            std::thread::sleep(HOLD);
+        });
+        held.recv_timeout(START_WAIT).expect("the lock is held");
+
+        // Two tasks park until cancel. The first then shuts the store down; the second ends.
+        let (started_tx, started) = std::sync::mpsc::channel();
+        let (ended_tx, ended) = std::sync::mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker_started = started_tx.clone();
+        rt.handle()
+            .try_spawn_with_cx(move |cx| async move {
+                let _ = worker_started.send(());
+                let _ =
+                    crate::time_util::timeout(&cx, HOLD * 10, std::future::pending::<()>()).await;
+                let _ = shut_down(&cx, &worker_state).await;
+            })
+            .expect("the worker task spawns");
+        rt.handle()
+            .try_spawn_with_cx(move |cx| async move {
+                let _ = started_tx.send(());
+                let _ =
+                    crate::time_util::timeout(&cx, HOLD * 10, std::future::pending::<()>()).await;
+                let _ = ended_tx.send(Instant::now());
+            })
+            .expect("the other task spawns");
+        for _ in 0..2 {
+            started.recv_timeout(START_WAIT).expect("the tasks started");
+        }
+        // Let both park inside their waits.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let begin = Instant::now();
+        let outcome = rt.drain_root_region(DRAIN_BUDGET);
+        let took = begin.elapsed();
+        assert_eq!(outcome, RootDrainOutcome::Quiescent, "took {took:?}");
+        assert!(took < DRAIN_BUDGET, "drain took {took:?}");
+        let other = ended
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the other task ended");
+        assert!(
+            other.duration_since(begin) < CLOSE_WAIT / 2,
+            "the other task ended {:?} after the drain began",
+            other.duration_since(begin)
+        );
+        assert!(rt.shutdown_timeout(TEARDOWN_BUDGET));
+
+        holder.join().expect("the lock holder ends");
+        let deadline = Instant::now() + START_WAIT;
+        while lock(&state).is_open() {
+            assert!(
+                Instant::now() < deadline,
+                "the store was not closed {START_WAIT:?} after the lock was free"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
