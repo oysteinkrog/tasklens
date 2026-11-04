@@ -316,6 +316,168 @@ per draw. Before is wlf.27 comment 187 (2026-10-07), after is this run.
 | Overall chart: renders, builds, paths | 2.3, 2.3, 6.9 | 1.2, 1.2, 3.6 |
 | CPU grid: renders, builds, paths, text shapes | 2.3, 2.3, 6.9, 61.5 | 1.2, 1.2, 3.6, 35.2 |
 
+## Perf-cpu frame cost and pacing (tasklens-wlf.28, 2026-11-04)
+
+Result: FAIL. perf-cpu used a median 12.21 ms of main-thread CPU per frame at p50 and
+19.87 ms at p99, and 71.96% process CPU (nested KWin, not the 144 Hz screen). The
+UI-PRF-053 gates are p50 at most 1.0 ms, p99 at most 2.0 ms and at most 30% process CPU.
+The fixes go to tasklens-wlf.39 (path vertices per paint, perf-cpu numbers added there as a
+comment) and the new tasklens-wlf.40 (views above the charts render again every frame).
+
+The 24 to 31 fps pacing from wlf.1 had one cause: GPUI's 30 fps cap for a window that is
+not active (comments 202 and 204 on wlf.28). The bench windows turn the cap off since
+`14c20a556` (`inactive_frame_interval: None`). In the nested session the window is active,
+and perf-cpu now draws 53 to 56 fps against a 60 Hz output. The rest of the gap is CPU:
+about 1 frame in 9 takes more than one vsync.
+
+### Setup
+
+- Hidden nested KWin (`kwin_wayland --virtual`, 1920x1200, 60 Hz output) started by
+  `/var/tmp/claude/tl-smoke/harness.sh start wlf28`. The app ran on the nested Xwayland
+  (X11), with its own `XDG_*` folders. Office PC, AMD Ryzen 9 5950X, RTX 5070 Ti, NVIDIA
+  615.78.08.
+- Build: `cargo build --locked --profile perf -p tl-app --features bench`, made at 12:59
+  with HEAD at `2b6adbf87`. No crate or Cargo file changed from `f62a4d71a` to `157c22523`.
+- Command per run: `tasklens --bench perf-cpu --duration 30 --warmup 5 --json <file>`, no
+  perf attached, under the bench slot lock. Scripts and output are in
+  `/var/tmp/claude/wlf28/`. The driver started each run only when the 1-minute load average
+  was below 8.
+- The real desktop (session 2) was locked during these runs. `bench_main.rs` refuses to
+  start while any graphical session is locked. That rule is for the real screen, and the
+  leader decision (wlf.28 comment 1004) replaces it with the nested session. So the wrapper
+  `tlwrap.sh` points `DBUS_SYSTEM_BUS_ADDRESS` at a missing socket: the lock check cannot
+  ask logind and the run goes ahead with a warning. The nested KWin has no lock screen
+  (`--no-lockscreen`), and the frame counts below show frames arrived the whole time.
+- `frame_cpu_ms` is the main thread's CPU between two frame callbacks (`stats.rs`). It is
+  close to the cost of one frame here, because the main thread does little else: 99.35% of
+  the profile samples are on it.
+- `missed_frames` is not valid at 60 Hz: until wlf.38 lands, `stats.rs` judges misses
+  against 144 Hz, so every 16.7 ms interval counts as missed. `long_missed_frames` (above
+  20.8 ms) is still useful: at 60 Hz it counts the intervals that took 2 vsyncs or more.
+
+### Runs
+
+All values are nested KWin, not the 144 Hz screen.
+
+| Run | Start (local) | Load at start (1, 5, 15 min) | Frames (fps) | Frame CPU p50 | Frame CPU p99 | Process CPU | Intervals above 20.8 ms | RSS |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 18:55:57 | 7.01, 7.31, 10.95 | 1599 (53.3) | 12.90 ms | 19.87 ms | 72.05% | 196 | 373 MB |
+| 2 | 18:56:34 | 5.72, 6.96, 10.68 | 1664 (55.5) | 12.21 ms | 19.23 ms | 71.96% | 131 | 306 MB |
+| 3 | 18:57:10 | 4.68, 6.56, 10.40 | 1651 (55.0) | 12.18 ms | 19.93 ms | 70.60% | 138 | 309 MB |
+| Median | | | 1651 (55.0) | 12.21 ms | 19.87 ms | 71.96% | 138 | |
+| Gate | | | | 1.0 ms | 2.0 ms | 30% | | |
+
+`window_active` was true and `stalls` was 0 in every run.
+
+### Frame pacing
+
+A 60 Hz output gives 1800 vsyncs in 30 s. If every interval is either 1 or 2 vsyncs, the
+number of 2-vsync intervals is 1800 minus the frame count: 201, 136 and 149 for the three
+runs. The bench counted 196, 131 and 138 intervals above 20.8 ms. The two agree within 11,
+so frames arrive on vsync and about 8% to 12% of them slip one vsync.
+
+The slips come from CPU, not from the compositor or our driver:
+
+- The mean interval is 18.0 to 18.8 ms. The mean main-thread CPU per frame (process CPU
+  times 30 s, divided by frames) is 12.8 to 13.5 ms. That leaves about 5 ms per frame of
+  waiting for the next vsync.
+- Frame CPU p99 (19.2 to 19.9 ms) is above the 16.67 ms period, so the slowest frames miss
+  their vsync.
+- `window_active` was true, so the 30 fps cap does not apply.
+
+On the owner's 144 Hz screen the period is 6.94 ms. At about 13 ms per frame each frame
+would need 2 vsyncs, so the best case there is about 72 fps. That is inferred from these
+numbers, not measured.
+
+### Profile
+
+One more 30 s run under `perf record -e cpu-clock:u -F 499 --call-graph dwarf,16384`
+(18:57:47, load 4.46): 1453 frames (48.4 fps), frame CPU p50 14.28 ms, 70.98% process CPU,
+11,221 user-space samples. 99.35% of the samples are on the UI main thread; the bench
+publisher thread has 0.25% and NVIDIA's present thread 0.24%.
+
+Top 10 self symbols:
+
+| Share | Symbol |
+|---|---|
+| 38.0% | libc `__memcpy_avx_unaligned_erms`, its 128-byte copy loop (0x1b1b24 to 0x1b1bca, summed) |
+| 9.02% | `gpui_wgpu::wgpu_renderer::WgpuRendererCore::render_frame` |
+| 4.89% | `gpui::bounds_tree::BoundsTree<ScaledPixels>::insert` |
+| 3.98% | `Vec<PathVertex<Pixels>>` from iterator (`tl_ui_chart` `translated` copy) |
+| 3.48% | `Vec<PathVertex<ScaledPixels>>` from iterator (GPUI `Path::scale` copy) |
+| 3.26% | `gpui::scene::Scene::insert_primitive::<Path<ScaledPixels>>` |
+| 2.47% | `taffy::compute::flexbox::compute_flexbox_layout` |
+| 0.80% | `tl_ui_chart::chart::geometry::StrokeMesh::stroke_line` |
+| 0.67% | `tl_ui_chart::chart::geometry::StrokeMesh::tri` |
+| 0.66% | `taffy::compute::block::compute_inner` |
+
+The libc address was named with `objdump -d /usr/lib/libc.so.6`: the hot addresses sit in
+`__memcpy_avx_unaligned_erms`, in its loop of four 32-byte loads and stores.
+
+### Frame time by phase
+
+Shares are self time from the profile (script `split.py`). The ms column applies each share
+to the median run's 12.97 ms of CPU per frame (process CPU 71.96%, times 30 s, divided by
+1664 frames). Shares are rounded, so they add up to 101.5%. Wait time comes from the runs,
+not the profile.
+
+| Phase | Share | ms per frame (nested KWin, not the 144 Hz screen) |
+|---|---|---|
+| Large copies (libc memcpy) | 38.0% | 4.93 |
+| GPU submit (`render_frame`, wgpu, NVIDIA driver) | 14.6% | 1.89 |
+| Other GPUI work (element tree, styles, `ElementId` hashing, entities) | 12.1% | 1.58 |
+| Scene build (`BoundsTree::insert`, `Scene::insert_primitive`) | 9.0% | 1.16 |
+| Our chart paint (`tl_ui_chart`: geometry, `translated` copy, paint) | 7.6% | 0.99 |
+| GPUI layout (taffy) | 7.1% | 0.92 |
+| malloc, free and other libc | 4.0% | 0.52 |
+| GPUI `Path::scale` copy | 3.5% | 0.45 |
+| Text (shaping, glyphs, atlas) | 2.8% | 0.37 |
+| Our other UI code (`tl_ui*`, `tl_model`) | 1.4% | 0.19 |
+| Other | 1.3% | 0.17 |
+| Waiting for vsync (mean interval 18.03 ms minus 12.97 ms CPU) | | 5.06 |
+
+Our own code is 9.0% of the CPU, about 1.2 ms per frame. GPUI and the driver are the other
+91%. Their cost follows what we hand them: path vertices and views that render.
+
+### Reading
+
+The call stacks did not unwind (10,763 of 11,221 samples have no call stack at all), so the
+callers of the copy loop are inferred from the GPUI 0.3.7 code, not measured. Each path
+vertex is copied several times per frame inside GPUI:
+
+- `Scene::insert_primitive` clones every path it stores (`scene.rs:114`).
+- `Scene::replay` clones every path of a cached view into the new scene
+  (`scene.rs:144`), so the 9 unchanged sidebar cards still cost a copy each frame.
+- `render_frame` builds a 104-byte `PathRasterizationVertex` for each 32-byte path vertex
+  (it carries a full 72-byte `Background`), into a `Vec` that starts empty each frame
+  (`wgpu_renderer.rs:1842`).
+- `queue.write_buffer` copies that `Vec` into the upload buffer.
+
+This explains why the copy share (38%) is higher here than in the static scene (about
+22%): perf-cpu paints every frame, and every frame re-copies all paths on screen.
+
+The layout and element share (taffy 7.1%, other GPUI 12.1%, text 2.8%) has a second cause.
+The driver notifies the moving chart views each frame, and GPUI marks every ancestor view
+dirty (`window.rs:2148`, `mark_view_dirty`). So the CPU page, the Performance page and the
+window root render again each frame, with all their children that are not cached views.
+This is inferred from the code; tasklens-wlf.40 starts with a counter test to measure it.
+
+### Fix beads and the GPUI question
+
+- tasklens-wlf.39 (open, from wlf.27): fewer path vertices per paint. It cuts our chart
+  paint and, in proportion, the GPUI copies, scene build and GPU submit. The perf-cpu
+  numbers above are in a comment there, not in a second bead.
+- tasklens-wlf.40 (new): keep the views above the moving charts cheap, so a frame renders
+  only the charts. Target: the 2.9 ms of layout, element and text work.
+- tasklens-wlf.31 (open): pixel-paced chart scrolling. It lowers the frame count, which
+  helps the 30% process CPU gate, but not the per-frame CPU gate.
+
+The gate needs 1.0 ms per frame; today it is about 13 ms. Our own code is about 1.2 ms of
+that. The rest is GPUI work that grows with what we submit, so wlf.39 and wlf.40 are the
+first steps and need no GPUI change. I do not know whether they can reach 1.0 ms on their
+own. The per-vertex copies listed in Reading would need a GPUI change, which is the owner's
+decision (bead AC, ADR-014 rule 3). Re-measure after wlf.39 and wlf.40 before deciding.
+
 ## Unverified items settled in phase 0
 
 - U-9 not needed: the soak passed without the patch.
