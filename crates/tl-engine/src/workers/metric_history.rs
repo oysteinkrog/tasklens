@@ -1132,15 +1132,26 @@ impl Drop for SlotGuard {
     }
 }
 
-/// Cancellation: writes the open minutes and closes the store, masked.
+/// Cancellation: writes the open minutes and closes the store, masked. This runs on the
+/// engine's one async worker, so a slow close holds up every other source too. A blocking job is
+/// not admitted here: the region is already closing (tasklens-gd3ky).
 fn shut_down(cx: &Cx, state: &Mutex<State>) -> Outcome<(), WorkerError> {
+    let begin = Instant::now();
     let mut st = lock(state);
+    let lock_wait = begin.elapsed();
     if st.is_open()
         && let Err(e) = cx.masked(|| st.close(now_boot_ns()))
     {
         // The error text holds a user path: debug level only.
         tracing::debug!("device history close failed: {e}");
     }
+    // The times show whether a shutdown that ran over its budget waited here.
+    tracing::debug!(
+        target: "tasklens::engine",
+        lock_wait_ms = lock_wait.as_millis() as u64,
+        close_ms = (begin.elapsed() - lock_wait).as_millis() as u64,
+        "device history closed at shutdown",
+    );
     Outcome::Ok(())
 }
 
@@ -1355,6 +1366,11 @@ pub async fn run_metric_history(
                 let offset = lock(&job_state).realtime_offset_ns();
                 let fetch = lock(&job_journal)
                     .fetch(now_boot_ns(), offset, || job_cx.is_cancel_requested());
+                // A stopped fetch is incomplete and never stored (ADR-004). It also never waits
+                // for the state lock, which the shutdown close holds.
+                if job_cx.is_cancel_requested() {
+                    return;
+                }
                 lock(&job_state).store_journal(opens, fetch);
             });
             match job {

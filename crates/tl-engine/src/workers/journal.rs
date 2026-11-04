@@ -41,8 +41,11 @@ const EVENTS_CAPACITY: usize = 64;
 const CONTROL_CAPACITY: usize = 8;
 /// The initial fetch and each Load older fetch are killed after this long (ADR-016).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
-/// How often a fetch or the follow reader checks for a stop while it waits on the pipes.
+/// How often the follow reader checks for a stop while it waits on the pipe.
 const POLL_SLICE: Duration = Duration::from_millis(100);
+/// How often a fetch (`collect`) checks for a stop while it waits on the pipes. ADR-004 asks a
+/// blocking job that waits on a child for at least every 20 ms (tasklens-gd3ky).
+const STOP_SLICE: Duration = Duration::from_millis(20);
 /// A follow batch goes out this long after its first entry arrived (UI-SYS-037).
 const BATCH_INTERVAL: Duration = Duration::from_millis(100);
 /// How often the idle task checks for a dropped handle or a cancel.
@@ -799,7 +802,7 @@ fn drain_pipes(
         if now >= deadline {
             return Err(CollectError::Timeout);
         }
-        let wait = (deadline - now).min(POLL_SLICE);
+        let wait = (deadline - now).min(STOP_SLICE);
         let timeout = Timespec {
             tv_sec: wait.as_secs() as i64,
             tv_nsec: i64::from(wait.subsec_nanos()),
