@@ -574,17 +574,43 @@ fn global_shortcut(
         return None;
     }
     let rc_file = paths.kglobalshortcutsrc_file();
+    let bound = |on: bool| on.then(|| kglobalaccel::META_ESC_TEXT.to_owned());
     Some(tl_ui::app::GlobalShortcutApi {
-        get: Arc::new(|| {
-            matches!(kglobalaccel::is_enabled(), Ok(true))
-                .then(|| kglobalaccel::META_ESC_TEXT.to_owned())
+        get: Arc::new(move || {
+            on_shortcut_thread(move || {
+                kglobalaccel::is_enabled()
+                    .map(bound)
+                    .map_err(|e| e.to_string())
+            })
         }),
         set: Arc::new(move |keys| {
-            kglobalaccel::set_enabled(keys.is_some(), &rc_file)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+            let (on, rc_file) = (keys.is_some(), rc_file.clone());
+            on_shortcut_thread(move || {
+                // The reply is the shortcut as it reads now: the old one until the next login
+                // when kglobalaccel did not take the change.
+                kglobalaccel::set_enabled(on, &rc_file)
+                    .map(|applied| bound(on == (applied == kglobalaccel::Applied::Live)))
+                    .map_err(|e| e.to_string())
+            })
         }),
     })
+}
+
+/// Runs a blocking kglobalaccel call on its own thread and returns the channel its reply comes
+/// on. When the thread does not start, the channel closes with no reply.
+fn on_shortcut_thread(
+    work: impl FnOnce() -> tl_ui::app::ShortcutReply + Send + 'static,
+) -> async_channel::Receiver<tl_ui::app::ShortcutReply> {
+    let (tx, rx) = async_channel::bounded(1);
+    if let Err(e) = std::thread::Builder::new()
+        .name("kglobalaccel".into())
+        .spawn(move || {
+            let _ = tx.send_blocking(work());
+        })
+    {
+        warn!(target: "tasklens::shortcut", error = %e, "kglobalaccel thread did not start");
+    }
+    rx
 }
 
 /// True when `XDG_CURRENT_DESKTOP` lists `KDE`.

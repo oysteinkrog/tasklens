@@ -2434,26 +2434,50 @@ fn column_separators_switch(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| TlSettings::settings(cx).tables.column_separators));
 }
 
-/// A fake KDE shortcut: `get` returns what `stored` holds, `set` returns `result` and stores
-/// the value only when `apply` is set. Returns the `set` calls too.
+/// A reply that is ready at once, as tl-app's thread would send it.
+fn shortcut_reply(
+    reply: tl_ui::app::ShortcutReply,
+) -> async_channel::Receiver<tl_ui::app::ShortcutReply> {
+    let (tx, rx) = async_channel::bounded(1);
+    tx.try_send(reply).expect("send");
+    rx
+}
+
+/// The calls a fake KDE shortcut got: `get` reads and the values `set` was asked for.
+#[derive(Default)]
+struct ShortcutCalls {
+    gets: usize,
+    sets: Vec<Option<String>>,
+}
+
+/// A fake KDE shortcut: `get` replies with what `stored` holds, `set` replies with `result` and
+/// stores the value only when `apply` is set. Returns the calls.
 fn fake_shortcut(
     cx: &mut TestAppContext,
     initial: Option<&str>,
     result: Result<(), String>,
     apply: bool,
-) -> Arc<std::sync::Mutex<Vec<Option<String>>>> {
+) -> Arc<std::sync::Mutex<ShortcutCalls>> {
     let stored = Arc::new(std::sync::Mutex::new(initial.map(str::to_owned)));
-    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (read, write, log) = (stored.clone(), stored, calls.clone());
+    let calls = Arc::new(std::sync::Mutex::new(ShortcutCalls::default()));
+    let (read, write, get_log, set_log) = (stored.clone(), stored, calls.clone(), calls.clone());
     cx.update(|cx| {
         cx.global_mut::<AppEnv>().global_shortcut = Some(tl_ui::app::GlobalShortcutApi {
-            get: Arc::new(move || read.lock().expect("lock").clone()),
+            get: Arc::new(move || {
+                get_log.lock().expect("lock").gets += 1;
+                shortcut_reply(Ok(read.lock().expect("lock").clone()))
+            }),
             set: Arc::new(move |value| {
-                log.lock().expect("lock").push(value.map(str::to_owned));
+                set_log
+                    .lock()
+                    .expect("lock")
+                    .sets
+                    .push(value.map(str::to_owned));
                 if result.is_ok() && apply {
                     *write.lock().expect("lock") = value.map(str::to_owned);
                 }
-                result.clone()
+                let now = write.lock().expect("lock").clone();
+                shortcut_reply(result.clone().map(|()| now))
             }),
         });
     });
@@ -2464,20 +2488,59 @@ fn fake_shortcut(
 fn meta_esc_row_reads_shortcut(cx: &mut TestAppContext) {
     setup(cx);
     let calls = fake_shortcut(cx, Some("Meta+Esc"), Ok(()), true);
+    let (_, mut vcx) = open(cx, 1);
     let startup = page(cx, PageId::StartupWindow);
     assert!(startup.local_on(META_ESC_LABEL));
     assert!(!startup.local_disabled(META_ESC_LABEL));
     assert_eq!(startup.local_description(META_ESC_LABEL), None);
-    cx.update(|cx| startup.set_local(META_ESC_LABEL, false, cx));
+    vcx.update(|_, cx| startup.set_local(META_ESC_LABEL, false, cx));
+    vcx.run_until_parked();
     assert!(!startup.local_on(META_ESC_LABEL));
-    cx.update(|cx| startup.set_local(META_ESC_LABEL, true, cx));
+    vcx.update(|_, cx| startup.set_local(META_ESC_LABEL, true, cx));
+    vcx.run_until_parked();
     assert!(startup.local_on(META_ESC_LABEL));
     assert_eq!(
-        *calls.lock().expect("lock"),
+        calls.lock().expect("lock").sets,
         [None, Some("Meta+Esc".to_owned())],
         "off clears the shortcut, on sets Meta+Esc"
     );
     assert_eq!(startup.local_description(META_ESC_LABEL), None);
+}
+
+/// The page is rebuilt on every render, so building it must not call kglobalaccel. Opening the
+/// window reads the shortcut once.
+#[gpui_kit::test]
+fn meta_esc_read_once_per_open(cx: &mut TestAppContext) {
+    setup(cx);
+    let calls = fake_shortcut(cx, None, Ok(()), true);
+    let (_, mut vcx) = open(cx, 1);
+    for _ in 0..3 {
+        page(cx, PageId::StartupWindow);
+    }
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert_eq!(calls.lock().expect("lock").gets, 1);
+}
+
+/// A click shows the new state before the reply; a second click while the write runs does
+/// nothing.
+#[gpui_kit::test]
+fn meta_esc_click_while_writing_is_ignored(cx: &mut TestAppContext) {
+    setup(cx);
+    let calls = fake_shortcut(cx, None, Ok(()), true);
+    let (_, mut vcx) = open(cx, 1);
+    let startup = page(cx, PageId::StartupWindow);
+    vcx.update(|_, cx| {
+        startup.set_local(META_ESC_LABEL, true, cx);
+        assert!(startup.local_on(META_ESC_LABEL), "shown at once");
+        startup.set_local(META_ESC_LABEL, false, cx);
+    });
+    vcx.run_until_parked();
+    assert!(startup.local_on(META_ESC_LABEL));
+    assert_eq!(
+        calls.lock().expect("lock").sets,
+        [Some("Meta+Esc".to_owned())]
+    );
 }
 
 #[gpui_kit::test]
@@ -2496,9 +2559,11 @@ fn meta_esc_not_available_without_api(cx: &mut TestAppContext) {
 fn meta_esc_relogin_description(cx: &mut TestAppContext) {
     setup(cx);
     fake_shortcut(cx, None, Ok(()), false);
+    let (_, mut vcx) = open(cx, 1);
     let startup = page(cx, PageId::StartupWindow);
     assert!(!startup.local_on(META_ESC_LABEL));
-    cx.update(|cx| startup.set_local(META_ESC_LABEL, true, cx));
+    vcx.update(|_, cx| startup.set_local(META_ESC_LABEL, true, cx));
+    vcx.run_until_parked();
     assert!(startup.local_on(META_ESC_LABEL));
     assert_eq!(
         startup.local_description(META_ESC_LABEL).as_deref(),

@@ -8,7 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gpui_kit::{App, SharedString};
+use gpui_kit::{App, Global, SharedString};
 use tracing::warn;
 
 use super::{LocalSwitch, PageBuilder, PageId};
@@ -17,7 +17,7 @@ use crate::window::menus_settings::{
     TogglePublicIpAutoFetch, ToggleStartAtLogin, ToggleStartMinimized,
 };
 use crate::window::titlebar::keep_above_supported;
-use tl_ui_base::app_env::AppEnv;
+use tl_ui_base::app_env::{AppEnv, GlobalShortcutApi};
 use tl_ui_base::host::HostContext;
 use tl_ui_base::i18n::tr;
 use tl_ui_base::registry::WindowKey;
@@ -118,16 +118,61 @@ pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     page
 }
 
-/// The "Open with Meta+Esc" switch (UI-SHL-069, APP-051). It has no settings key: the value is
-/// the KDE global shortcut, read once when the page is built. With no `global_shortcut` it is
-/// off and disabled.
-fn meta_esc_switch(cx: &App) -> LocalSwitch {
-    let on = Rc::new(Cell::new(false));
-    let note: Rc<RefCell<Option<SharedString>>> = Rc::new(RefCell::new(None));
-    let Some(api) = cx
-        .try_global::<AppEnv>()
+/// The "Open with Meta+Esc" state. The page is rebuilt on every render, so the state lives in a
+/// global: kglobalaccel is read when the Settings window opens ([`read_meta_esc`]) and after each
+/// write, never while building the page.
+#[derive(Default)]
+struct MetaEsc {
+    on: Cell<bool>,
+    /// A read or write is running. A click meanwhile does nothing.
+    busy: Cell<bool>,
+    /// The "log out and back in" note (U-16).
+    note: RefCell<Option<SharedString>>,
+}
+
+#[derive(Default)]
+struct MetaEscState(Rc<MetaEsc>);
+
+impl Global for MetaEscState {}
+
+/// Starts reading the KDE global shortcut (APP-051). tl-app reads it on its own thread; the reply
+/// sets the switch. The Settings window calls this when it opens.
+pub(super) fn read_meta_esc(cx: &mut App) {
+    let Some(get) = shortcut_api(cx).map(|api| api.get.clone()) else {
+        return;
+    };
+    let state = cx.default_global::<MetaEscState>().0.clone();
+    if state.busy.replace(true) {
+        return;
+    }
+    let reply = get();
+    cx.spawn(async move |cx| {
+        match reply.recv().await {
+            Ok(Ok(keys)) => {
+                state.on.set(keys.as_deref() == Some(META_ESC));
+                *state.note.borrow_mut() = None;
+            }
+            Ok(Err(error)) => {
+                warn!(target: "tasklens::ui", %error, "Meta+Esc shortcut read failed")
+            }
+            Err(_) => warn!(target: "tasklens::ui", "Meta+Esc shortcut read ended without a reply"),
+        }
+        state.busy.set(false);
+        cx.update(|cx| cx.refresh_windows());
+    })
+    .detach();
+}
+
+fn shortcut_api(cx: &App) -> Option<&GlobalShortcutApi> {
+    cx.try_global::<AppEnv>()
         .and_then(|e| e.global_shortcut.as_ref())
-    else {
+}
+
+/// The "Open with Meta+Esc" switch (UI-SHL-069, APP-051). It has no settings key: the value is
+/// the KDE global shortcut. With no `global_shortcut` it is off and disabled. A click shows the
+/// new state at once and goes back when the write fails.
+fn meta_esc_switch(cx: &mut App) -> LocalSwitch {
+    let Some(set) = shortcut_api(cx).map(|api| api.set.clone()) else {
         let unavailable = tr(cx, "shell-settings-not-available");
         return LocalSwitch {
             get: Rc::new(|| false),
@@ -136,27 +181,41 @@ fn meta_esc_switch(cx: &App) -> LocalSwitch {
             disabled: true,
         };
     };
-    let (get, set) = (api.get.clone(), api.set.clone());
-    on.set(get().as_deref() == Some(META_ESC));
+    let state = cx.default_global::<MetaEscState>().0.clone();
     let relogin = tr(cx, "shell-settings-meta-esc-relogin");
-    let (shown, shown_note) = (on.clone(), note.clone());
+    let (shown, shown_note) = (state.clone(), state.clone());
     LocalSwitch {
-        get: Rc::new(move || shown.get()),
-        description: Rc::new(move || shown_note.borrow().clone()),
-        set: Rc::new(move |want, _| {
-            match set(want.then_some(META_ESC)) {
-                Ok(()) => {
-                    on.set(want);
-                    // U-16: when the shortcut does not show the requested state, KDE applies
-                    // it at the next login. The switch keeps the requested state.
-                    let applied = get().as_deref() == Some(META_ESC);
-                    *note.borrow_mut() = (applied != want).then(|| relogin.clone());
-                }
-                // The switch keeps its old state. No toast.
-                Err(error) => {
-                    warn!(target: "tasklens::ui", %error, "Meta+Esc shortcut write failed");
-                }
+        get: Rc::new(move || shown.on.get()),
+        description: Rc::new(move || shown_note.note.borrow().clone()),
+        set: Rc::new(move |want, cx| {
+            if state.busy.replace(true) {
+                return;
             }
+            let was = state.on.replace(want);
+            let reply = set(want.then_some(META_ESC));
+            let (state, relogin) = (state.clone(), relogin.clone());
+            cx.spawn(async move |cx| {
+                match reply.recv().await {
+                    // U-16: when the shortcut does not read back as requested, KDE applies it
+                    // at the next login. The switch keeps the requested state.
+                    Ok(Ok(keys)) => {
+                        let applied = keys.as_deref() == Some(META_ESC);
+                        *state.note.borrow_mut() = (applied != want).then_some(relogin);
+                    }
+                    // The switch goes back to its old state. No toast.
+                    Ok(Err(error)) => {
+                        state.on.set(was);
+                        warn!(target: "tasklens::ui", %error, "Meta+Esc shortcut write failed");
+                    }
+                    Err(_) => {
+                        state.on.set(was);
+                        warn!(target: "tasklens::ui", "Meta+Esc shortcut write ended without a reply");
+                    }
+                }
+                state.busy.set(false);
+                cx.update(|cx| cx.refresh_windows());
+            })
+            .detach();
         }),
         disabled: false,
     }

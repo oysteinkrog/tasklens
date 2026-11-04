@@ -1629,6 +1629,7 @@ pub struct SettingsWindow {
 
 impl SettingsWindow {
     fn new(host: &HostContext, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        startup_window::read_meta_esc(cx);
         let search: Rc<RefCell<Option<Entity<InputState>>>> = Rc::default();
         let specs: Vec<SliderSpec> = all_pages(host, cx)
             .into_iter()

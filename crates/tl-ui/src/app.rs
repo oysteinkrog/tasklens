@@ -30,7 +30,7 @@ use tl_ui_kit::components::{kv_grid, toast};
 pub use tl_ui_base::app_env::{
     AdapterInfo, AppEnv, AppRequestHandler, BootSettings, BuildInfo, CrashReport, EngineGlobal,
     GlobalShortcutApi, ImportSummary, ImportedSettings, PersistFn, RunHistoryEntry,
-    RunHistoryStore, StartOptions, ToastKindTag, UiInit,
+    RunHistoryStore, ShortcutReply, StartOptions, ToastKindTag, UiInit,
 };
 pub use tl_ui_base::theme::user_store::PersistTheme;
 

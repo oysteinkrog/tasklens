@@ -25,6 +25,7 @@
 //!   before tasklens takes the key.
 
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use tracing::warn;
@@ -88,9 +89,14 @@ impl std::fmt::Display for KgaError {
     }
 }
 
-/// True when the tasklens launch action is bound to Meta+Esc.
+/// One kglobalaccel change at a time, so a read never sees half of a write.
+static CALLS: Mutex<()> = Mutex::new(());
+
+/// True when the tasklens launch action is bound to Meta+Esc. Blocks for up to a few seconds:
+/// call it off the UI thread.
 pub fn is_enabled() -> Result<bool, KgaError> {
-    let result = connect().and_then(|conn| tasklens_bound(&conn));
+    let _one = CALLS.lock().unwrap_or_else(PoisonError::into_inner);
+    let result = connect().and_then(|bus| tasklens_bound(&bus));
     if let Err(e) = &result {
         warn!(target: "tasklens::shortcut", "reading the Meta+Esc shortcut failed: {e}");
     }
@@ -99,73 +105,133 @@ pub fn is_enabled() -> Result<bool, KgaError> {
 
 /// Binds Meta+Esc to tasklens (`on`) or gives it back to System Monitor. `rc_file` is
 /// `$XDG_CONFIG_HOME/kglobalshortcutsrc`, edited only when kglobalaccel did not take the change.
+/// On an error the old bindings are put back. Blocks for up to a few seconds: call it off the
+/// UI thread.
 pub fn set_enabled(on: bool, rc_file: &Path) -> Result<Applied, KgaError> {
-    let result = connect().and_then(|conn| set_on(&conn, on, rc_file));
+    let _one = CALLS.lock().unwrap_or_else(PoisonError::into_inner);
+    let result = connect().and_then(|bus| set_on(&bus, on, rc_file));
     if let Err(e) = &result {
         warn!(target: "tasklens::shortcut", on, "setting the Meta+Esc shortcut failed: {e}");
     }
     result
 }
 
-fn set_on(
-    conn: &zbus::blocking::Connection,
-    on: bool,
-    rc_file: &Path,
-) -> Result<Applied, KgaError> {
-    let tl = action_id(TL_COMPONENT, "tasklens");
-    let sm = action_id(SM_COMPONENT, "");
-    // Loads the tasklens component and its launch action; a no-op when they exist.
-    call(conn, "doRegister", &(&tl,))?;
+/// The kglobalaccel calls `set_on` makes. A trait, so the rollback is tested without KDE.
+trait Kga {
+    /// Loads the tasklens component and its launch action; a no-op when they exist.
+    fn register_tasklens(&self) -> Result<(), KgaError>;
+    fn set_tasklens(&self, keys: Vec<KeySeq>) -> Result<(), KgaError>;
+    fn tasklens_keys(&self) -> Result<Vec<KeySeq>, KgaError>;
+    fn set_system_monitor(&self, keys: Vec<KeySeq>) -> Result<(), KgaError>;
+    fn system_monitor_defaults(&self) -> Result<Vec<KeySeq>, KgaError>;
+}
+
+/// kglobalaccel on the session bus.
+struct Bus(zbus::blocking::Connection);
+
+impl Kga for Bus {
+    fn register_tasklens(&self) -> Result<(), KgaError> {
+        call(&self.0, "doRegister", &(tasklens_id(),)).map(|_| ())
+    }
+
+    fn set_tasklens(&self, keys: Vec<KeySeq>) -> Result<(), KgaError> {
+        // `SetPresent` makes kglobalaccel grab the key at once (see the module comment).
+        let flags = SET_PRESENT | NO_AUTOLOADING;
+        call(&self.0, "setShortcutKeys", &(tasklens_id(), keys, flags)).map(|_| ())
+    }
+
+    fn tasklens_keys(&self) -> Result<Vec<KeySeq>, KgaError> {
+        reply(call(&self.0, "shortcutKeys", &(tasklens_id(),))?)
+    }
+
+    fn set_system_monitor(&self, keys: Vec<KeySeq>) -> Result<(), KgaError> {
+        let sm = system_monitor_id();
+        call(&self.0, "setForeignShortcutKeys", &(sm, keys)).map(|_| ())
+    }
+
+    fn system_monitor_defaults(&self) -> Result<Vec<KeySeq>, KgaError> {
+        reply(call(
+            &self.0,
+            "defaultShortcutKeys",
+            &(system_monitor_id(),),
+        )?)
+    }
+}
+
+fn set_on(kga: &impl Kga, on: bool, rc_file: &Path) -> Result<Applied, KgaError> {
+    kga.register_tasklens()?;
+    let result = apply(kga, on)
+        .and_then(|()| tasklens_bound(kga))
+        .and_then(|bound| {
+            if bound == on {
+                return Ok(Applied::Live);
+            }
+            warn!(target: "tasklens::shortcut", on, "kglobalaccel did not take the change; editing kglobalshortcutsrc");
+            rc_fallback(rc_file, on).map(|()| Applied::NeedsRelogin)
+        });
+    if result.is_err() {
+        // The caller keeps the old state, so the bindings go back to it. Otherwise a failed
+        // "on" would leave Meta+Esc with no action at all.
+        roll_back(kga, !on);
+    }
+    result
+}
+
+/// The live change. On: System Monitor first loses the key, then tasklens takes it (kglobalaccel
+/// does not check keys for clashes). Off: tasklens loses it, then System Monitor gets its
+/// default keys back.
+fn apply(kga: &impl Kga, on: bool) -> Result<(), KgaError> {
     if on {
-        call(conn, "setForeignShortcutKeys", &(&sm, Vec::<KeySeq>::new()))?;
-        if let Err(e) = call(
-            conn,
-            "setShortcutKeys",
-            &(&tl, vec![key_seq(META_ESC)], SET_PRESENT | NO_AUTOLOADING),
-        ) {
-            // Never leave the user with no Meta+Esc at all.
-            let _ = restore_system_monitor(conn, &sm);
-            return Err(e);
-        }
+        kga.set_system_monitor(Vec::new())?;
+        kga.set_tasklens(vec![key_seq(META_ESC)])
     } else {
-        call(
-            conn,
-            "setShortcutKeys",
-            &(&tl, Vec::<KeySeq>::new(), SET_PRESENT | NO_AUTOLOADING),
-        )?;
-        restore_system_monitor(conn, &sm)?;
+        kga.set_tasklens(Vec::new())?;
+        restore_system_monitor(kga)
     }
-    if tasklens_bound(conn)? == on {
-        return Ok(Applied::Live);
+}
+
+/// Puts the bindings of state `on` back. Best effort: both steps run even when the first one
+/// fails, and the step that gives the key an owner runs first.
+fn roll_back(kga: &impl Kga, on: bool) {
+    let steps = if on {
+        [
+            kga.set_tasklens(vec![key_seq(META_ESC)]),
+            kga.set_system_monitor(Vec::new()),
+        ]
+    } else {
+        [restore_system_monitor(kga), kga.set_tasklens(Vec::new())]
+    };
+    for e in steps.into_iter().filter_map(Result::err) {
+        warn!(target: "tasklens::shortcut", on, "putting the old Meta+Esc bindings back failed: {e}");
     }
-    warn!(target: "tasklens::shortcut", on, "kglobalaccel did not take the change; editing kglobalshortcutsrc");
-    rc_fallback(rc_file, on)?;
-    Ok(Applied::NeedsRelogin)
 }
 
 /// Gives System Monitor its default launch keys back (Meta+Esc on Plasma 6), never a fixed key.
-fn restore_system_monitor(
-    conn: &zbus::blocking::Connection,
-    sm: &[String],
-) -> Result<(), KgaError> {
-    let defaults: Vec<KeySeq> = call(conn, "defaultShortcutKeys", &(sm,))?
-        .body()
-        .deserialize()
-        .map_err(|e| KgaError::Call(e.to_string()))?;
-    call(conn, "setForeignShortcutKeys", &(sm, defaults)).map(|_| ())
+fn restore_system_monitor(kga: &impl Kga) -> Result<(), KgaError> {
+    kga.set_system_monitor(kga.system_monitor_defaults()?)
 }
 
 /// Reads the tasklens launch keys back.
-fn tasklens_bound(conn: &zbus::blocking::Connection) -> Result<bool, KgaError> {
-    let keys: Vec<KeySeq> = call(
-        conn,
-        "shortcutKeys",
-        &(action_id(TL_COMPONENT, "tasklens"),),
-    )?
-    .body()
-    .deserialize()
-    .map_err(|e| KgaError::Call(e.to_string()))?;
-    Ok(keys.iter().any(|(seq,)| seq.first() == Some(&META_ESC)))
+fn tasklens_bound(kga: &impl Kga) -> Result<bool, KgaError> {
+    Ok(kga
+        .tasklens_keys()?
+        .iter()
+        .any(|(seq,)| seq.first() == Some(&META_ESC)))
+}
+
+fn tasklens_id() -> Vec<String> {
+    action_id(TL_COMPONENT, "tasklens")
+}
+
+fn system_monitor_id() -> Vec<String> {
+    action_id(SM_COMPONENT, "")
+}
+
+fn reply(message: zbus::Message) -> Result<Vec<KeySeq>, KgaError> {
+    message
+        .body()
+        .deserialize()
+        .map_err(|e| KgaError::Call(e.to_string()))
 }
 
 /// The 4-string action id: component, action, component friendly name, action friendly name.
@@ -184,9 +250,10 @@ fn key_seq(key: i32) -> KeySeq {
 }
 
 /// A fresh session-bus connection whose method calls time out after 1 s.
-fn connect() -> Result<zbus::blocking::Connection, KgaError> {
+fn connect() -> Result<Bus, KgaError> {
     zbus::blocking::connection::Builder::session()
         .and_then(|b| b.method_timeout(TIMEOUT).build())
+        .map(Bus)
         .map_err(|e| map_error(&e))
 }
 
@@ -473,5 +540,123 @@ _launch=Meta+Esc\nfoo=bar\n\n[b]\n_launch=keep\n";
             0o644,
             "an existing file keeps its mode"
         );
+    }
+
+    /// kglobalaccel in memory. `sticks` false: `set_tasklens` answers Ok and changes nothing.
+    /// `fail_tasklens`: `set_tasklens` fails.
+    struct Fake {
+        tl: std::cell::RefCell<Vec<KeySeq>>,
+        sm: std::cell::RefCell<Vec<KeySeq>>,
+        sticks: bool,
+        fail_tasklens: std::cell::Cell<bool>,
+    }
+
+    impl Fake {
+        /// The Plasma 6 start state: System Monitor holds Meta+Esc, tasklens has no key.
+        fn new(sticks: bool) -> Self {
+            Self {
+                tl: Default::default(),
+                sm: std::cell::RefCell::new(vec![key_seq(META_ESC)]),
+                sticks,
+                fail_tasklens: Default::default(),
+            }
+        }
+
+        fn sm_has_key(&self) -> bool {
+            *self.sm.borrow() == [key_seq(META_ESC)]
+        }
+    }
+
+    impl Kga for Fake {
+        fn register_tasklens(&self) -> Result<(), KgaError> {
+            Ok(())
+        }
+        fn set_tasklens(&self, keys: Vec<KeySeq>) -> Result<(), KgaError> {
+            if self.fail_tasklens.get() {
+                return Err(KgaError::Call("setShortcutKeys failed".into()));
+            }
+            if self.sticks {
+                *self.tl.borrow_mut() = keys;
+            }
+            Ok(())
+        }
+        fn tasklens_keys(&self) -> Result<Vec<KeySeq>, KgaError> {
+            Ok(self.tl.borrow().clone())
+        }
+        fn set_system_monitor(&self, keys: Vec<KeySeq>) -> Result<(), KgaError> {
+            *self.sm.borrow_mut() = keys;
+            Ok(())
+        }
+        fn system_monitor_defaults(&self) -> Result<Vec<KeySeq>, KgaError> {
+            Ok(vec![key_seq(META_ESC)])
+        }
+    }
+
+    #[test]
+    fn on_and_off_move_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join("kglobalshortcutsrc");
+        let kga = Fake::new(true);
+        assert_eq!(set_on(&kga, true, &rc), Ok(Applied::Live));
+        assert_eq!(*kga.tl.borrow(), [key_seq(META_ESC)]);
+        assert!(kga.sm.borrow().is_empty());
+        assert_eq!(set_on(&kga, false, &rc), Ok(Applied::Live));
+        assert!(kga.tl.borrow().is_empty());
+        assert!(kga.sm_has_key(), "System Monitor gets its default back");
+        assert!(!rc.exists(), "a live change writes no file");
+    }
+
+    #[test]
+    fn not_sticking_writes_rc_and_needs_relogin() {
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join("kglobalshortcutsrc");
+        let kga = Fake::new(false);
+        assert_eq!(set_on(&kga, true, &rc), Ok(Applied::NeedsRelogin));
+        assert!(
+            std::fs::read_to_string(&rc)
+                .unwrap()
+                .contains("[services][io.github.oysteinkrog.Tasklens.desktop]\n_launch=Meta+Esc\n")
+        );
+        assert!(
+            kga.sm.borrow().is_empty(),
+            "tasklens gets the key after the login"
+        );
+    }
+
+    #[test]
+    fn failed_fallback_gives_system_monitor_the_key_back() {
+        // The binding does not stick and the file cannot be read (it is a folder).
+        let dir = tempfile::tempdir().unwrap();
+        let kga = Fake::new(false);
+        assert!(matches!(
+            set_on(&kga, true, dir.path()),
+            Err(KgaError::Io(_))
+        ));
+        assert!(kga.sm_has_key(), "Meta+Esc still opens System Monitor");
+        assert!(kga.tl.borrow().is_empty());
+    }
+
+    #[test]
+    fn failed_tasklens_call_gives_system_monitor_the_key_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join("kglobalshortcutsrc");
+        let kga = Fake::new(true);
+        kga.fail_tasklens.set(true);
+        assert!(matches!(set_on(&kga, true, &rc), Err(KgaError::Call(_))));
+        assert!(kga.sm_has_key());
+        assert!(!rc.exists());
+    }
+
+    #[test]
+    fn failed_off_keeps_tasklens_on() {
+        // Off fails when the tasklens key cannot be cleared; tasklens keeps Meta+Esc.
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join("kglobalshortcutsrc");
+        let kga = Fake::new(true);
+        assert_eq!(set_on(&kga, true, &rc), Ok(Applied::Live));
+        kga.fail_tasklens.set(true);
+        assert!(set_on(&kga, false, &rc).is_err());
+        assert_eq!(*kga.tl.borrow(), [key_seq(META_ESC)]);
+        assert!(kga.sm.borrow().is_empty(), "only one action holds Meta+Esc");
     }
 }

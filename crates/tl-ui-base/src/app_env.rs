@@ -23,8 +23,13 @@ pub const APP_ID: &str = "io.github.oysteinkrog.Tasklens";
 pub type PersistFn = Box<dyn Fn(&Settings, &UiState)>;
 /// Writes settings.toml at once. The error is shown to the user.
 pub type WriteSettingsFn = Arc<dyn Fn(&Settings) -> Result<(), String>>;
-/// Sets or clears the global shortcut. The error is shown to the user.
-pub type SetShortcutFn = Arc<dyn Fn(Option<&str>) -> Result<(), String>>;
+/// The global shortcut as read from the desktop: `Ok(None)` when unbound.
+pub type ShortcutReply = Result<Option<String>, String>;
+/// Starts reading the global shortcut on a tl-app thread and returns at once.
+pub type GetShortcutFn = Arc<dyn Fn() -> async_channel::Receiver<ShortcutReply>>;
+/// Starts setting or clearing the global shortcut on a tl-app thread and returns at once. The
+/// reply is the shortcut read back after the write, or the error.
+pub type SetShortcutFn = Arc<dyn Fn(Option<&str>) -> async_channel::Receiver<ShortcutReply>>;
 /// Reads a TaskSlinger `UserSettings.ini` and imports it onto the current settings and state.
 /// The error is shown to the user.
 pub type ImportTaskslingerFn =
@@ -114,9 +119,10 @@ pub trait RunHistoryStore {
     fn save(&self, entries: &[RunHistoryEntry]) -> Result<(), String>;
 }
 
-/// The KDE global shortcut for showing the main window.
+/// The KDE global shortcut for showing the main window. Both calls talk to D-Bus, so tl-app runs
+/// them on its own thread; the main thread only awaits the reply.
 pub struct GlobalShortcutApi {
-    pub get: Arc<dyn Fn() -> Option<String>>,
+    pub get: GetShortcutFn,
     pub set: SetShortcutFn,
 }
 
