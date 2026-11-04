@@ -40,7 +40,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
@@ -289,6 +289,9 @@ const LOAD_TIMEOUT: Duration = Duration::from_millis(2500);
 const LOAD_BUDGET: Duration = Duration::from_secs(2);
 /// The shutdown drain is 1000 ms (ADR-004 shutdown step 2). Past this, the purge is skipped.
 const PURGE_DEADLINE: Duration = Duration::from_millis(800);
+/// How long shutdown waits for the store close. It leaves 250 ms of `DRAIN_BUDGET` for the
+/// worker to return and the region to drain.
+const CLOSE_WAIT: Duration = crate::bridge::DRAIN_BUDGET.saturating_sub(Duration::from_millis(250));
 const BLOCK_NS: u64 = BLOCK_SECS * 1_000_000_000;
 const SEGMENT_NS: u64 = SEGMENT_SECS * 1_000_000_000;
 
@@ -489,10 +492,10 @@ impl RecordingState {
     }
 
     /// Leaving Recording or cancellation: writes the queued and the open block and closes the
-    /// store, or with `persist = false` deletes this boot's segments. With `cancel`, the
-    /// append and close run masked, and the purge is skipped when the cancel was seen more than
-    /// 800 ms ago.
-    fn leave(self, cancel: Option<(&Cx, Instant)>) {
+    /// store, or with `persist = false` deletes this boot's segments. `cancel_seen` is when
+    /// shutdown began; the purge is skipped when that was more than 800 ms ago. At shutdown this
+    /// runs on a plain thread, never on the async worker (see `shut_down`).
+    fn leave(self, cancel_seen: Option<Instant>) {
         let RecordingState {
             mut recorder,
             store,
@@ -502,7 +505,7 @@ impl RecordingState {
         let Some(mut store) = store else {
             return;
         };
-        let late = cancel.is_some_and(|(_, seen)| seen.elapsed() > PURGE_DEADLINE);
+        let late = cancel_seen.is_some_and(|seen| seen.elapsed() > PURGE_DEADLINE);
         if !persist && !late {
             if let Err(e) = retention::purge_current_boot(store) {
                 tracing::debug!("history purge failed: {e}");
@@ -514,20 +517,14 @@ impl RecordingState {
         }
         let mut blocks: Vec<_> = std::iter::from_fn(|| recorder.take_closed()).collect();
         blocks.extend(recorder.flush());
-        let finish = || {
-            for cb in blocks {
-                if let Err(e) = store.append(cb.block, cb.realtime_offset_ns) {
-                    tracing::debug!("history append failed: {e}");
-                    break;
-                }
+        for cb in blocks {
+            if let Err(e) = store.append(cb.block, cb.realtime_offset_ns) {
+                tracing::debug!("history append failed: {e}");
+                break;
             }
-            if let Err(e) = store.close() {
-                tracing::debug!("history close failed: {e}");
-            }
-        };
-        match cancel {
-            Some((cx, _)) => cx.masked(finish),
-            None => finish(),
+        }
+        if let Err(e) = store.close() {
+            tracing::debug!("history close failed: {e}");
         }
     }
 }
@@ -989,12 +986,67 @@ fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Cancellation: writes and closes the store (bounded, see `RecordingState::leave`).
-fn shut_down(cx: &Cx, state: &Mutex<State>) -> Outcome<(), WorkerError> {
+/// Cancellation: writes and closes the store on a thread of its own, and waits for it at most
+/// `CLOSE_WAIT`, masked.
+///
+/// The close must not run on the engine's one async worker: it may wait for the state lock,
+/// which a job may still hold, and for the store's writes. A slow close there keeps every
+/// source from stopping and fails the 1.5 s shutdown (tasklens-gd3ky, tasklens-4nqi0). A
+/// blocking job is not admitted here because the region is already closing, so the close gets a
+/// plain thread, as the sampling threads do (ADR-004). A close that runs past `CLOSE_WAIT` goes
+/// on by itself; the process exit cuts it as a crash would, and ADR-017 reads a segment up to
+/// its first bad block.
+async fn shut_down(cx: &Cx, state: &Arc<Mutex<State>>) -> Outcome<(), WorkerError> {
     let seen = Instant::now();
-    let mode = std::mem::replace(&mut lock(state).mode, Mode::Off);
-    if let Mode::Recording(rec) = mode {
-        rec.leave(Some((cx, seen)));
+    // A free lock is taken here, so a worker that is not recording starts no thread. A held
+    // lock is left to the thread.
+    let taken = match state.try_lock() {
+        Ok(mut st) => Some(std::mem::replace(&mut st.mode, Mode::Off)),
+        Err(TryLockError::Poisoned(p)) => {
+            Some(std::mem::replace(&mut p.into_inner().mode, Mode::Off))
+        }
+        Err(TryLockError::WouldBlock) => None,
+    };
+    let rec = match taken {
+        Some(Mode::Recording(rec)) => Some(rec),
+        Some(_) => return Outcome::Ok(()),
+        None => None,
+    };
+    let (done_tx, done_rx) = async_channel::bounded::<()>(1);
+    let job_state = Arc::clone(state);
+    let running = crate::bridge::job_running("history close");
+    let close = move || {
+        let _running = running;
+        let rec = rec.or_else(|| {
+            let mode = std::mem::replace(&mut lock(&job_state).mode, Mode::Off);
+            match mode {
+                Mode::Recording(rec) => Some(rec),
+                _ => None,
+            }
+        });
+        if let Some(rec) = rec {
+            rec.leave(Some(seen));
+        }
+        // A failed send means the worker stopped waiting.
+        let _ = done_tx.send_blocking(());
+    };
+    let spawned = std::thread::Builder::new()
+        .name("tl-proc-history".into())
+        .spawn(close);
+    if let Err(e) = spawned {
+        // No thread: skip the close rather than block the async worker. The open block is lost
+        // as in a crash; ADR-017 reads each segment up to its first bad block.
+        tracing::debug!("process history close thread did not start, close skipped: {e}");
+        return Outcome::Ok(());
+    }
+    let mut wait = std::pin::pin!(crate::time_util::timeout(cx, CLOSE_WAIT, done_rx.recv()));
+    let waited = std::future::poll_fn(|task| cx.masked(|| wait.as_mut().poll(task))).await;
+    if !matches!(waited, Ok(Ok(()))) {
+        tracing::debug!(
+            target: "tasklens::engine",
+            wait_ms = CLOSE_WAIT.as_millis() as u64,
+            "process history close still runs; shutdown goes on without it",
+        );
     }
     Outcome::Ok(())
 }
@@ -1039,7 +1091,7 @@ pub async fn run_history(
         ($outcome:expr) => {{
             let outcome = $outcome;
             if matches!(outcome, Outcome::Ok(())) {
-                return shut_down(&cx, &state);
+                return shut_down(&cx, &state).await;
             }
             return outcome;
         }};
@@ -1056,7 +1108,7 @@ pub async fn run_history(
             }
         }
         if cx.checkpoint().is_err() {
-            return shut_down(&cx, &state);
+            return shut_down(&cx, &state).await;
         }
 
         let settings = io.settings.borrow_and_clone();
@@ -1080,7 +1132,7 @@ pub async fn run_history(
             }
             next_refresh = now;
             if cx.checkpoint().is_err() {
-                return shut_down(&cx, &state);
+                return shut_down(&cx, &state).await;
             }
         } else if recording && want != Wanted::Recording {
             let Mode::Recording(rec) = std::mem::replace(&mut lock(&state).mode, Mode::Off) else {
@@ -1608,5 +1660,112 @@ mod tests {
         scope.close();
         assert!(scope.before_event(1_650 * S));
         assert!(!scope.before_event(1_710 * S));
+    }
+
+    fn tempdir() -> tempfile::TempDir {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+        std::fs::create_dir_all(&base).expect("create target/tmp");
+        tempfile::Builder::new()
+            .prefix("proc-history-")
+            .tempdir_in(base)
+            .expect("tempdir")
+    }
+
+    /// Regression (tasklens-4nqi0, the tasklens-gd3ky rule): shutdown while the state lock is
+    /// held for 3 s, as by a job that still holds the state. On the engine's runtime, with its
+    /// one async worker, the root region drains inside `DRAIN_BUDGET` and a second task is not
+    /// held up. The close still runs once the lock is free. With the close on the worker, the
+    /// worker waited the whole 3 s and the drain ran out.
+    #[test]
+    fn shutdown_close_keeps_off_the_async_worker() {
+        use asupersync::runtime::RootDrainOutcome;
+
+        use crate::bridge::{DRAIN_BUDGET, TEARDOWN_BUDGET};
+
+        const HOLD: Duration = Duration::from_secs(3);
+        const START_WAIT: Duration = Duration::from_secs(5);
+        let dir = tempdir();
+        let h = HistorySettings {
+            persist: true,
+            ..HistorySettings::default()
+        };
+        let (store, _) = Store::open(
+            StoreConfig {
+                root: dir.path().to_path_buf(),
+                boot: BootId(1),
+                retention_ns: retention_ns(&h),
+                max_disk_bytes: max_disk_bytes(&h),
+                load_existing: false,
+            },
+            0,
+            Instant::now() + LOAD_BUDGET,
+        );
+        let mut rec = RecordingState::new(BootId(1), &h);
+        rec.store = Some(store);
+        let mut st = worker_state();
+        st.mode = Mode::Recording(rec);
+        let state = Arc::new(Mutex::new(st));
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let holder_state = Arc::clone(&state);
+        let holder = std::thread::spawn(move || {
+            let _held = lock(&holder_state);
+            let _ = held_tx.send(());
+            std::thread::sleep(HOLD);
+        });
+        held.recv_timeout(START_WAIT).expect("the lock is held");
+
+        // Two tasks park until cancel. The first then shuts the store down; the second ends.
+        let (started_tx, started) = std::sync::mpsc::channel();
+        let (ended_tx, ended) = std::sync::mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker_started = started_tx.clone();
+        rt.handle()
+            .try_spawn_with_cx(move |cx| async move {
+                let _ = worker_started.send(());
+                let _ =
+                    crate::time_util::timeout(&cx, HOLD * 10, std::future::pending::<()>()).await;
+                let _ = shut_down(&cx, &worker_state).await;
+            })
+            .expect("the worker task spawns");
+        rt.handle()
+            .try_spawn_with_cx(move |cx| async move {
+                let _ = started_tx.send(());
+                let _ =
+                    crate::time_util::timeout(&cx, HOLD * 10, std::future::pending::<()>()).await;
+                let _ = ended_tx.send(Instant::now());
+            })
+            .expect("the other task spawns");
+        for _ in 0..2 {
+            started.recv_timeout(START_WAIT).expect("the tasks started");
+        }
+        // Let both park inside their waits.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let begin = Instant::now();
+        let outcome = rt.drain_root_region(DRAIN_BUDGET);
+        let took = begin.elapsed();
+        assert_eq!(outcome, RootDrainOutcome::Quiescent, "took {took:?}");
+        assert!(took < DRAIN_BUDGET, "drain took {took:?}");
+        let other = ended
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the other task ended");
+        assert!(
+            other.duration_since(begin) < CLOSE_WAIT / 2,
+            "the other task ended {:?} after the drain began",
+            other.duration_since(begin)
+        );
+        assert!(rt.shutdown_timeout(TEARDOWN_BUDGET));
+
+        holder.join().expect("the lock holder ends");
+        let deadline = Instant::now() + START_WAIT;
+        while !matches!(lock(&state).mode, Mode::Off) {
+            assert!(
+                Instant::now() < deadline,
+                "the store was not closed {START_WAIT:?} after the lock was free"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
