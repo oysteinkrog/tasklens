@@ -72,6 +72,13 @@ pub fn scaled() -> Scaled {
         .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
         .expect("create scaled root dir");
     build_scaled_root(root_dir.path());
+    // Each sweep ends with a read of the cpu line of /proc/stat, so the root needs the file
+    // for the bench to pay that read.
+    fs::copy(
+        fixture_dir("owner-desktop").join("proc/stat"),
+        root_dir.path().join("proc/stat"),
+    )
+    .expect("copy proc/stat");
     let cache_dir = tempfile::Builder::new()
         .prefix("sweep-icons-")
         .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
