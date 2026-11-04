@@ -3221,6 +3221,11 @@ fn sweep_2000_under_gate() {
     assert_eq!(scaled.out.records.len(), scaled_root::SCALED_PIDS);
     times.sort_unstable();
     let median = times[times.len() / 2];
+    eprintln!(
+        "sweep_2000 median {median:?} (min {:?}, max {:?})",
+        times[0],
+        times[times.len() - 1]
+    );
     assert!(
         median <= GATE,
         "median steady sweep {median:?} over the {GATE:?} gate (min {:?}, max {:?})",
