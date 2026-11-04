@@ -1081,6 +1081,54 @@ fn interval_change_still_resets() {
     rig.finish();
 }
 
+/// ADR-008: a switch from the 10 s history sweep that comes with a new update interval still
+/// forgets the CPU baselines. Settings do not end the history wait, so the demand change sees
+/// both at once. The sweep at the switch has no CPU window; the sweep 2 s later has one.
+#[test]
+fn mode_switch_with_interval_change_resets() {
+    let root = FixtureRoot::new(&["owner-desktop"]);
+    fs::create_dir_all(root.root().join("sys/fs/cgroup")).expect("create cgroup dir");
+    let mut rig = Rig::start(&root, history_demand(), 1000);
+    let one_pct = rustix::param::clock_ticks_per_second() * 32 / 100;
+    let stat_delta = [640, 0, 320, 2144, 0, 32, 64, 0];
+    let run_to = |rig: &mut Rig, end_ms: u64| {
+        while rig.fl.now_ms() < end_ms {
+            rig.fl.advance(Duration::from_millis(100));
+            if rig.fl.now_ms() % 1_000 == 500 {
+                add_pid_ticks(&root, 1, one_pct, 0);
+                add_stat_ticks(&root, stat_delta);
+            }
+            rig.collect();
+        }
+    };
+
+    run_to(&mut rig, 25_000);
+    assert_eq!(rig.times(), [0, 10_000, 20_000]);
+    assert!(rig.sweeps[1..].iter().all(|(_, s)| s.cpu.is_some()));
+    let changed = rig.sweeps.len();
+    rig.settings
+        .send_modify(|s| s.interval_ms = 2_000)
+        .expect("watch has receivers");
+    rig.demand
+        .send(Demand {
+            device_history: true,
+            ..table_demand()
+        })
+        .expect("watch has receivers");
+    run_to(&mut rig, 27_500);
+
+    let after: Vec<(u64, bool)> = rig.sweeps[changed..]
+        .iter()
+        .map(|(t, s)| (*t, s.cpu.is_some()))
+        .collect();
+    assert_eq!(
+        after,
+        [(25_100, false), (27_100, true)],
+        "(ms, has a CPU window) of each sweep after the change"
+    );
+    rig.finish();
+}
+
 /// tasklens-8q0.42: through the real sweep, a unit row whose unit cgroup's `cgroup.events` says
 /// `frozen 1` is frozen, and so are its processes. No unit sample is involved.
 #[test]

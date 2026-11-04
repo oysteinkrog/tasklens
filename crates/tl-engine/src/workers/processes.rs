@@ -155,7 +155,9 @@ pub struct ProcessesSource {
     wants: Cell<SweepWants>,
     /// `history_only`, set by `period`: a demand change ends the 10 s wait at once.
     history_only: Cell<bool>,
-    /// Set by `period`: `history_only` changed in this call.
+    /// The clamped `interval_ms`, set by `period`.
+    interval_ms: Cell<u32>,
+    /// Set by `period`: `history_only` changed in this call and the interval did not.
     mode_switched: Cell<bool>,
     /// `Demand.detail_keys`, set by `period`: the visible rows whose P2 columns the sweep reads.
     detail_keys: RefCell<Arc<[ProcessKey]>>,
@@ -235,6 +237,7 @@ impl ProcessesSource {
             cfg,
             wants: Cell::new(SweepWants::default()),
             history_only: Cell::new(false),
+            interval_ms: Cell::new(0),
             mode_switched: Cell::new(false),
             detail_keys: RefCell::new(Arc::from([])),
             clock: real_clock,
@@ -312,8 +315,11 @@ impl Source for ProcessesSource {
         self.wants.set(sweep_wants(d, s));
         self.detail_keys.replace(Arc::clone(&d.detail_keys));
         let only = history_only(d, s);
-        self.mode_switched.set(only != self.history_only.get());
+        let interval = s.interval_ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS);
+        self.mode_switched
+            .set(only != self.history_only.get() && interval == self.interval_ms.get());
         self.history_only.set(only);
+        self.interval_ms.set(interval);
         processes_period(d, s)
     }
 
@@ -404,7 +410,8 @@ impl Source for ProcessesSource {
     /// The switch between the 10 s history sweep and the demanded rate keeps the CPU and
     /// cgroup baselines, so the first sweep at the new rate has a CPU window and the By app
     /// bands join (tasklens-m4fs2, tasklens-nk2rl, D-042). `set_mem_only` already clears the
-    /// app baselines. Any other period change forgets them (ADR-008).
+    /// app baselines. Any other period change forgets them, also a mode switch that comes with
+    /// a new interval (ADR-008).
     fn period_changed(&mut self) {
         if !self.mode_switched.get() {
             self.reset_baselines();
