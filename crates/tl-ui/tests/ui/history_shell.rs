@@ -847,7 +847,7 @@ fn history_scrub_scene_runs_headless_5_frames(cx: &mut TestAppContext) {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use tl_ui::bench::stats::BenchReport;
+    use tl_ui::bench::stats::{BenchReport, FrameBudget};
     use tl_ui::bench::{BenchClocks, BenchError, BenchOptions, BenchScene, run};
 
     static FAKE_CPU: AtomicU64 = AtomicU64::new(0);
@@ -867,6 +867,7 @@ fn history_scrub_scene_runs_headless_5_frames(cx: &mut TestAppContext) {
             duration_s,
             warmup_s: 0,
             json: Some(json.clone()),
+            budget: FrameBudget::default(),
         };
         let clocks = BenchClocks {
             thread_cpu_ns: fake_cpu,

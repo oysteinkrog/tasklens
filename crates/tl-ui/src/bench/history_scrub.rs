@@ -41,8 +41,8 @@ use tl_ui_settings::settings::EngineSettings;
 
 use super::scenes::{BenchError, BenchOptions, BenchScene, WINDOW_H, WINDOW_W, fixture};
 use super::stats::{
-    BenchClocks, BenchReport, FrameProbe, PROBE_CAPACITY, count_missed, percentiles_ms,
-    process_cpu_pct, read_rss_pss_mb,
+    BenchClocks, BenchReport, FrameProbe, count_missed, percentiles_ms, process_cpu_pct,
+    read_rss_pss_mb,
 };
 use super::synth::{BenchRng, SEED};
 use crate::app::TasklensUi;
@@ -649,7 +649,7 @@ pub struct ScrubDriver {
 }
 
 impl ScrubDriver {
-    pub fn new(page: Entity<HistoryPage>, clocks: BenchClocks) -> Self {
+    pub fn new(page: Entity<HistoryPage>, clocks: BenchClocks, capacity: usize) -> Self {
         Self {
             page,
             clocks,
@@ -660,7 +660,7 @@ impl ScrubDriver {
             last_hover: None,
             last_cpu: None,
             changed: false,
-            scrub_cpu_ns: Vec::with_capacity(PROBE_CAPACITY),
+            scrub_cpu_ns: Vec::with_capacity(capacity),
             active: false,
         }
     }
@@ -903,8 +903,12 @@ async fn measure(
     let stalls = |cx: &mut AsyncApp| cx.update(|cx| anim.read(cx).stats.stalls);
     let at_start = stalls(cx);
 
-    let probe = Rc::new(RefCell::new(FrameProbe::new(clocks, PROBE_CAPACITY)));
-    let driver = Rc::new(RefCell::new(ScrubDriver::new(page, clocks)));
+    let probe = Rc::new(RefCell::new(FrameProbe::new(clocks, opts.budget.capacity)));
+    let driver = Rc::new(RefCell::new(ScrubDriver::new(
+        page,
+        clocks,
+        opts.budget.capacity,
+    )));
     {
         let (probe, driver) = (Rc::clone(&probe), Rc::clone(&driver));
         handle
@@ -958,10 +962,11 @@ async fn measure(
             "{name}: no scrub frame; the first history view never arrived"
         )));
     }
-    let (missed, long_missed) = count_missed(intervals);
+    let (missed, long_missed) = count_missed(intervals, &opts.budget);
     let (rss_mb, pss_mb) = read_rss_pss_mb();
     let report = BenchReport {
         scene: name,
+        refresh_hz: opts.budget.refresh_hz,
         frames,
         frame_cpu_ms: percentiles_ms(probe.cpu_ns()),
         missed_frames: missed,

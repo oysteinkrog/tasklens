@@ -14,6 +14,7 @@ use rustix::time::{ClockId, clock_gettime};
 use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
 use tl_model::demand::{CpuDemand, Demand};
+use tl_ui::bench::stats::{FrameBudget, REFRESH_ENV};
 use tl_ui::bench::{BenchClocks, BenchOptions, BenchScene};
 use tracing::{info, warn};
 
@@ -29,7 +30,7 @@ pub struct BenchArgs {
 }
 
 /// Runs the scene and returns the process exit code: 0 on a finished run, 1 on a scene
-/// failure, 2 on an unknown scene.
+/// failure, 2 on an unknown scene or an invalid `TL_BENCH_REFRESH_HZ`.
 pub fn run(args: BenchArgs) -> i32 {
     let scene = match parse_scene(&args.scene) {
         Ok(scene) => scene,
@@ -38,6 +39,15 @@ pub fn run(args: BenchArgs) -> i32 {
             return 2;
         }
     };
+
+    let budget = match FrameBudget::from_env_value(std::env::var_os(REFRESH_ENV).as_deref()) {
+        Ok(budget) => budget,
+        Err(text) => {
+            eprintln!("bench failed: {text}");
+            return 2;
+        }
+    };
+    info!(target: "tasklens::perf", refresh_hz = budget.refresh_hz, period_ns = budget.period_ns, "bench frame budget");
 
     if let Some(text) = lock_refusal(session_locked()) {
         eprintln!("bench failed: {text}");
@@ -63,6 +73,7 @@ pub fn run(args: BenchArgs) -> i32 {
         duration_s: args.duration_s,
         warmup_s: args.warmup_s,
         json: args.json,
+        budget,
     };
     let clocks = BenchClocks {
         thread_cpu_ns,

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gpui_kit::{TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
-use tl_ui::bench::stats::BenchReport;
+use tl_ui::bench::stats::{BenchReport, FrameBudget};
 use tl_ui::bench::{BenchClocks, BenchError, BenchOptions, BenchScene, run};
 
 static FAKE_CPU: AtomicU64 = AtomicU64::new(0);
@@ -47,6 +47,7 @@ pub fn run_scene(
             duration_s,
             warmup_s: 0,
             json,
+            budget: FrameBudget::default(),
         };
         let task = run(cx, scene, opts, clocks(), real);
         cx.spawn(async move |_| *slot.borrow_mut() = Some(task.await))

@@ -5,6 +5,7 @@
 //! [`BenchReport`] and writes it with [`write_json`].
 
 use std::cell::RefCell;
+use std::ffi::OsStr;
 use std::fs;
 use std::mem;
 use std::path::Path;
@@ -25,14 +26,75 @@ pub struct BenchClocks {
     pub process_cpu_ns: fn() -> u64,
 }
 
-/// Frame period of the 144 Hz fixture output.
+/// Environment variable that sets the output refresh rate the bench is judged against.
+pub const REFRESH_ENV: &str = "TL_BENCH_REFRESH_HZ";
+/// Refresh rate used when [`REFRESH_ENV`] is unset.
+pub const DEFAULT_REFRESH_HZ: u32 = 144;
+/// Highest refresh rate [`FrameBudget::from_hz`] accepts.
+pub const MAX_REFRESH_HZ: u32 = 1000;
+
+/// Frame period of the default 144 Hz output.
 pub const OUTPUT_PERIOD_NS: u64 = 6_944_444;
-/// 1.5 x period (10.42 ms). An interval above it is a missed frame.
+/// 1.5 x period (10.42 ms) at 144 Hz. An interval above it is a missed frame.
 pub const MISSED_FRAME_NS: u64 = 10_416_667;
-/// 3 x period. An interval above it is a long missed frame.
+/// 3 x period at 144 Hz. An interval above it is a long missed frame.
 pub const LONG_MISS_NS: u64 = 20_833_333;
-/// Samples a probe holds: 40 s at 144 Hz.
+/// Samples a probe holds at 144 Hz: 40 s.
 pub const PROBE_CAPACITY: usize = 144 * 40;
+
+/// Frame thresholds derived from one output refresh rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameBudget {
+    pub refresh_hz: u32,
+    /// One output period.
+    pub period_ns: u64,
+    /// 1.5 x period. An interval above it is a missed frame.
+    pub missed_ns: u64,
+    /// 3 x period. An interval above it is a long missed frame.
+    pub long_miss_ns: u64,
+    /// Samples a probe holds: 40 s at this rate.
+    pub capacity: usize,
+}
+
+impl FrameBudget {
+    /// Budget for `hz`, which must be 1 to 1000.
+    pub fn from_hz(hz: u32) -> Result<Self, String> {
+        if hz == 0 || hz > MAX_REFRESH_HZ {
+            return Err(format!(
+                "{REFRESH_ENV} must be an integer from 1 to {MAX_REFRESH_HZ}, got \"{hz}\""
+            ));
+        }
+        let per = |n: u64| (n + u64::from(hz) / 2) / u64::from(hz);
+        Ok(Self {
+            refresh_hz: hz,
+            period_ns: per(1_000_000_000),
+            missed_ns: per(1_500_000_000),
+            long_miss_ns: per(3_000_000_000),
+            capacity: hz as usize * 40,
+        })
+    }
+
+    /// Budget from the value of [`REFRESH_ENV`]. `None` (unset) gives 144 Hz.
+    pub fn from_env_value(value: Option<&OsStr>) -> Result<Self, String> {
+        let Some(value) = value else {
+            return Self::from_hz(DEFAULT_REFRESH_HZ);
+        };
+        let bad = || {
+            format!(
+                "{REFRESH_ENV} must be an integer from 1 to {MAX_REFRESH_HZ}, got \"{}\"",
+                value.to_string_lossy()
+            )
+        };
+        let hz: u32 = value.to_str().ok_or_else(bad)?.parse().map_err(|_| bad())?;
+        Self::from_hz(hz).map_err(|_| bad())
+    }
+}
+
+impl Default for FrameBudget {
+    fn default() -> Self {
+        Self::from_hz(DEFAULT_REFRESH_HZ).expect("144 is in range")
+    }
+}
 
 const NS_PER_MS: f64 = 1_000_000.0;
 const BYTES_PER_MB: f64 = 1_000_000.0;
@@ -166,15 +228,15 @@ pub fn percentiles_ms(ns: &[u64]) -> Percentiles {
     }
 }
 
-/// Counts of intervals above 1.5 x period and above 3 x period.
-pub fn count_missed(intervals_ns: &[u64]) -> (u32, u32) {
+/// Counts of intervals above 1.5 x period and above 3 x period of `budget`.
+pub fn count_missed(intervals_ns: &[u64], budget: &FrameBudget) -> (u32, u32) {
     let mut missed = 0u32;
     let mut long = 0u32;
     for &ns in intervals_ns {
-        if ns > MISSED_FRAME_NS {
+        if ns > budget.missed_ns {
             missed += 1;
         }
-        if ns > LONG_MISS_NS {
+        if ns > budget.long_miss_ns {
             long += 1;
         }
     }
@@ -206,6 +268,8 @@ pub struct GpuReport {
 #[derive(Clone, Debug, Serialize)]
 pub struct BenchReport {
     pub scene: &'static str,
+    /// The output refresh rate the missed-frame counts were judged against.
+    pub refresh_hz: u32,
     pub frames: u64,
     pub frame_cpu_ms: Percentiles,
     pub missed_frames: u32,
@@ -291,6 +355,7 @@ mod tests {
     fn report() -> BenchReport {
         BenchReport {
             scene: "perf-cpu",
+            refresh_hz: 144,
             frames: 5_760,
             frame_cpu_ms: Percentiles {
                 p50: 0.5,
@@ -314,8 +379,48 @@ mod tests {
     #[test]
     fn count_missed_thresholds() {
         let intervals = [6_900_000, 6_900_000, 11 * MS, 25 * MS];
-        assert_eq!(count_missed(&intervals), (2, 1));
-        assert_eq!(count_missed(&[MISSED_FRAME_NS, LONG_MISS_NS]), (1, 0));
+        let b = FrameBudget::default();
+        assert_eq!(count_missed(&intervals, &b), (2, 1));
+        assert_eq!(count_missed(&[MISSED_FRAME_NS, LONG_MISS_NS], &b), (1, 0));
+    }
+
+    #[test]
+    fn frame_budget_144() {
+        let b = FrameBudget::from_hz(144).unwrap();
+        assert_eq!(b, FrameBudget::default());
+        assert_eq!(b.refresh_hz, 144);
+        assert_eq!(b.period_ns, OUTPUT_PERIOD_NS);
+        assert_eq!(b.missed_ns, MISSED_FRAME_NS);
+        assert_eq!(b.long_miss_ns, LONG_MISS_NS);
+        assert_eq!(b.capacity, PROBE_CAPACITY);
+    }
+
+    #[test]
+    fn frame_budget_60() {
+        let b = FrameBudget::from_hz(60).unwrap();
+        assert_eq!(b.period_ns, 16_666_667);
+        assert_eq!(b.missed_ns, 25_000_000);
+        assert_eq!(b.long_miss_ns, 50_000_000);
+        assert_eq!(b.capacity, 2400);
+        assert_eq!(
+            count_missed(&[25_000_000, 25_000_001, 50_000_001], &b),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn frame_budget_invalid() {
+        for bad in ["0", "1001", "abc", "", "-5", "60.5"] {
+            let err = FrameBudget::from_env_value(Some(OsStr::new(bad))).unwrap_err();
+            assert!(err.contains("TL_BENCH_REFRESH_HZ"), "{err}");
+        }
+        assert_eq!(
+            FrameBudget::from_env_value(None).unwrap(),
+            FrameBudget::default()
+        );
+        let b = FrameBudget::from_env_value(Some(OsStr::new("60"))).unwrap();
+        assert_eq!(b.refresh_hz, 60);
+        assert_eq!(FrameBudget::from_hz(1000).unwrap().refresh_hz, 1000);
     }
 
     #[test]
@@ -369,6 +474,7 @@ mod tests {
         let text = serde_json::to_string_pretty(&report()).unwrap();
         let expected = [
             "scene",
+            "refresh_hz",
             "frames",
             "frame_cpu_ms",
             "missed_frames",
@@ -395,6 +501,7 @@ mod tests {
         assert!(text.contains("\"bridge_latency_ms\": null"), "{text}");
         assert!(text.contains("\"probe_cpu_pct\": null"), "{text}");
         assert!(text.contains("\"gpu\": null"), "{text}");
+        assert!(text.contains("\"refresh_hz\": 144"), "{text}");
         assert_eq!(value["frame_cpu_ms"]["p99"], 1.5);
 
         let dir = tempfile::tempdir().unwrap();

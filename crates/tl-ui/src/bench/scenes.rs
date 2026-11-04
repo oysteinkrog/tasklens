@@ -33,7 +33,7 @@ use tracing::info;
 
 use super::engine::{BenchEngine, BenchFeed, DEV_MEMORY, DEV_PACKAGE, MEM_TOTAL_BYTES};
 use super::stats::{
-    BenchClocks, BenchReport, FrameProbe, LatencyPct, PROBE_CAPACITY, count_missed, percentiles_ms,
+    BenchClocks, BenchReport, FrameBudget, FrameProbe, LatencyPct, count_missed, percentiles_ms,
     process_cpu_pct, read_rss_pss_mb, write_json,
 };
 use super::synth::SEED;
@@ -141,6 +141,8 @@ pub struct BenchOptions {
     pub duration_s: u32,
     pub warmup_s: u32,
     pub json: Option<PathBuf>,
+    /// Frame thresholds from the output refresh rate.
+    pub budget: FrameBudget,
 }
 
 impl Default for BenchOptions {
@@ -149,6 +151,7 @@ impl Default for BenchOptions {
             duration_s: 30,
             warmup_s: 5,
             json: None,
+            budget: FrameBudget::default(),
         }
     }
 }
@@ -162,6 +165,7 @@ impl BenchOptions {
                 duration_s: 600,
                 warmup_s: 0,
                 json: None,
+                budget: FrameBudget::default(),
             },
             _ => Self::default(),
         }
@@ -612,7 +616,7 @@ async fn measure(
 
     // The probe arms `on_next_frame` every frame, so `static` runs without it, and `soak` too:
     // forced frames would hide the zed#64499 stall it looks for.
-    let probe = Rc::new(RefCell::new(FrameProbe::new(clocks, PROBE_CAPACITY)));
+    let probe = Rc::new(RefCell::new(FrameProbe::new(clocks, opts.budget.capacity)));
     if !scene.is_static() && !soak {
         let probe = Rc::clone(&probe);
         window
@@ -733,13 +737,14 @@ async fn measure(
             scene.as_str()
         )));
     }
-    let (missed, long_missed) = count_missed(intervals);
+    let (missed, long_missed) = count_missed(intervals, &opts.budget);
     let (rss_mb, pss_mb) = read_rss_pss_mb();
     let bridge_latency_ms = paint_log
         .filter(|_| bridge)
         .and_then(|log| bridge_latency(&log.records, engine));
     Ok(BenchReport {
         scene: scene.as_str(),
+        refresh_hz: opts.budget.refresh_hz,
         frames,
         frame_cpu_ms: percentiles_ms(probe.cpu_ns()),
         missed_frames: missed,
