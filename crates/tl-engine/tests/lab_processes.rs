@@ -39,7 +39,7 @@ use tl_model::devices::DeviceCatalog;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, MetricId, ProcessKey, SeriesId};
 use tl_model::process::{GroupRowKind, ProcessRecord};
-use tl_model::series::{Sample, SeriesView};
+use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::time::TimeNs;
@@ -942,6 +942,143 @@ fn cpu_group_history_only_sweep() {
     assert!(handle.is_finished(), "engine_root returned after cancel");
     drop(ui);
     fl.finish();
+}
+
+/// tasklens-nk2rl: the first switch from the 10 s history sweep to the By app view (process
+/// top) keeps the CPU baselines, so the sweep at the switch has a CPU window. Every `CPU_GROUP`
+/// band joins its last 10 s sample to its first 1 s sample, with no gap between them.
+#[test]
+fn cpu_group_first_switch_joins() {
+    const MS: u64 = 1_000_000;
+    let root = FixtureRoot::new(&["owner-desktop"]);
+    fs::create_dir_all(root.root().join("sys/fs/cgroup")).expect("create cgroup dir");
+    let mut fl = FakeLab::new();
+    CLOCK.with(|c| *c.borrow_mut() = Some(Arc::clone(&fl.clock)));
+    let (ep, ui) = fake_sources::root_endpoints(root.config(), vec![lab_processes_spec()]);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        engine_root(cx, ep).await;
+    });
+    ui.demand_tx
+        .send(history_demand())
+        .expect("watch has receivers");
+
+    // The load of `cpu_group_history_only_sweep`: busy CPU is 33% of the 32 CPUs.
+    let one_pct = rustix::param::clock_ticks_per_second() * 32 / 100;
+    let stat_delta = [640, 0, 320, 2144, 0, 32, 64, 0];
+    let run_to = |fl: &mut FakeLab, end_ms: u64| {
+        while fl.now_ms() < end_ms {
+            fl.advance(Duration::from_millis(100));
+            if fl.now_ms() % 1_000 == 500 {
+                add_pid_ticks(&root, 1, one_pct, 0);
+                add_pid_ticks(&root, 15, 0, one_pct / 2);
+                add_stat_ticks(&root, stat_delta);
+            }
+        }
+    };
+
+    // History sweeps at 0, 10 and 20 s, then By app on the Performance page.
+    run_to(&mut fl, 25_000);
+    ui.demand_tx
+        .send(Demand {
+            device_history: true,
+            any_surface_visible: true,
+            process_top: true,
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    run_to(&mut fl, 28_000);
+
+    let snap = ui.latest.load_full();
+    assert!(!snap.system.cpu.groups.is_empty(), "no CPU band");
+    let mut first_new_sum = 0.0;
+    for band in snap.system.cpu.groups.iter() {
+        let id = SeriesId {
+            device: band.device,
+            metric: MetricId::CPU_GROUP,
+        };
+        let view = snap.series.get(id).expect("a published band has a series");
+        let times: Vec<u64> = view.samples.iter().map(|s| s.t_ns / MS).collect();
+        for (i, s) in view.samples.iter().enumerate() {
+            assert!(
+                s.is_valid(),
+                "band {} is a gap at {} ms: {times:?}",
+                band.key,
+                s.t_ns / MS
+            );
+            assert!(
+                i == 0 || !s.flags.contains(SampleFlags::GAP_BEFORE),
+                "band {} breaks at {} ms: {times:?}",
+                band.key,
+                s.t_ns / MS
+            );
+        }
+        let first_new = view
+            .samples
+            .iter()
+            .find(|s| s.t_ns >= 25_000 * MS)
+            .unwrap_or_else(|| panic!("band {} has no sample after the switch", band.key));
+        assert!(
+            first_new.t_ns <= 25_100 * MS,
+            "band {}: first 1 s sample at {} ms",
+            band.key,
+            first_new.t_ns / MS
+        );
+        first_new_sum += f64::from(first_new.value);
+        assert_eq!(view.period_ns, 1_000_000_000, "band {}", band.key);
+    }
+    assert!(
+        (first_new_sum - 33.0).abs() <= 1e-3,
+        "the bands of the first 1 s sample sum to {first_new_sum}, want 33"
+    );
+
+    handle.abort();
+    fl.advance(Duration::from_millis(10));
+    assert!(handle.is_finished(), "engine_root returned after cancel");
+    drop(ui);
+    fl.finish();
+}
+
+/// ADR-008: a change of the update interval still forgets the CPU baselines. The sweep already
+/// scheduled runs at the old rate with a window; the next turn sees 2000 ms and sweeps at once
+/// with no window; the sweep 2 s later has one again.
+#[test]
+fn interval_change_still_resets() {
+    let root = FixtureRoot::new(&["owner-desktop"]);
+    fs::create_dir_all(root.root().join("sys/fs/cgroup")).expect("create cgroup dir");
+    let mut rig = Rig::start(&root, table_demand(), 1000);
+    let one_pct = rustix::param::clock_ticks_per_second() * 32 / 100;
+    let stat_delta = [640, 0, 320, 2144, 0, 32, 64, 0];
+    let run_to = |rig: &mut Rig, end_ms: u64| {
+        while rig.fl.now_ms() < end_ms {
+            rig.fl.advance(Duration::from_millis(100));
+            if rig.fl.now_ms() % 1_000 == 500 {
+                add_pid_ticks(&root, 1, one_pct, 0);
+                add_stat_ticks(&root, stat_delta);
+            }
+            rig.collect();
+        }
+    };
+
+    run_to(&mut rig, 3_200);
+    assert_eq!(rig.times(), [0, 1_000, 2_000, 3_000]);
+    assert!(rig.sweeps[1..].iter().all(|(_, s)| s.cpu.is_some()));
+    let changed = rig.sweeps.len();
+    rig.settings
+        .send_modify(|s| s.interval_ms = 2_000)
+        .expect("watch has receivers");
+    run_to(&mut rig, 6_500);
+
+    let after: Vec<(u64, bool)> = rig.sweeps[changed..]
+        .iter()
+        .map(|(t, s)| (*t, s.cpu.is_some()))
+        .collect();
+    assert_eq!(
+        after,
+        [(4_000, true), (4_000, false), (6_000, true)],
+        "(ms, has a CPU window) of each sweep after the change"
+    );
+    rig.finish();
 }
 
 /// tasklens-8q0.42: through the real sweep, a unit row whose unit cgroup's `cgroup.events` says

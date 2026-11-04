@@ -155,6 +155,8 @@ pub struct ProcessesSource {
     wants: Cell<SweepWants>,
     /// `history_only`, set by `period`: a demand change ends the 10 s wait at once.
     history_only: Cell<bool>,
+    /// Set by `period`: `history_only` changed in this call.
+    mode_switched: Cell<bool>,
     /// `Demand.detail_keys`, set by `period`: the visible rows whose P2 columns the sweep reads.
     detail_keys: RefCell<Arc<[ProcessKey]>>,
     /// The sampler's clock, also used for the helper's I/O rates.
@@ -233,6 +235,7 @@ impl ProcessesSource {
             cfg,
             wants: Cell::new(SweepWants::default()),
             history_only: Cell::new(false),
+            mode_switched: Cell::new(false),
             detail_keys: RefCell::new(Arc::from([])),
             clock: real_clock,
             helper: None,
@@ -308,7 +311,9 @@ impl Source for ProcessesSource {
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         self.wants.set(sweep_wants(d, s));
         self.detail_keys.replace(Arc::clone(&d.detail_keys));
-        self.history_only.set(history_only(d, s));
+        let only = history_only(d, s);
+        self.mode_switched.set(only != self.history_only.get());
+        self.history_only.set(only);
         processes_period(d, s)
     }
 
@@ -394,6 +399,16 @@ impl Source for ProcessesSource {
 
     fn reset_baselines(&mut self) {
         self.sampler.reset_baselines();
+    }
+
+    /// The switch between the 10 s history sweep and the demanded rate keeps the CPU and
+    /// cgroup baselines, so the first sweep at the new rate has a CPU window and the By app
+    /// bands join (tasklens-m4fs2, tasklens-nk2rl, D-042). `set_mem_only` already clears the
+    /// app baselines. Any other period change forgets them (ADR-008).
+    fn period_changed(&mut self) {
+        if !self.mode_switched.get() {
+            self.reset_baselines();
+        }
     }
 
     /// Opening the Processes tab must not wait for the next 10 s history sweep.

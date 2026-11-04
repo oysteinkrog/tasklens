@@ -264,9 +264,14 @@ pub trait Source: Send + 'static {
     fn sample(self) -> (Self, SourceUpdate)
     where
         Self: Sized;
-    /// Called when `reset_generation` rose or the period changed. The next sample reports
-    /// rates as `WarmingUp` (ADR-008).
+    /// Called when `reset_generation` rose, and through `period_changed` when the period
+    /// changed. The next sample reports rates as `WarmingUp` (ADR-008).
     fn reset_baselines(&mut self) {}
+    /// Called when the period changed from one value to another. The default forgets the
+    /// baselines (ADR-008).
+    fn period_changed(&mut self) {
+        self.reset_baselines();
+    }
     /// A forwarded command. Returns true to sample at once.
     fn command(&mut self, _cmd: &WorkerCommand) -> bool {
         false
@@ -336,7 +341,7 @@ pub async fn run<S: Source>(cx: Cx, mut io: WorkerIo, mut src: S) -> Outcome<(),
         );
         if next != period {
             if period.is_some() && next.is_some() {
-                src.reset_baselines();
+                src.period_changed();
             }
             period = next;
             iv = new_interval(&cx, period);
