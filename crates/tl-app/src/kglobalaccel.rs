@@ -198,13 +198,14 @@ fn apply(kga: &impl Kga, on: bool) -> Result<(), KgaError> {
 }
 
 /// Puts the bindings read before a failed change to `on` back. Best effort: both steps run
-/// even when the first one fails. The action that lost its keys in the change gets them back
-/// first, so the key is never left with no owner.
+/// even when the first one fails. The action that may have taken the key in the change lets
+/// go of it first, then the old owner gets it back, so two grabs never clash (the same order
+/// as `apply`).
 fn roll_back(kga: &impl Kga, on: bool, (tl, sm): (Vec<KeySeq>, Vec<KeySeq>)) {
     let steps = if on {
-        [kga.set_system_monitor(sm), kga.set_tasklens(tl)]
-    } else {
         [kga.set_tasklens(tl), kga.set_system_monitor(sm)]
+    } else {
+        [kga.set_system_monitor(sm), kga.set_tasklens(tl)]
     };
     for e in steps.into_iter().filter_map(Result::err) {
         warn!(target: "tasklens::shortcut", on, "putting the old Meta+Esc bindings back failed: {e}");
