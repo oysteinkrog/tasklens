@@ -186,8 +186,10 @@ impl ProcessState {
         self.live_pids.reserve(sweep.records.len());
 
         let aligned = sweep.extras.len() == sweep.records.len();
+        // The low-memory sweep sends no extras on purpose (workers/lowmem.rs); any other
+        // length is a producer bug.
         debug_assert!(
-            aligned,
+            aligned || sweep.extras.is_empty(),
             "ProcessSweep.extras is not index aligned with records"
         );
         self.extras_complete = aligned;
@@ -880,6 +882,19 @@ mod tests {
             assert_eq!(e.start_boot_ns, r.key.start_ticks);
         }
         assert!(snap.records.windows(2).all(|w| w[0].key < w[1].key));
+    }
+
+    /// The low-memory sweep sends records with no extras; the reducer takes it without
+    /// tripping the alignment check (a debug panic before 1.5.1).
+    #[test]
+    fn low_memory_sweep_without_extras_is_accepted() {
+        let mut state = ProcessState::new();
+        let mut s = sweep(&[key(10, 5), key(20, 3)], 1_000 * MS);
+        s.extras.clear();
+        s.extras_p2.clear();
+        state.apply_sweep(s, 1_000 * MS, INTERVAL_MS, None);
+        let snap = state.publish(Coverage::default(), (0, 1_000 * MS)).unwrap();
+        assert_eq!(snap.records.len(), 2);
     }
 
     #[test]
