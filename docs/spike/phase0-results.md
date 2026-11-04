@@ -1401,7 +1401,58 @@ Not run yet.
 
 ## Collection cost
 
-Not run yet.
+The live collection cost measurement is not run yet. The fixture sweep gate is below.
+
+### Sweep of 2,000 processes on the fixture root (tasklens-yms.26, 2026-11-04)
+
+Result: PASS. The median steady sweep of the 2,000-process fixture root was 19.19, 19.36 and
+19.27 ms in three runs. The R-286 gate is at most 20 ms (it replaced the 15 ms of the bead
+text). Each run is 50 sweeps. All numbers are from a hidden nested KWin session and a fixture
+root on btrfs, so they are close to, but not equal to, a sweep of the live `/proc`.
+
+#### Setup
+
+- Office PC (`oystein-office-primary`), AMD Ryzen 9 5950X, 32 threads. The fixture root and
+  `target/` are on btrfs.
+- Hidden nested KWin started by `/var/tmp/claude/tl-smoke/harness.sh start yms26`. Each
+  command ran with that session's env and its own `XDG_*` folders. The sweep opens no window.
+- Build: release (the `bench` profile for Criterion) at `9fbf803aa`. Since the 2026-10-05
+  runs, the sweep gained the `/proc/stat` CPU window, per-cgroup `cpu.stat` reads and Wine
+  prefix reads. `9fbf803aa` copies the fixture `proc/stat` into the scaled root, so the bench
+  now pays the `cpu` line read that a real sweep pays.
+- Scaled root: the `owner-desktop` pid directories plus replicas, exactly 2,000. The fixture
+  has no `sys/fs/cgroup` tree, so the root has an empty cgroup folder and no `cpu.stat`
+  reads. This understates the live cost.
+- Gate: `cargo test -p tl-collect --release --test fixture_process sweep_2000_under_gate --
+  --ignored`. The median, min and max came from a temporary copy of the same 50-sweep loop
+  that prints them, run right after each gate run (not committed).
+- Each run started only when the 1-minute load average was at most 8.
+
+#### Runs
+
+| Run | Start (local) | Load at start (1, 5, 15 min) | Gate test | Median (nested KWin, fixture root on btrfs) | Min | Max |
+|---|---|---|---|---|---|---|
+| 1 | 22:33:26 | 5.03, 6.54, 8.15 | ok | 19.19 ms | 18.80 ms | 20.48 ms |
+| 2 | 22:33:31 | 4.87, 6.48, 8.12 | ok | 19.36 ms | 18.97 ms | 20.56 ms |
+| 3 | 22:33:37 | 4.88, 6.45, 8.10 | ok | 19.27 ms | 19.00 ms | 22.26 ms |
+
+#### Criterion
+
+`cargo bench -p tl-collect --bench sweep`, started 22:33:46 at load 4.50, 6.32, 8.04.
+
+| Bench | Mean [95% interval] (nested KWin, fixture root on btrfs) | Gated |
+|---|---|---|
+| `sweep/2000_steady` | 18.78 ms [18.68, 18.88] | no, reported |
+| `sweep/2000_with_fd_count` | 25.04 ms [24.95, 25.14] | no, reported |
+
+#### Reading
+
+- The margin is small: about 0.7 ms under the gate. On 2026-10-05, at load 8 to 10, the
+  medians were 23.9 ms, under 20 ms and 22.4 ms, and Criterion read 20.33 ms. Load is the
+  likely cause of most of that gap (inferred, not measured).
+- The gate holds on the fixture root only. Live `/proc` costs more per process (2026-10-05:
+  about 42 to 47 ms at 2,000 processes, scaled from 997). U-10 is settled by R-286, and the
+  binding product gate stays ADR-014's 3.5% of one core.
 
 ## Decision
 
