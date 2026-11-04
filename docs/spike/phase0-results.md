@@ -665,6 +665,206 @@ about 26% of samples, `WindowTextSystem::shape_text` closure 1.51%, the `tasklen
 and libc 26.08% of all samples. Data: `/var/tmp/claude/wlf18/prof.data` and `table-2000-prof.json`.
 The `perf-cpu` and `static` profiles are in the two sections below.
 
+### table-2000 cost and memory (tasklens-wlf.41, 2026-11-04)
+
+Result: the gate still fails, and this section only measures. Every number is from a hidden
+nested KWin session at 60 Hz, not the 144 Hz screen.
+
+- CPU per frame: no one bucket dominates. Row layout is the largest: 1.27 ms of the 4.30 ms
+  p50 (29.5%), most of it taffy, and it includes text measuring. Then GPUI element work, GPU
+  submit (0.66 ms), row paint (0.63 ms) and the row build callback (0.36 ms). Work outside the
+  table takes 1.74 ms per frame on its own (measured share, hidden nested KWin, 60 Hz).
+- RSS: the 2,000-row table adds about 0.7 MB. `table-2000` and `history-scrub` both hold
+  237 to 238 MB (hidden nested KWin, 60 Hz). Most of it is library code pages: the NVIDIA
+  driver 71.7 MB, the tasklens binary 49.7 MB, and 34.9 MB of Mesa that GPUI's GL backend
+  loads. Fonts are 6.8 MB. UI-PRC-023 rule 8 does not hold on this machine.
+- GPUI: GPU submit, scene build, element bookkeeping and the GL backend are GPUI code, which
+  ADR-014 rule 3 forbids patching.
+
+#### Setup
+
+- Session: a copy of the wlf.18 harness (`kwin_wayland --virtual`, 1920 x 1200, `--scale 1.1`,
+  60 Hz), app on the nested Wayland socket with `TL_BENCH_REFRESH_HZ=60` and private `XDG_*`
+  folders, as in the wlf.18 gate runs. Office PC, Ryzen 9 5950X, RTX 5070 Ti, NVIDIA
+  615.78.08. Each run started only when the 1-minute load was below 8, under the bench slot
+  lock. HEAD `c827d807f`; no crate has changed since `e57374626`.
+- Profile build: `cargo build --locked --profile profiling -p tl-app --features bench`, then
+  only the binary relinked with
+  `cargo rustc --locked --profile profiling -p tl-app --bin tasklens --features bench -- -C link-arg=-Wl,-z,separate-loadable-segments`.
+- Why the relink: with the normal link, perf's libdw unwinder failed on 2,934 of 4,412
+  samples (67%) with "address range overlaps an existing module". The mold-linked binary's
+  code segment sits 0x1000 above its file offset (offset 0x175a578, address 0x175b578). perf
+  computes a module base from each mapping as start minus file offset, so the code mapping
+  gives a base 0x1000 off from the first mapping, and libdw refuses the second module. With
+  page-aligned segments, offset equals address and no sample failed (measured). The same
+  linker and perf most likely explain why the wlf.27 and wlf.28 stacks did not unwind
+  (inferred, not re-tested).
+- Profile: `perf record -e cpu-clock:u -F 499 --call-graph dwarf,65528`, the largest user
+  stack copy perf allows. 46% of stacks reach `main`. A first profile with a 16 KB copy
+  (22% reach `main`) gave the same shares by kind within 1.3 points.
+- RSS runs: `target/perf/tasklens` (built 20:05 from the same code), no perf. The script
+  copied `/proc/<pid>/smaps` and `/proc/<pid>/status` 10 s and 30 s after launch; the two
+  copies differ by less than 0.1 MB in every class.
+- Scripts and data: `/var/tmp/claude/wlf41/` (`prof.data`, `script.txt`, `split2.py`,
+  `smaps.py`, the `*.smaps` and `*.json` files).
+
+#### Runs
+
+All values are hidden nested KWin, 60 Hz.
+
+| Run | Start | Load at start (1, 5, 15 min) | Frame CPU p50 | p99 | Process CPU | RSS |
+|---|---|---|---|---|---|---|
+| Profile, normal link (stacks failed) | 21:15:14 | 7.52, 14.39, 20.67 | 3.97 ms | 6.62 ms | 25.22% | 301.54 MB |
+| Profile, 16 KB stacks | 21:36:51 | 6.48, 15.24, 19.44 | 4.10 ms | 5.95 ms | 25.20% | 236.84 MB |
+| Profile, 64 KB stacks (used below) | 21:38:37 | 4.28, 11.77, 17.73 | 4.74 ms | 9.10 ms | 31.16% | 237.96 MB |
+| `table-2000`, first launch of this binary | 21:15:54 | 7.34, 13.45, 20.09 | 5.00 ms | 9.13 ms | 32.05% | 302.48 MB |
+| `static` | 21:36:15 | 7.02, 16.39, 19.95 | | | 15.80% | 279.14 MB |
+| `history-scrub` | 21:37:37 | 4.91, 13.56, 18.67 | 4.78 ms | 6.63 ms | 29.69% | 237.35 MB |
+| `table-2000`, warm shader cache | 21:39:15 | 6.37, 11.50, 17.42 | 4.27 ms | 5.87 ms | 26.23% | 238.00 MB |
+| `table-2000`, NVIDIA Vulkan driver only | 21:40:33 | 5.18, 9.98, 16.40 | 3.70 ms | 5.59 ms | 23.36% | 233.88 MB |
+| `table-2000`, NVIDIA Vulkan and EGL only | 21:41:44 | 5.68, 9.07, 15.61 | 4.10 ms | 7.18 ms | 25.99% | 199.19 MB |
+
+Missed frames were 0 in every `table-2000` run. The 64 KB profile costs CPU itself (p50
+4.74 ms against the 4.30 ms gate median), so the ms columns below apply its sample shares
+to the gate median p50 of 4.30 ms, not to its own p50.
+
+#### Frame time by region
+
+Region is where on the stack the sample sits. Shares are of 5,302 main-thread samples in
+the 64 KB profile; ms is the share times 4.30 ms (hidden nested KWin, 60 Hz). The budget
+column is UI-PRC-023 (`docs/ui/processes.md`, 144 Hz, 2.0 ms target).
+
+| Region | Share | ms per frame | UI-PRC-023 budget |
+|---|---|---|---|
+| Row build: the range callback (`build_rows`, `build_row`, cell builders) | 8.4% | 0.36 | 0.6 ms |
+| Row layout: `request_layout` and taffy for each row, text measuring included | 29.5% | 1.27 | 0.5 ms |
+| Row prepaint (hitboxes) and dropping last frame's elements | 6.2% | 0.27 | none |
+| Row paint | 14.7% | 0.63 | 0.4 ms |
+| Header | 0.7% | 0.03 | 0.1 ms |
+| Selection, hover, demand hashing | not separated | | 0.1 ms |
+| GPU submit (`render_frame`, wgpu, NVIDIA driver) | 15.3% | 0.66 | none |
+| Minigraph panel (cached cards replayed) | 6.1% | 0.26 | none |
+| Scene finish (primitive sort) | 2.2% | 0.09 | none |
+| Rest of the window, event loop and bench driver | 17.0% | 0.73 | none |
+
+Inside row layout: taffy `compute_layout` with its measure callbacks is 24.8% (1.07 ms) and
+element `request_layout` is 4.6% (0.20 ms). Inside row paint: glyph paint (raster bounds,
+atlas lookup, sprites) 5.7% (0.25 ms), `BoundsTree::insert` 4.5% (0.19 ms), div background
+quads 3.5% (0.15 ms), `Scene::insert_primitive` 0.8%, our `CellText::paint` 0.2%.
+
+The 16 KB profile put 6.6 points more in "rest of the window" and fewer in the row regions,
+because its stacks stopped before the `UniformList` frame more often. Some row work may
+still sit in the 17.0% (inferred), so 0.73 ms is an upper bound for that region.
+
+#### Frame time by kind
+
+Kind is what the innermost known frame does; a libc leaf takes its caller's kind.
+
+| Kind | Share, 64 KB | Share, 16 KB | ms per frame (64 KB share) |
+|---|---|---|---|
+| GPUI elements (div, style, hitbox, arena, element state) | 25.9% | 24.6% | 1.11 |
+| taffy layout | 23.1% | 23.2% | 0.99 |
+| Text (shaping, line layout, glyph paint, atlas) | 15.9% | 15.2% | 0.68 |
+| GPU submit | 15.2% | 16.4% | 0.65 |
+| Scene build (`BoundsTree`, `insert_primitive`, `replay`, finish) | 12.2% | 13.0% | 0.52 |
+| Our code (`tl_ui*`, `CellText`) | 7.8% | 7.4% | 0.34 |
+
+25% of samples end in libc. Their largest callers are `wgpu_core` `Queue::write_buffer`
+(6.2% of all samples, the GPU upload) and taffy tree `clear` and `new_with_children`
+(2.6%). The single large memcpy from the `perf-cpu` profile does not appear here.
+
+#### Reading
+
+- Text is measured in layout every frame. `CellText` (`crates/tl-ui-table/src/table/cells.rs:591`)
+  wraps GPUI's `StyledText`, whose `request_layout` adds a measured taffy leaf, so taffy calls
+  back into text layout for each visible cell in each frame (8.8% of samples, 0.38 ms).
+  UI-PRC-023 assumes "cells use fixed w and h so taffy does no measuring"; that does not hold
+  for the current cell element (measured from the stacks, cause read from the code).
+- The minigraph panel's cards are cached views, but each frame replays their primitives into
+  the new scene (`Scene::replay`, then `BoundsTree::insert`): 4.9% of samples, 0.21 ms.
+- The shares are averages over all frames. Which work makes the slowest 1% of frames (p99
+  6.25 ms in the gate) is not separated here; a 1 Hz re-sort frame is a likely candidate
+  (not measured).
+
+#### Levers for the CPU gate
+
+- The largest bucket is row layout (1.27 ms). UI-PRC-023's third fallback step, a `canvas`
+  row painter with `ShapedLine::paint` per cell and no per-cell `div`, removes taffy and the
+  text measure from the row path. It would also cut the per-cell element build and many
+  `BoundsTree` inserts (inferred). It uses GPUI's public `canvas`, so it needs no GPUI change.
+  ADR-014 rule 2 also allows "text cache fixes", which aim at the 0.68 ms of text.
+- Zebra: the zebra is already the row fill, one quad per row (`row_fill`,
+  `crates/tl-ui-table/src/table/tree_core.rs:508`). All div background quads in the rows
+  cost 0.15 ms, so dropping zebra quads or merging heat quads (one bg per cell,
+  `tree_core.rs:759-762`) can save at most part of 0.15 ms.
+- Column culling (UI-PRC-023 rule 7) is not built: `build_row` loops over every visible column
+  (`tree_core.rs:692`). With 10 columns in a 1600 px window all of them are on screen, so it
+  saves nothing in this scene (inferred).
+- The fallback order conflicts. tasklens-pdu.31 says: column culling, heat merge, zebra.
+  UI-PRC-023 (`docs/ui/processes.md:1336-1339`) says: zebra, heat merge, canvas row painter.
+  This section does not pick one. By measured size, only the canvas row painter aims at more
+  than 0.15 ms.
+- GPUI code holds GPU submit (0.66 ms), scene build (0.52 ms), the element bookkeeping
+  (1.11 ms) and taffy itself. ADR-014 rule 3 forbids patching them; they shrink only when the
+  table hands GPUI fewer elements and primitives.
+- The work outside the table (GPU submit 0.66, minigraph panel 0.26, scene finish 0.09, rest of
+  the window 0.73) adds up to 1.74 ms at p50. If a canvas painter removed all of row layout and
+  row build (1.63 ms), p50 would be about 2.7 ms, against a p99 gate of 2.0 ms (inferred,
+  simple subtraction). So the in-GPUI fallback alone most likely does not pass this gate, and
+  the ADR-014 rule 3 decision comes up for it.
+
+#### RSS by mapping
+
+MB as the bench counts them (kB x 1024 / 10^6), from the 30 s copy of `smaps` and `status`
+(hidden nested KWin, 60 Hz).
+
+| Class | `table-2000` warm | `history-scrub` | `static` | `table-2000` first launch | `table-2000`, NVIDIA Vulkan and EGL only |
+|---|---|---|---|---|---|
+| NVIDIA shader compiler (`libnvidia-gpucomp`, `-rtcore`, `-glvkspirv`) | 32.1 | 32.1 | 32.1 | 82.8 | 32.1 |
+| Other NVIDIA libraries (`glcore`, `eglcore`, GLX, EGL) | 26.2 | 26.2 | 26.2 | 25.9 | 26.2 |
+| `/dev/nvidia*` mappings | 13.4 | 13.4 | 13.9 | 13.4 | 13.4 |
+| The tasklens binary | 49.7 | 50.0 | 51.8 | 48.9 | 49.1 |
+| Mesa and what it loads (`libLLVM` 27.1, `libgallium` 3.1, `libvulkan_lvp` 2.8, others) | 34.9 | 34.9 | 34.8 | 34.9 | 0.2 |
+| Other shared libraries | 10.0 | 10.0 | 10.0 | 9.9 | 7.5 |
+| `[heap]` | 34.6 | 34.8 | 81.3 | 36.4 | 34.5 |
+| Other anonymous memory | 16.2 | 14.7 | 15.4 | 29.2 | 15.4 |
+| Font files | 6.8 | 7.0 | 6.5 | 7.0 | 6.8 |
+| Stacks and the rest | 0.4 | 0.4 | 0.5 | 0.4 | 0.4 |
+| Shared memory in VmRSS but in no `smaps` line | 13.7 | 13.7 | 14.2 | 13.7 | 13.7 |
+| VmRSS at 30 s | 238.00 | 237.28 | 286.67 | 302.52 | 199.19 |
+| Bench `rss_mb` at the end | 238.00 | 237.35 | 279.14 | 302.48 | 199.19 |
+
+- The table: `table-2000` and `history-scrub` differ by 0.72 MB at 30 s. The heap is the same
+  (34.6 against 34.8 MB), so 2,000 row models and the text cache are small, as rule 8 expects.
+  The scenes differ in more than the table, so 0.7 MB is an estimate (inferred).
+- Rule 8 says the RSS gate "is dominated by GPU buffers and fonts". Measured: fonts are
+  6.8 MB. GPU buffers live in video memory on this card; RSS sees only the driver's mappings
+  (13.4 MB, plus probably the 13.7 MB of shared memory, inferred). 158.6 MB of the 238 MB is
+  file-backed library and binary code (`RssFile`).
+- Mesa: GPUI creates its wgpu instance with `Backends::VULKAN | Backends::GL`
+  (`gpui-pre-wgpu-0.3.7/src/wgpu_context.rs:445`). The GL backend starts EGL, and glvnd loads
+  every EGL vendor, Mesa's too, which loads `libgallium` and `libLLVM`. With only the NVIDIA
+  Vulkan driver (`VK_LOADER_DRIVERS_SELECT=*nvidia*`), RSS was 233.88 MB and `libLLVM` was still
+  mapped. With the NVIDIA EGL vendor as well
+  (`__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json`), RSS was
+  199.19 MB, 38.8 MB less (measured). Turning the GL backend off is a GPUI change. Setting the
+  two variables in the launcher is a packaging change. Both are owner decisions, and 199 MB
+  still misses the 150 MB gate.
+- First launch: the first run of a binary with an empty NVIDIA shader cache read 302.5 MB, 64.5
+  MB more than the warm run. The driver compiled the shaders and paged in its compiler
+  (`libnvidia-gpucomp` 64 MB instead of 29 MB). The cache lives in
+  `$XDG_CACHE_HOME/nvidia/GLCache` with one entry per executable: two entries, written at
+  21:15:15 and 21:15:55, the first launch of each binary. This explains the 301.54 MB of the
+  first profiled run (inferred). A gate run right after a new build in a fresh profile can read
+  about 300 MB for the same reason.
+- `static` holds 46.7 MB more heap than `table-2000` (81.3 against 34.6 MB). That scene is not
+  gated on RSS, and this bead did not look into it.
+- Earlier readings: 203.45 MB on 2026-10-07 (release build, owner screen). The wlf.18
+  `history-scrub` runs read 173.93, 113.50 and 97.28 MB; that spread is not explained here.
+- None of the ADR-014 rule 2 levers shrinks library code pages, so they do not reach the RSS
+  gate. What remains is an owner decision: a GPUI change, a launcher variable, or a different
+  gate measure. PSS was 156.08 MB in the warm run, against 238.00 MB RSS.
+
 ### Static scene idle CPU (tasklens-wlf.27, 2026-11-04)
 
 Result: FAIL. The static scene used a median 13.27% process CPU of one core over 30 s
