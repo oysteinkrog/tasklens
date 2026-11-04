@@ -123,6 +123,7 @@ trait Kga {
     fn set_tasklens(&self, keys: Vec<KeySeq>) -> Result<(), KgaError>;
     fn tasklens_keys(&self) -> Result<Vec<KeySeq>, KgaError>;
     fn set_system_monitor(&self, keys: Vec<KeySeq>) -> Result<(), KgaError>;
+    fn system_monitor_keys(&self) -> Result<Vec<KeySeq>, KgaError>;
     fn system_monitor_defaults(&self) -> Result<Vec<KeySeq>, KgaError>;
 }
 
@@ -149,6 +150,10 @@ impl Kga for Bus {
         call(&self.0, "setForeignShortcutKeys", &(sm, keys)).map(|_| ())
     }
 
+    fn system_monitor_keys(&self) -> Result<Vec<KeySeq>, KgaError> {
+        reply(call(&self.0, "shortcutKeys", &(system_monitor_id(),))?)
+    }
+
     fn system_monitor_defaults(&self) -> Result<Vec<KeySeq>, KgaError> {
         reply(call(
             &self.0,
@@ -160,6 +165,8 @@ impl Kga for Bus {
 
 fn set_on(kga: &impl Kga, on: bool, rc_file: &Path) -> Result<Applied, KgaError> {
     kga.register_tasklens()?;
+    // The exact bindings before the change, so a failure restores them (custom keys included).
+    let before = (kga.tasklens_keys()?, kga.system_monitor_keys()?);
     let result = apply(kga, on)
         .and_then(|()| tasklens_bound(kga))
         .and_then(|bound| {
@@ -170,9 +177,9 @@ fn set_on(kga: &impl Kga, on: bool, rc_file: &Path) -> Result<Applied, KgaError>
             rc_fallback(rc_file, on).map(|()| Applied::NeedsRelogin)
         });
     if result.is_err() {
-        // The caller keeps the old state, so the bindings go back to it. Otherwise a failed
-        // "on" would leave Meta+Esc with no action at all.
-        roll_back(kga, !on);
+        // The caller keeps the old state, so the bindings go back to what they were. Otherwise
+        // a failed "on" would leave Meta+Esc with no action at all.
+        roll_back(kga, on, before);
     }
     result
 }
@@ -190,16 +197,14 @@ fn apply(kga: &impl Kga, on: bool) -> Result<(), KgaError> {
     }
 }
 
-/// Puts the bindings of state `on` back. Best effort: both steps run even when the first one
-/// fails, and the step that gives the key an owner runs first.
-fn roll_back(kga: &impl Kga, on: bool) {
+/// Puts the bindings read before a failed change to `on` back. Best effort: both steps run
+/// even when the first one fails. The action that lost its keys in the change gets them back
+/// first, so the key is never left with no owner.
+fn roll_back(kga: &impl Kga, on: bool, (tl, sm): (Vec<KeySeq>, Vec<KeySeq>)) {
     let steps = if on {
-        [
-            kga.set_tasklens(vec![key_seq(META_ESC)]),
-            kga.set_system_monitor(Vec::new()),
-        ]
+        [kga.set_system_monitor(sm), kga.set_tasklens(tl)]
     } else {
-        [restore_system_monitor(kga), kga.set_tasklens(Vec::new())]
+        [kga.set_tasklens(tl), kga.set_system_monitor(sm)]
     };
     for e in steps.into_iter().filter_map(Result::err) {
         warn!(target: "tasklens::shortcut", on, "putting the old Meta+Esc bindings back failed: {e}");
@@ -587,6 +592,9 @@ _launch=Meta+Esc\nfoo=bar\n\n[b]\n_launch=keep\n";
             *self.sm.borrow_mut() = keys;
             Ok(())
         }
+        fn system_monitor_keys(&self) -> Result<Vec<KeySeq>, KgaError> {
+            Ok(self.sm.borrow().clone())
+        }
         fn system_monitor_defaults(&self) -> Result<Vec<KeySeq>, KgaError> {
             Ok(vec![key_seq(META_ESC)])
         }
@@ -658,5 +666,19 @@ _launch=Meta+Esc\nfoo=bar\n\n[b]\n_launch=keep\n";
         assert!(set_on(&kga, false, &rc).is_err());
         assert_eq!(*kga.tl.borrow(), [key_seq(META_ESC)]);
         assert!(kga.sm.borrow().is_empty(), "only one action holds Meta+Esc");
+    }
+
+    #[test]
+    fn failed_on_restores_custom_system_monitor_keys() {
+        // The user moved System Monitor to another key; a failed "on" must keep that key.
+        let custom = key_seq(0x1100_0030); // Meta+F1 (Qt::META | Qt::Key_F1)
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join("kglobalshortcutsrc");
+        let kga = Fake::new(true);
+        *kga.sm.borrow_mut() = vec![custom.clone()];
+        kga.fail_tasklens.set(true);
+        assert!(set_on(&kga, true, &rc).is_err());
+        assert_eq!(*kga.sm.borrow(), [custom], "the custom key, not the default");
+        assert!(kga.tl.borrow().is_empty());
     }
 }
