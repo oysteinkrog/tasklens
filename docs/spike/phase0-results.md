@@ -4,7 +4,37 @@ E01 owns this file. Each section records one measurement run.
 
 ## Machine and build
 
-Not run yet.
+Run record: tasklens-wlf.18, 2026-11-04. Numbers in this file from this bead come from a hidden
+nested KWin session, never from the real screen (leader decision, 2026-11-04).
+
+- Kernel: 7.3.0-4-cachyos (`uname -r`).
+- KWin: 6.8.2 (`kwin_wayland --version`). `plasmashell --version` printed nothing in this lane.
+- NVIDIA driver: NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  615.78.08.
+- GPU: NVIDIA GeForce RTX 5070 Ti.
+- Monitors on the owner desktop: three DisplayPort outputs, all with a preferred mode of
+  1920x1200 (`/sys/class/drm`). This lane cannot read the real session, so the 144 Hz output and
+  the 110% scale of the fixture are not measured here. The 144 Hz numbers on the owner's screen
+  stay open for tasklens-wlf.2.
+- Nested session: `kwin_wayland --virtual --xwayland --no-lockscreen --width 1920 --height 1200
+  --scale 1.1`, one 60 Hz virtual output (KWin 6.8.2 has no refresh option). The harness is a
+  copy of `/var/tmp/claude/tl-smoke/harness.sh` with `--scale 1.1` added
+  (`/var/tmp/claude/wlf18/harness.sh`). Window size, theme and settings are the bench defaults.
+- Build: git sha b767ed29845c6cad27a4f52d1079e2b67c58702c (HEAD). The summary file says
+  `-dirty` because `.beads/issues.jsonl` and untracked folders were not committed. No Rust file
+  was changed in this bead.
+- Build commands: `heavy-build cargo build --locked --profile perf -p tl-app --features bench`
+  and `heavy-build cargo build --locked -p xtask`.
+- Run command (`/var/tmp/claude/wlf18/run.sh`), after the 1-minute load average fell below 8:
+  `TL_BUILD_WRAP=1 TL_BENCH_REFRESH_HZ=60 WAYLAND_DISPLAY=<nested socket, absolute path>
+  XDG_SESSION_TYPE=wayland DBUS_SYSTEM_BUS_ADDRESS=unix:path=/nonexistent-wlf18 XDG_*_HOME=<private>
+  cargo xtask bench`, under the bench slot lock. The app ran on the nested Wayland socket, not on
+  `wayland-0`. The nonexistent system bus address skips the "session is locked" check, as in
+  wlf.28.
+
+Differences from the fixture: 60 Hz output instead of 144 Hz, window and scale as above, a
+virtual output with software compositing in KWin, and other jobs on the machine (load below).
+Missed frames are judged against this session's own 60 Hz period (limit 25.00 ms, long limit
+50.00 ms), as set by tasklens-wlf.38.
 
 ### rendering.gpu = "software" (tasklens-cr0.25, 2026-10-07)
 
@@ -79,7 +109,561 @@ Every adapter gpui can list is now a software one, so the real GPU cannot be pic
 
 ## Gate runs (cargo xtask bench)
 
-Not run yet.
+Run record: tasklens-wlf.18, 2026-11-04. Every number here is (hidden nested KWin, 60 Hz), not the 144 Hz screen.
+All 12 reports have `refresh_hz` 60, `window_active` true and 0 stalls.
+
+Result: FAIL on 7 of the 8 gates. Only the missed-frame rule for `table-2000` and the bridge
+sample arrival passed. Fix beads: tasklens-wlf.39 and tasklens-wlf.40 (static and perf-cpu, from
+wlf.27 and wlf.28), tasklens-wlf.41 (table-2000 frame CPU and RSS), tasklens-wlf.42 (bridge
+latency).
+
+### Load and reruns
+
+`load.log` has the 1-minute load average every 5 s. Attempt 1 (all four scenes, 3 runs each)
+started with `perf-cpu` run 1 at load 10.22, which is above 8, so `perf-cpu` was run again as
+attempt 2 (3 runs, started at load 7.29, 5.96 and 4.84). Both attempts are recorded. The gate row
+for `perf-cpu` uses attempt 2. All other runs started at a 1-minute load of 7.09 or lower.
+
+| Run (attempt 1) | Start | Load 1 min |
+|---|---|---|
+| perf-cpu 1, 2, 3 | 20:05:50, 20:06:25, 20:07:01 | 10.22, 7.77, 5.57 |
+| table-2000 1, 2, 3 | 20:07:37, 20:08:12, 20:08:48 | 5.66, 5.86, 7.09 |
+| bridge 1, 2, 3 | 20:09:23, 20:09:59, 20:10:35 | 6.03, 6.77, 6.94 |
+| static 1, 2, 3 | 20:11:11, 20:11:46, 20:12:22 | 6.31, 4.64, 3.64 |
+| perf-cpu 1, 2, 3 (attempt 2) | 20:19:54, 20:20:29, 20:21:05 | 7.29, 5.96, 4.84 |
+
+### Stdout table, attempt 1
+
+| Scene | frame CPU p50 ms | p99 ms | missed | process CPU % | RSS MB | stalls | bridge p99 ms |
+|---|---|---|---|---|---|---|---|
+| bridge | 15.73 | 20.63 | 616.00 | 65.08 | 344.89 | 0.00 | 30.20 |
+| perf-cpu | 15.52 | 20.76 | 310.00 | 71.29 | 343.18 | 0.00 | - |
+| static | 0.00 | 0.00 | 0.00 | 17.57 | 288.83 | 0.00 | - |
+| table-2000 | 4.03 | 6.25 | 0.00 | 25.56 | 238.04 | 0.00 | - |
+Summary written to /home/oystein/projects/tasklens/target/bench/2026-11-04-b767ed29845c-dirty.json
+
+The table shows the median run chosen by xtask (by `frame_cpu_ms.p99`, and for `static` by
+process CPU), not the middle value of each metric. The gate rows below use the middle of the
+three run values.
+
+### Stdout table, attempt 2 (perf-cpu only)
+
+| Scene | frame CPU p50 ms | p99 ms | missed | process CPU % | RSS MB | stalls | bridge p99 ms |
+|---|---|---|---|---|---|---|---|
+| perf-cpu | 15.75 | 21.94 | 609.00 | 62.91 | 294.52 | 0.00 | - |
+Summary written to /home/oystein/projects/tasklens/target/bench/2026-11-04-b767ed29845c-dirty.json
+
+### Summary JSON
+
+Attempt 1, `target/bench/2026-11-04-b767ed29845c-dirty.json` (the file in `target/` was later
+overwritten by attempt 2, so the copy is kept in `/var/tmp/claude/wlf18/attempt1/`):
+
+```json
+{
+  "date": "2026-11-04",
+  "git_sha": "b767ed29845c-dirty",
+  "scenes": {
+    "bridge": {
+      "median": {
+        "bridge_latency_ms": {
+          "p50": 13.714123,
+          "p99": 30.20326
+        },
+        "frame_cpu_ms": {
+          "max": 25.289235,
+          "p50": 15.728709,
+          "p99": 20.630314
+        },
+        "frames": 1180,
+        "gpu": null,
+        "long_missed_frames": 2,
+        "missed_frames": 616,
+        "probe_cpu_pct": null,
+        "process_cpu_pct": 65.08488966252996,
+        "pss_mb": 271.73376,
+        "refresh_hz": 60,
+        "rss_mb": 344.891392,
+        "scene": "bridge",
+        "stalls": 0,
+        "warmup_stalls": 0,
+        "window_active": true
+      },
+      "runs": [
+        {
+          "bridge_latency_ms": {
+            "p50": 13.456159,
+            "p99": 30.929374
+          },
+          "frame_cpu_ms": {
+            "max": 38.094313,
+            "p50": 16.71029,
+            "p99": 22.540183
+          },
+          "frames": 1113,
+          "gpu": null,
+          "long_missed_frames": 3,
+          "missed_frames": 675,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 65.61051402589273,
+          "pss_mb": 264.293376,
+          "refresh_hz": 60,
+          "rss_mb": 337.321984,
+          "scene": "bridge",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        },
+        {
+          "bridge_latency_ms": {
+            "p50": 5.944324,
+            "p99": 23.590013
+          },
+          "frame_cpu_ms": {
+            "max": 22.289953,
+            "p50": 15.002069,
+            "p99": 19.782161
+          },
+          "frames": 1284,
+          "gpu": null,
+          "long_missed_frames": 2,
+          "missed_frames": 509,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 65.70519309694848,
+          "pss_mb": 270.83776,
+          "refresh_hz": 60,
+          "rss_mb": 343.851008,
+          "scene": "bridge",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        },
+        {
+          "bridge_latency_ms": {
+            "p50": 13.714123,
+            "p99": 30.20326
+          },
+          "frame_cpu_ms": {
+            "max": 25.289235,
+            "p50": 15.728709,
+            "p99": 20.630314
+          },
+          "frames": 1180,
+          "gpu": null,
+          "long_missed_frames": 2,
+          "missed_frames": 616,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 65.08488966252996,
+          "pss_mb": 271.73376,
+          "refresh_hz": 60,
+          "rss_mb": 344.891392,
+          "scene": "bridge",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        }
+      ]
+    },
+    "perf-cpu": {
+      "median": {
+        "bridge_latency_ms": null,
+        "frame_cpu_ms": {
+          "max": 27.211316,
+          "p50": 15.52385,
+          "p99": 20.760073
+        },
+        "frames": 1350,
+        "gpu": null,
+        "long_missed_frames": 0,
+        "missed_frames": 310,
+        "probe_cpu_pct": null,
+        "process_cpu_pct": 71.28550231270113,
+        "pss_mb": 265.136128,
+        "refresh_hz": 60,
+        "rss_mb": 343.175168,
+        "scene": "perf-cpu",
+        "stalls": 0,
+        "warmup_stalls": 0,
+        "window_active": true
+      },
+      "runs": [
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 27.211316,
+            "p50": 15.52385,
+            "p99": 20.760073
+          },
+          "frames": 1350,
+          "gpu": null,
+          "long_missed_frames": 0,
+          "missed_frames": 310,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 71.28550231270113,
+          "pss_mb": 265.136128,
+          "refresh_hz": 60,
+          "rss_mb": 343.175168,
+          "scene": "perf-cpu",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        },
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 27.599216,
+            "p50": 15.150699,
+            "p99": 20.448022
+          },
+          "frames": 1253,
+          "gpu": null,
+          "long_missed_frames": 2,
+          "missed_frames": 542,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 64.20605882639266,
+          "pss_mb": 221.935616,
+          "refresh_hz": 60,
+          "rss_mb": 294.699008,
+          "scene": "perf-cpu",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        },
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 23.790795,
+            "p50": 15.569519,
+            "p99": 21.138663
+          },
+          "frames": 1205,
+          "gpu": null,
+          "long_missed_frames": 2,
+          "missed_frames": 586,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 62.839896731254335,
+          "pss_mb": 215.593984,
+          "refresh_hz": 60,
+          "rss_mb": 288.37888,
+          "scene": "perf-cpu",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        }
+      ]
+    },
+    "static": {
+      "median": {
+        "bridge_latency_ms": null,
+        "frame_cpu_ms": {
+          "max": 0.0,
+          "p50": 0.0,
+          "p99": 0.0
+        },
+        "frames": 300,
+        "gpu": null,
+        "long_missed_frames": 0,
+        "missed_frames": 0,
+        "probe_cpu_pct": null,
+        "process_cpu_pct": 17.568869079602752,
+        "pss_mb": 215.81824,
+        "refresh_hz": 60,
+        "rss_mb": 288.833536,
+        "scene": "static",
+        "stalls": 0,
+        "warmup_stalls": 0,
+        "window_active": true
+      },
+      "runs": [
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          },
+          "frames": 300,
+          "gpu": null,
+          "long_missed_frames": 0,
+          "missed_frames": 0,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 17.186752324187086,
+          "pss_mb": 207.024128,
+          "refresh_hz": 60,
+          "rss_mb": 280.02304,
+          "scene": "static",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        },
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          },
+          "frames": 300,
+          "gpu": null,
+          "long_missed_frames": 0,
+          "missed_frames": 0,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 17.568869079602752,
+          "pss_mb": 215.81824,
+          "refresh_hz": 60,
+          "rss_mb": 288.833536,
+          "scene": "static",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        },
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          },
+          "frames": 300,
+          "gpu": null,
+          "long_missed_frames": 0,
+          "missed_frames": 0,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 20.22836364007175,
+          "pss_mb": 218.324992,
+          "refresh_hz": 60,
+          "rss_mb": 291.328,
+          "scene": "static",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        }
+      ]
+    },
+    "table-2000": {
+      "median": {
+        "bridge_latency_ms": null,
+        "frame_cpu_ms": {
+          "max": 8.453475,
+          "p50": 4.028423,
+          "p99": 6.250323
+        },
+        "frames": 1800,
+        "gpu": null,
+        "long_missed_frames": 0,
+        "missed_frames": 0,
+        "probe_cpu_pct": null,
+        "process_cpu_pct": 25.560297875915538,
+        "pss_mb": 165.528576,
+        "refresh_hz": 60,
+        "rss_mb": 238.043136,
+        "scene": "table-2000",
+        "stalls": 0,
+        "warmup_stalls": 0,
+        "window_active": true
+      },
+      "runs": [
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 8.244924,
+            "p50": 4.301693,
+            "p99": 6.047573
+          },
+          "frames": 1800,
+          "gpu": null,
+          "long_missed_frames": 0,
+          "missed_frames": 0,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 26.383243130071502,
+          "pss_mb": 166.0416,
+          "refresh_hz": 60,
+          "rss_mb": 238.333952,
+          "scene": "table-2000",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        },
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 8.246865,
+            "p50": 4.330272,
+            "p99": 6.861234
+          },
+          "frames": 1799,
+          "gpu": null,
+          "long_missed_frames": 0,
+          "missed_frames": 0,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 27.122352228794288,
+          "pss_mb": 166.709248,
+          "refresh_hz": 60,
+          "rss_mb": 239.009792,
+          "scene": "table-2000",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        },
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 8.453475,
+            "p50": 4.028423,
+            "p99": 6.250323
+          },
+          "frames": 1800,
+          "gpu": null,
+          "long_missed_frames": 0,
+          "missed_frames": 0,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 25.560297875915538,
+          "pss_mb": 165.528576,
+          "refresh_hz": 60,
+          "rss_mb": 238.043136,
+          "scene": "table-2000",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        }
+      ]
+    }
+  }
+}
+```
+
+Attempt 2 (perf-cpu only), same path, copy in `/var/tmp/claude/wlf18/summary-attempt2.json`:
+
+```json
+{
+  "date": "2026-11-04",
+  "git_sha": "b767ed29845c-dirty",
+  "scenes": {
+    "perf-cpu": {
+      "median": {
+        "bridge_latency_ms": null,
+        "frame_cpu_ms": {
+          "max": 26.003386,
+          "p50": 15.752059,
+          "p99": 21.939523
+        },
+        "frames": 1184,
+        "gpu": null,
+        "long_missed_frames": 4,
+        "missed_frames": 609,
+        "probe_cpu_pct": null,
+        "process_cpu_pct": 62.91111015789047,
+        "pss_mb": 221.5424,
+        "refresh_hz": 60,
+        "rss_mb": 294.52288,
+        "scene": "perf-cpu",
+        "stalls": 0,
+        "warmup_stalls": 0,
+        "window_active": true
+      },
+      "runs": [
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 26.003386,
+            "p50": 15.752059,
+            "p99": 21.939523
+          },
+          "frames": 1184,
+          "gpu": null,
+          "long_missed_frames": 4,
+          "missed_frames": 609,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 62.91111015789047,
+          "pss_mb": 221.5424,
+          "refresh_hz": 60,
+          "rss_mb": 294.52288,
+          "scene": "perf-cpu",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        },
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 23.985354,
+            "p50": 15.266069,
+            "p99": 20.079542
+          },
+          "frames": 1274,
+          "gpu": null,
+          "long_missed_frames": 0,
+          "missed_frames": 513,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 65.064164600606,
+          "pss_mb": 216.446976,
+          "refresh_hz": 60,
+          "rss_mb": 289.374208,
+          "scene": "perf-cpu",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        },
+        {
+          "bridge_latency_ms": null,
+          "frame_cpu_ms": {
+            "max": 57.285863,
+            "p50": 17.16062,
+            "p99": 43.674346
+          },
+          "frames": 928,
+          "gpu": null,
+          "long_missed_frames": 110,
+          "missed_frames": 586,
+          "probe_cpu_pct": null,
+          "process_cpu_pct": 63.851650385736455,
+          "pss_mb": 207.6416,
+          "refresh_hz": 60,
+          "rss_mb": 290.28352,
+          "scene": "perf-cpu",
+          "stalls": 0,
+          "warmup_stalls": 0,
+          "window_active": true
+        }
+      ]
+    }
+  }
+}
+```
+
+### Gates (hidden nested KWin, 60 Hz)
+
+Median is the middle of the three run values. Two decimals.
+
+| Gate | Pass rule | Median value | Every run | Result |
+|---|---|---|---|---|
+| UI thread CPU per frame, `perf-cpu`, p50 | <= 1.0 ms | 15.75 ms (hidden nested KWin, 60 Hz) | 15.75, 15.27, 17.16 | FAIL |
+| UI thread CPU per frame, `perf-cpu`, p99 | <= 2.0 ms | 21.94 ms (hidden nested KWin, 60 Hz) | 21.94, 20.08, 43.67 | FAIL |
+| UI thread CPU per frame, `table-2000`, p99 | <= 2.0 ms | 6.25 ms (hidden nested KWin, 60 Hz) | 6.05, 6.86, 6.25 | FAIL |
+| Missed frames, `perf-cpu` | median run 0, every run <= 2, long misses 0 | 586 missed, 4 long (hidden nested KWin, 60 Hz) | missed 609, 513, 586; long 4, 0, 110 | FAIL |
+| Missed frames, `table-2000` | same | 0 missed, 0 long (hidden nested KWin, 60 Hz) | missed 0, 0, 0; long 0, 0, 0 | PASS |
+| Process CPU, `perf-cpu` | <= 30% | 63.85% (hidden nested KWin, 60 Hz) | 62.91, 65.06, 63.85 | FAIL |
+| Process CPU, `static` | <= 2% | 17.57% (hidden nested KWin, 60 Hz) | 17.19, 17.57, 20.23 | FAIL |
+| RSS after `table-2000` | <= 150 MB | 238.33 MB (hidden nested KWin, 60 Hz) | 238.33, 239.01, 238.04 | FAIL |
+| Bridge samples arrive | `bridge_latency_ms` set in every run | set in 3 of 3 (hidden nested KWin, 60 Hz) | 3 of 3 | PASS |
+| Bridge wake-to-render p99 | <= 20 ms | 30.20 ms (hidden nested KWin, 60 Hz) | 30.93, 23.59, 30.20 | FAIL |
+
+Attempt 1 `perf-cpu` for comparison (run 1 started above load 8): p50 15.52, 15.15, 15.57 ms;
+p99 20.76, 20.45, 21.14 ms; missed 310, 542, 586; long missed 0, 2, 2; process CPU 71.29, 64.21,
+62.84%. The same gates fail in both attempts. Attempt 2 run 3 shows a 43.67 ms p99 and 110 long
+misses; its load at start was 4.84, so the cause is not known.
+
+The missed-frame row for `perf-cpu` also fails for its "at most 2 per run" part (513 to 609).
+`bridge` runs at about the same frame cost and missed 509 to 675 frames; the gate list has no
+missed-frame rule for `bridge`.
+
+### Profile of table-2000
+
+One perf run (`perf record -e cpu-clock:u -F 499 --call-graph dwarf`, nested session, 60 Hz,
+Wayland) gave frame CPU p50 4.02 ms, p99 5.43 ms and process CPU 25.18%. Self time:
+`BoundsTree::insert` 9.21%, taffy block and flexbox layout 5.8%, unsymbolized libc (copies)
+about 26% of samples, `WindowTextSystem::shape_text` closure 1.51%, the `tasklens` binary 68.86%
+and libc 26.08% of all samples. Data: `/var/tmp/claude/wlf18/prof.data` and `table-2000-prof.json`.
+The `perf-cpu` and `static` profiles are in the two sections below.
 
 ### Static scene idle CPU (tasklens-wlf.27, 2026-11-04)
 
@@ -506,6 +1090,11 @@ Not run yet.
 
 ## Unverified items settled in phase 0
 
+- U-47 not settled: `perf-cpu` p99 is 21.94 ms (hidden nested KWin, 60 Hz), against a gate of
+  2.0 ms. FAIL, not isolated: the CPU page has no switch that holds the per-core labels static.
+  The wlf.28 profile puts the cost in chart paths and GPUI copies (wlf.39, wlf.40). The labels
+  stay at 10 Hz until this is measured again after those beads. R-126 moves them to 5 Hz only
+  when the labels are shown to cause the failure, and this run does not show that.
 - U-9 not needed: the soak passed without the patch.
 
 
