@@ -1158,9 +1158,9 @@ async fn shut_down(cx: &Cx, state: &Arc<Mutex<State>>) -> Outcome<(), WorkerErro
         .name("tl-history-close".into())
         .spawn(close);
     if let Err(e) = spawned {
-        // No thread: close here, on the worker, as before.
-        tracing::debug!("device history close thread: {e}");
-        cx.masked(|| close_at_shutdown(state));
+        // No thread: skip the close rather than block the async worker. The open minutes are
+        // lost as in a crash; ADR-017 reads each segment up to its first bad block.
+        tracing::debug!("device history close thread did not start, close skipped: {e}");
         return Outcome::Ok(());
     }
     let mut wait = std::pin::pin!(crate::time_util::timeout(cx, CLOSE_WAIT, done_rx.recv()));
