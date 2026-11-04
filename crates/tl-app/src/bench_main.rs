@@ -8,7 +8,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use rustix::time::{ClockId, clock_gettime};
 use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
@@ -201,7 +200,7 @@ fn ns(t: rustix::time::Timespec) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
