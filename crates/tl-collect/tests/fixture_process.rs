@@ -1089,7 +1089,7 @@ fn meta_comm_falls_back_to_stat() {
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tl_collect::proc::fdcount::fd_count_fallbacks;
-use tl_collect::proc::sweep::{CpuWindow, IoState, PidDir, SweepCore, SweepCtx, SweptProc};
+use tl_collect::proc::sweep::{CpuWindow, IoState, PerPid, PidDir, SweepCore, SweepCtx, SweptProc};
 use tl_model::validity::{ProcessField, Validity};
 
 /// A settable clock for `SweepCore::with_clock`, one per test so parallel tests do not share it.
@@ -1366,8 +1366,9 @@ fn sweep_pid_reused_after_reads_is_caught() {
     let ctx = sweep_ctx(false);
     let mut out = Vec::new();
     let mut seen = Vec::new();
-    core.sweep_core_with(&ctx, &mut out, &mut |p, dir| {
+    core.sweep_core_with(&ctx, &mut out, &mut |p: &SweptProc, dir: PidDir<'_>| {
         assert!(dir.stat_fd.is_some(), "the sweep hands over its stat fd");
+        assert!(dir.dir_fd.is_none(), "a closure asks for no pid directory");
         let mut buf = Vec::new();
         let before = dir.same_process(p.key.start_ticks, &mut buf);
         // The process exits and a new one gets pid 4201.
@@ -1382,6 +1383,46 @@ fn sweep_pid_reused_after_reads_is_caught() {
         seen.push((before, kept, fresh, new_process));
     });
     assert_eq!(seen, [(true, false, false, true)]);
+    assert_eq!(only(&out).key.start_ticks, 351_220);
+}
+
+/// A `PerPid` that asks for the pid directory and reads `comm` through it.
+struct WantsDir {
+    asked: Vec<u64>,
+    comm: Vec<Option<Vec<u8>>>,
+}
+
+impl PerPid for WantsDir {
+    fn wants_dir(&mut self, key: ProcessKey, _stat_comm_raw: &[u8]) -> bool {
+        self.asked.push(key.start_ticks);
+        true
+    }
+
+    fn push(&mut self, _p: &SweptProc, dir: PidDir<'_>) {
+        let mut buf = Vec::new();
+        let read = dir
+            .dir_fd
+            .and_then(|d| tl_collect::sysroot::read_at(d, "comm", &mut buf, 64).ok());
+        self.comm.push(read.map(|_| buf));
+    }
+}
+
+/// tasklens-yms.26 review: the pid directory a `PerPid` asks for is opened during the sweep's
+/// own reads, so the files read through it later belong to the swept key.
+#[test]
+fn sweep_opens_wanted_pid_dir_during_its_reads() {
+    let (_tmp, root) = sweep_root();
+    set_stat(&root, 8812, 1204, 351_220);
+    fs::write(root.proc_path("4201/comm"), "worker\n").expect("write comm");
+    let mut core = SweepCore::new(root);
+    let mut out = Vec::new();
+    let mut hook = WantsDir {
+        asked: Vec::new(),
+        comm: Vec::new(),
+    };
+    core.sweep_core_with(&sweep_ctx(false), &mut out, &mut hook);
+    assert_eq!(hook.asked, [351_220], "asked once, with the key from stat");
+    assert_eq!(hook.comm, [Some(b"worker\n".to_vec())]);
     assert_eq!(only(&out).key.start_ticks, 351_220);
 }
 
@@ -3597,6 +3638,7 @@ fn read_p2(
             proc_fd: proc_fd.as_fd(),
             pid,
             stat_fd: None,
+            dir_fd: None,
         },
         rollup_key(pid, st.start_ticks),
         &st,

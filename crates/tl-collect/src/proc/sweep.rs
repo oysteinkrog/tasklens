@@ -10,9 +10,11 @@
 //! Since files are opened by pid, a pid freed and reused during a process's reads could put
 //! another process's files under its key. `sweep_one` opens its anchor file (`statm`, or `status`
 //! in memory-only mode) before `stat` and reads it last; a good read proves one process held the
-//! pid for every open in between. The metadata and P2 reads come later, so `ProcessSampler`
-//! re-reads the kept `stat` fd ([`PidDir::same_process`]) after them and leaves the process out
-//! of the sweep when it is gone.
+//! pid for every open in between. The `/proc/<pid>` dirfd for a metadata read or an fd count is
+//! opened in that window too ([`PerPid::wants_dir`]), so the files read through it later are the
+//! same process's. The P2 extras of detail keys are read by pid after the window, so
+//! `ProcessSampler` re-reads the kept `stat` fd ([`PidDir::same_process`]) after them and leaves
+//! the process out of the sweep when it is gone.
 //!
 //! At the end of each sweep the sweep reads the `cpu` line of `/proc/stat` once (a kept file,
 //! first line only) and keeps the previous read. [`CpuWindow`] is the share of all CPUs per
@@ -388,18 +390,20 @@ impl SweepCore {
     /// that goes away during the sweep is skipped. A missing `<proc>` directory gives an empty
     /// result.
     pub fn sweep_core(&mut self, ctx: &SweepCtx, out: &mut Vec<SweptProc>) -> (TimeNs, TimeNs) {
-        self.sweep_core_with(ctx, out, &mut |_, _| {})
+        self.sweep_core_with(ctx, out, &mut |_: &SweptProc, _: PidDir<'_>| {})
     }
 
-    /// `sweep_core` that also calls `per_pid` for each process with the `/proc` dirfd and its
-    /// kept `stat` fd, right after its files are read. A `per_pid` that opens more files of the
-    /// process calls [`PidDir::same_process`] before it publishes what they gave, so a pid reused
-    /// in between cannot put another process's files under this key.
+    /// `sweep_core` that also calls `per_pid` for each process right after its files are read,
+    /// with the `/proc` dirfd, the kept `stat` fd and, when [`PerPid::wants_dir`] asked for it,
+    /// the `/proc/<pid>` dirfd. Files read through that dirfd belong to the swept process. A
+    /// `per_pid` that opens more files by pid calls [`PidDir::same_process`] before it publishes
+    /// what they gave, so a pid reused in between cannot put another process's files under this
+    /// key.
     pub fn sweep_core_with(
         &mut self,
         ctx: &SweepCtx,
         out: &mut Vec<SweptProc>,
-        per_pid: &mut dyn FnMut(&SweptProc, PidDir<'_>),
+        per_pid: &mut dyn PerPid,
     ) -> (TimeNs, TimeNs) {
         out.clear();
         self.next.clear();
@@ -422,6 +426,7 @@ impl SweepCore {
                     proc_fd: proc_fd.as_fd(),
                     pid,
                     stat_fd: None,
+                    dir_fd: None,
                 };
                 let mut core = SweepIo {
                     sweep: self.sweeps,
@@ -435,12 +440,13 @@ impl SweepCore {
                     stat: &mut self.stat,
                     mem_only: self.mem_only,
                 };
-                if let Some((p, stat_fd)) = sweep_one(ctx, dir, &mut core) {
+                if let Some((p, fds)) = sweep_one(ctx, dir, &mut core, per_pid) {
                     let dir = PidDir {
-                        stat_fd: Some(stat_fd.as_fd()),
+                        stat_fd: Some(fds.stat.as_fd()),
+                        dir_fd: fds.dir.as_ref().map(AsFd::as_fd),
                         ..dir
                     };
-                    per_pid(&p, dir);
+                    per_pid.push(&p, dir);
                     out.push(p);
                 }
             }
@@ -488,6 +494,34 @@ pub struct PidDir<'a> {
     /// The process's `stat`, opened before any other file the sweep read for it. `None` gives
     /// [`Self::same_process`] a fresh open of `"<pid>/stat"`.
     pub stat_fd: Option<BorrowedFd<'a>>,
+    /// `/proc/<pid>`, opened during the sweep's reads when [`PerPid::wants_dir`] asked for it,
+    /// so it belongs to the swept process. `None` when not asked for or the process was gone.
+    pub dir_fd: Option<BorrowedFd<'a>>,
+}
+
+/// What runs for each process inside [`SweepCore::sweep_core_with`].
+pub trait PerPid {
+    /// Asked after `stat` gives the key and before the sweep's last read of the process: true
+    /// when [`Self::push`] reads files through the `/proc/<pid>` dirfd, so the sweep opens it
+    /// while it can still prove which process holds the pid.
+    fn wants_dir(&mut self, _key: ProcessKey, _stat_comm_raw: &[u8]) -> bool {
+        false
+    }
+
+    /// Called with each process the sweep read, before it is added to the sweep's output.
+    fn push(&mut self, p: &SweptProc, dir: PidDir<'_>);
+}
+
+impl<F: FnMut(&SweptProc, PidDir<'_>)> PerPid for F {
+    fn push(&mut self, p: &SweptProc, dir: PidDir<'_>) {
+        self(p, dir);
+    }
+}
+
+/// The fds `sweep_one` keeps open for `per_pid`.
+struct KeptFds {
+    stat: OwnedFd,
+    dir: Option<OwnedFd>,
 }
 
 impl PidDir<'_> {
@@ -601,7 +635,8 @@ fn pid_path<'p>(path: &'p mut String, pid: u32, file: &str) -> &'p str {
 }
 
 /// Reads one process and computes its rates. Returns it with its open `stat` fd, which
-/// [`PidDir::same_process`] reads again after later opens. `None` when the process is gone, its
+/// [`PidDir::same_process`] reads again after later opens, and the `/proc/<pid>` dirfd when
+/// `hook` or the fd count asked for it. `None` when the process is gone, its
 /// `stat` cannot be read (then it has no key), or its pid named another process before the reads
 /// ended.
 ///
@@ -611,12 +646,13 @@ fn pid_path<'p>(path: &'p mut String, pid: u32, file: &str) -> &'p str {
 /// process is gone, so a good anchor read proves one process held the pid for every open in
 /// between. The anchor is `statm`, or `status` in memory-only mode. Both are read every sweep, so
 /// the check costs no extra read. When the anchor cannot be opened or read, a second read of the
-/// kept `stat` fd does the check.
+/// kept `stat` fd does the check. The `/proc/<pid>` dirfd is opened before the anchor read too.
 fn sweep_one(
     ctx: &SweepCtx,
     dir: PidDir<'_>,
     core: &mut SweepIo<'_>,
-) -> Option<(SweptProc, OwnedFd)> {
+    hook: &mut dyn PerPid,
+) -> Option<(SweptProc, KeptFds)> {
     let SweepIo {
         sweep,
         page_size,
@@ -694,11 +730,17 @@ fn sweep_one(
         (IoState::WarmingUp, None)
     };
 
-    let fd_count = if ctx.want_fd_count && !mem_only {
-        Some(dir.open().map_or(FdCount::Gone, |d| fd_count(d.as_fd())))
+    let want_fd_count = ctx.want_fd_count && !mem_only;
+    let pid_dir = if hook.wants_dir(key, &stat.comm_raw) || want_fd_count {
+        dir.open()
     } else {
         None
     };
+    let fd_count = want_fd_count.then(|| {
+        pid_dir
+            .as_ref()
+            .map_or(FdCount::Gone, |d| fd_count(d.as_fd()))
+    });
 
     // The anchor read ends the reads by pid (see the doc above).
     let anchor_read = anchor.and_then(|fd| read_fd(fd.as_fd(), &mut bufs.small, anchor_limit));
@@ -828,7 +870,13 @@ fn sweep_one(
     });
     p.validity.set(ProcessField::IoRead, io_v);
     p.validity.set(ProcessField::IoWrite, io_v);
-    Some((p, stat_fd))
+    Some((
+        p,
+        KeptFds {
+            stat: stat_fd,
+            dir: pid_dir,
+        },
+    ))
 }
 
 /// Stores one `status` read in its cache slot: the parsed values, or defaults and the validity
@@ -1267,7 +1315,7 @@ impl ProcessSampler {
             }),
             out,
         };
-        let (start, end) = core.sweep_core_with(ctx, swept, &mut |p, dir| build.push(p, dir));
+        let (start, end) = core.sweep_core_with(ctx, swept, &mut build);
         out.observed_start = start;
         out.observed_end = end;
         out.cpu_window = self.core.cpu_window();
@@ -1654,6 +1702,22 @@ struct P2Build<'a> {
 }
 
 impl Build<'_, '_> {
+    fn meta_every(&self) -> u32 {
+        if self.mem_only {
+            MEM_ONLY_META_REFRESH
+        } else {
+            META_REFRESH_SWEEPS
+        }
+    }
+}
+
+impl PerPid for Build<'_, '_> {
+    /// The metadata is read through the `/proc/<pid>` dirfd, for a new key, a changed `comm` and
+    /// every `meta_every` sweeps.
+    fn wants_dir(&mut self, key: ProcessKey, stat_comm_raw: &[u8]) -> bool {
+        self.meta.needs_read(key, stat_comm_raw, self.meta_every())
+    }
+
     fn push(&mut self, p: &SweptProc, dir: PidDir<'_>) {
         let key = p.key;
         let pid = key.pid;
@@ -1661,16 +1725,12 @@ impl Build<'_, '_> {
         // from this sweep in memory-only mode.
         let ruid = p.status.uid[0];
         let kernel_thread = p.stat.flags & PF_KTHREAD != 0;
-        // The pid directory is opened only when the metadata is read. A process gone by then
-        // is left out of this sweep.
-        let every = if self.mem_only {
-            MEM_ONLY_META_REFRESH
-        } else {
-            META_REFRESH_SWEEPS
-        };
+        // The sweep opened the pid directory when `wants_dir` said the metadata is read. A
+        // process gone by then is left out of this sweep.
+        let every = self.meta_every();
         let Some((raw, change)) =
             self.meta
-                .get_or_refresh_every(key, &p.stat.comm_raw, self.bufs, every, || dir.open())
+                .get_or_refresh_every(key, &p.stat.comm_raw, self.bufs, every, || dir.dir_fd)
         else {
             return;
         };
@@ -1700,10 +1760,9 @@ impl Build<'_, '_> {
                 self.bufs,
             )
         });
-        // Files opened after the sweep's own reads must still belong to this key.
-        if (change != MetaChange::Unchanged || read_p2)
-            && !dir.same_process(key.start_ticks, &mut self.bufs.small)
-        {
+        // The P2 files are opened after the sweep's own reads, so they must still belong to
+        // this key.
+        if read_p2 && !dir.same_process(key.start_ticks, &mut self.bufs.small) {
             return;
         }
 

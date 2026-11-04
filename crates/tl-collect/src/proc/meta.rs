@@ -160,6 +160,14 @@ struct CacheEntry {
     sweeps: u32,
 }
 
+impl CacheEntry {
+    /// True when the entry is used as it is: under `every` calls since its read and the same
+    /// stat `comm`.
+    fn fresh(&self, stat_comm_raw: &[u8], every: u32) -> bool {
+        self.sweeps + 1 < every && self.stat_comm.as_slice() == stat_comm_raw
+    }
+}
+
 /// `RawMeta` per live process.
 #[derive(Default)]
 pub struct MetaCache {
@@ -202,6 +210,15 @@ impl MetaCache {
         self.get_or_refresh_every(key, stat_comm_raw, bufs, META_REFRESH_SWEEPS, open)
     }
 
+    /// True when the next `get_or_refresh_every` call with these arguments reads the entry, so
+    /// it calls its `open`. The sweep asks before its last read of the process, to open the
+    /// directory while it can still prove which process holds the pid.
+    pub fn needs_read(&self, key: ProcessKey, stat_comm_raw: &[u8], every: u32) -> bool {
+        self.entries
+            .get(&key)
+            .is_none_or(|e| !e.fresh(stat_comm_raw, every.max(1)))
+    }
+
     /// `get_or_refresh_with` with an entry re-read at least every `every` calls in place of
     /// `META_REFRESH_SWEEPS`. The memory-only sweep uses its own period (tasklens-8fx.45).
     pub fn get_or_refresh_every<D: AsFd>(
@@ -228,7 +245,7 @@ impl MetaCache {
             }
             Entry::Occupied(o) => {
                 let e = o.into_mut();
-                if e.sweeps + 1 < every && e.stat_comm.as_slice() == stat_comm_raw {
+                if e.fresh(stat_comm_raw, every) {
                     e.sweeps += 1;
                     return Some((&e.meta, MetaChange::Unchanged));
                 }
@@ -556,6 +573,37 @@ mod tests {
         let (meta, _) =
             cache.get_or_refresh(key, fd.as_fd(), comm.as_bytes(), &mut ReadBufs::default());
         meta.clone()
+    }
+
+    /// tasklens-yms.26: the sweep opens the pid directory only when `needs_read` says so, so it
+    /// must answer true exactly when `get_or_refresh_every` calls `open`.
+    #[test]
+    fn needs_read_matches_open_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("comm"), "a\n").unwrap();
+        let fd = std::fs::File::open(dir.path()).unwrap();
+        let key = ProcessKey {
+            start_ticks: 1,
+            boot_id: tl_model::time::BootId(1),
+            pid: 13,
+        };
+        let mut cache = MetaCache::new();
+        let mut bufs = ReadBufs::default();
+        for (i, comm) in [b"a", b"a", b"a", b"b", b"b", b"b", b"b", b"b"]
+            .iter()
+            .enumerate()
+        {
+            let every = 3;
+            let predicted = cache.needs_read(key, &comm[..], every);
+            let mut opened = false;
+            cache
+                .get_or_refresh_every(key, &comm[..], &mut bufs, every, || {
+                    opened = true;
+                    Some(fd.as_fd())
+                })
+                .unwrap();
+            assert_eq!(predicted, opened, "call {i}");
+        }
     }
 
     #[test]
