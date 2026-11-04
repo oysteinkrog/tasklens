@@ -79,8 +79,8 @@ use super::details::KeyValueModel;
 use super::gpu_views::PartResized;
 use super::overview::memory_apps::{AppsChart, AppsMetric, GROUPS_SHOWN};
 use super::page::{
-    DevicePage, DevicePageFrame, details_draw, header_text, page_history_request, page_range_ns,
-    page_words,
+    DevicePage, DevicePageFrame, PageHeaderView, details_draw, header_text, page_history_request,
+    page_range_ns, page_words,
 };
 use super::page_flow::cpu::{CpuParts, cpu_flow, secondary_metric, shown_secondary};
 use super::widget::container::WidgetContainer;
@@ -713,6 +713,8 @@ pub struct CpuPage {
     details_view: Entity<DetailsView>,
     container: Entity<WidgetContainer>,
     editor: Entity<WidgetEditor>,
+    /// The header row, made at the first render (tasklens-wlf.40).
+    header_view: Option<Entity<PageHeaderView>>,
     avail: SecondaryAvail,
     /// `avail`, shared with the flow placer.
     avail_cell: Rc<Cell<SecondaryAvail>>,
@@ -888,6 +890,7 @@ impl CpuPage {
             details_view,
             container,
             editor,
+            header_view: None,
             avail,
             avail_cell,
             mode,
@@ -997,6 +1000,11 @@ impl CpuPage {
     }
 
     /// The Details widget's view.
+    /// The header row's view, once the page rendered.
+    pub fn header_view(&self) -> Option<&Entity<PageHeaderView>> {
+        self.header_view.as_ref()
+    }
+
     pub fn details_view(&self) -> &Entity<DetailsView> {
         &self.details_view
     }
@@ -1736,6 +1744,18 @@ impl Render for CpuPage {
         }
         let m = *metrics(cx);
         let theme = current(cx).clone();
+        // The header is a cached view: the moving charts draw the page on every frame, and the
+        // header then keeps its layout (tasklens-wlf.40).
+        let header = match &self.header_view {
+            Some(header) => header.clone(),
+            None => {
+                let page = cx.entity();
+                let hub = Some(self.hub.clone());
+                let header = cx.new(|cx| PageHeaderView::new(&page, hub, cx));
+                self.header_view = Some(header.clone());
+                header
+            }
+        };
         div()
             .size_full()
             .track_focus(&self.focus)
@@ -1751,7 +1771,7 @@ impl Render for CpuPage {
                     m: &m,
                     theme: &theme,
                 }
-                .render(window, cx),
+                .render_with_header(&header, window, cx),
             )
     }
 }

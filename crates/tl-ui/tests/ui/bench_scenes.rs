@@ -21,9 +21,11 @@ use tl_ui::bench::synth::{
 use tl_ui::bench::{BenchOptions, BenchScene};
 use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::demand::GlobalDemand;
+use tl_ui_overview::widget::container::WidgetView;
 use tl_ui_perf::performance::DeviceKey;
 use tl_ui_perf::performance::cpu::CpuPage;
 use tl_ui_perf::performance::overview::{OVERVIEW_KEY, OverviewPage};
+use tl_ui_perf::performance::page::header_value_renders;
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::bench_run::run_scene;
@@ -567,4 +569,138 @@ fn redraw_work_static(cx: &mut TestAppContext) {
 #[ignore = "diagnostic; prints counters"]
 fn redraw_work_perf_cpu(cx: &mut TestAppContext) {
     redraw_work(cx, BenchScene::PerfCpu);
+}
+
+/// The views on the perf-cpu CPU page path, in the order [`path_counts`] reads them.
+const PATH_VIEWS: [&str; 14] = [
+    "performance page",
+    "sidebar",
+    "9 card views",
+    "9 card charts",
+    "cpu page",
+    "page header",
+    "header value",
+    "widget editor",
+    "widget container",
+    "widgets",
+    "details view",
+    "core grid view",
+    "core grid chart",
+    "overall chart",
+];
+
+/// The render counters of the views in [`PATH_VIEWS`].
+fn path_counts(
+    scene: &tl_ui::bench::scenes::SceneWindow,
+    cx: &mut VisualTestContext,
+) -> [u32; PATH_VIEWS.len()] {
+    let view = scene.view.clone();
+    cx.update(|_, cx| {
+        let page = view.read(cx).page().expect("the Performance tab").read(cx);
+        let sidebar = page.sidebar().read(cx);
+        let cpu = page
+            .page(&DeviceKey(Arc::from(DeviceKey::CPU)))
+            .expect("CPU page built")
+            .clone()
+            .downcast::<CpuPage>()
+            .expect("a CpuPage")
+            .read(cx);
+        let container = cpu.container().read(cx);
+        let mut widgets = 0;
+        for id in container.placed_ids() {
+            widgets += match container.view(id) {
+                Some(WidgetView::Metric(w)) => w.read(cx).render_count.get(),
+                Some(WidgetView::Group(g)) => g.read(cx).render_count.get(),
+                Some(WidgetView::Fixed(f)) => f.read(cx).render_count.get(),
+                None => 0,
+            };
+        }
+        let (mut card_views, mut card_charts) = (0, 0);
+        for card in sidebar.cards() {
+            card_views += card.view.read(cx).render_count.get();
+            card_charts += card.chart.read(cx).render_count.get();
+        }
+        [
+            page.render_count.get(),
+            sidebar.render_count.get(),
+            card_views,
+            card_charts,
+            cpu.render_count.get(),
+            cpu.header_view()
+                .expect("the page header")
+                .read(cx)
+                .render_count
+                .get(),
+            header_value_renders(),
+            cpu.editor().read(cx).render_count.get(),
+            container.render_count.get(),
+            widgets,
+            cpu.details_view().read(cx).render_count.get(),
+            cpu.grid_view().read(cx).render_count.get(),
+            cpu.grid().view.read(cx).render_count.get(),
+            cpu.overall(cx)
+                .expect("the Overall chart")
+                .read(cx)
+                .render_count
+                .get(),
+        ]
+    })
+}
+
+/// The view renders of one perf-cpu animation frame on the CPU page path (tasklens-wlf.40),
+/// pinned: the median over 40 frames of each view's renders in a frame, so a frame that also
+/// took a 10 Hz publish does not move it.
+///
+/// Before tasklens-wlf.40 the header row had no view of its own: each CPU page render built it
+/// again, with the header value view, whose card chart notified it on every frame. Now the
+/// header is a cached view, and the header value draws only when its text changes.
+///
+/// The widget editor is a cached view above the moving charts. A cached view that renders
+/// again renders every cached view under it again (`window.refreshing`), so the container,
+/// every widget and the Details view still render on every frame.
+#[gpui_kit::test]
+fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let engine = BenchEngine::start(BenchFeed::Synthetic, SEED, now_boot_ns());
+    let scene = cx
+        .update(|cx| open_scene(cx, BenchScene::PerfCpu, engine.clone()))
+        .expect("the scene window opens");
+    let mut vcx = VisualTestContext::from_window(scene.handle, cx);
+    draw(&mut vcx);
+    let frames = 40usize;
+    let mut per_frame: Vec<[u32; PATH_VIEWS.len()]> = Vec::with_capacity(frames);
+    let mut before = path_counts(&scene, &mut vcx);
+    for _ in 0..frames {
+        // The test platform draws a dirty window once the update's effects are flushed, as a
+        // real platform draws on the next frame. A forced `draw` would render the root and its
+        // plain children a second time.
+        vcx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        vcx.run_until_parked();
+        let after = path_counts(&scene, &mut vcx);
+        let mut delta = [0u32; PATH_VIEWS.len()];
+        for (i, d) in delta.iter_mut().enumerate() {
+            *d = after[i] - before[i];
+        }
+        per_frame.push(delta);
+        before = after;
+    }
+    engine.stop();
+    let median: Vec<u32> = (0..PATH_VIEWS.len())
+        .map(|i| {
+            let mut col: Vec<u32> = per_frame.iter().map(|f| f[i]).collect();
+            col.sort_unstable();
+            col[frames / 2]
+        })
+        .collect();
+    let report: Vec<String> = PATH_VIEWS
+        .iter()
+        .zip(&median)
+        .map(|(name, n)| format!("{name} {n}"))
+        .collect();
+    eprintln!("perf-cpu renders per frame (median): {}", report.join(", "));
+    // Before tasklens-wlf.40: 1, 1, 9, 9, 1, (no view), 1, 1, 1, 4, 1, 1, 1, 1.
+    let pinned = [1, 1, 9, 9, 1, 0, 0, 1, 1, 4, 1, 1, 1, 1];
+    assert_eq!(median, pinned, "{report:?}");
 }

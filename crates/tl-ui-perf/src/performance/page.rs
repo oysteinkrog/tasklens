@@ -50,11 +50,11 @@ use super::sidebar::DeviceSidebar;
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::performance::overview::parts::title_value_style;
 use crate::performance::overview::range::{
-    PAGE_SWITCH, SwitchWords, current_range, history_request, page_range_switch,
+    PAGE_SWITCH, SwitchWords, current_range, history_kept, history_request, page_range_switch,
 };
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::host::HostContext;
-use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::hub::{SnapshotChanged, SnapshotHub};
 use tl_ui_base::i18n::{Strings, tr, tr_en};
 use tl_ui_chart::chart::{ChartView, NetFormat};
 use tl_ui_kit::components::icons::{TlIcon, icon};
@@ -66,6 +66,7 @@ use tl_ui_base::selector::TlSelector;
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_base::template::Template;
 use tl_ui_base::text::style::{label_style, t_sm};
+use tl_ui_base::theme::store::ThemeStore;
 use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 
 pub use super::core::{GRAPH_H_OVERALL, PAGE_PAD};
@@ -414,65 +415,38 @@ pub struct DevicePageFrame<'a> {
 
 impl DevicePageFrame<'_> {
     pub fn render(self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let header = page_header(self.page, self.m, self.theme, window, cx);
+        self.layout(header, window, cx)
+    }
+
+    /// As [`Self::render`], with the header drawn by `header`, the page's [`PageHeaderView`].
+    /// The view is cached, so a frame that draws the page again for its moving charts reuses
+    /// the header (tasklens-wlf.40).
+    pub fn render_with_header(
+        self,
+        header: &Entity<PageHeaderView>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let h = px(PAGE_HEADER_H * self.m.ui_scale);
+        let header = header
+            .clone()
+            .cached(gpui_kit::StyleRefinement::default().w_full().h(h))
+            .into_any_element();
+        let header = div()
+            .flex_none()
+            .w_full()
+            .h(h)
+            .child(header)
+            .into_any_element();
+        self.layout(header, window, cx)
+    }
+
+    fn layout(self, header: AnyElement, window: &mut Window, cx: &mut App) -> AnyElement {
         let Self { page, m, theme } = self;
         let s = m.ui_scale;
         let key = page.key();
-        let (word, model) = page.header();
         let details_heading = page_words(cx).details.clone();
-        let range_words = page_words(cx).range.clone();
-
-        let header = h_flex()
-            .tl_selector(|| "perf-page-header".into())
-            .flex_none()
-            .w_full()
-            .h(px(PAGE_HEADER_H * s))
-            .items_center()
-            .gap(m.sp[4])
-            .children(key.kind().icon().map(|name| {
-                div()
-                    .tl_selector(|| "perf-page-icon".into())
-                    .flex_none()
-                    .child(icon(name, m.icon.lg, key.kind().icon_color(theme)))
-            }))
-            .child(
-                div()
-                    .tl_selector(|| "perf-page-type".into())
-                    .flex_none()
-                    .whitespace_nowrap()
-                    // The style first: it replaces the whole text refinement, colour included.
-                    .map_text(label_style(m, m.text.lg, FontWeight::MEDIUM))
-                    .text_color(theme.text_primary)
-                    .child(word),
-            )
-            .child(model_text(model, key, m, theme, window, cx))
-            .children(header_value(key, window, cx))
-            .child(
-                h_flex()
-                    .tl_selector(|| "perf-page-toggles".into())
-                    .flex_none()
-                    .gap(m.sp[4])
-                    .children(page.toggles(window, cx).into_iter().enumerate().map(
-                        |(i, toggle)| {
-                            // Column direction stretches the button to the minimum width.
-                            v_flex()
-                                .tl_selector(move || format!("perf-page-toggle-{i}"))
-                                .min_w(px(TOGGLE_MIN_W * s))
-                                .child(toggle)
-                        },
-                    )),
-            )
-            .child(
-                div()
-                    .tl_selector(|| RANGE_ID.into())
-                    .flex_none()
-                    .child(page_range_switch(
-                        PAGE_SWITCH,
-                        &range_words,
-                        page.hub(),
-                        window,
-                        cx,
-                    )),
-            );
 
         if let Some(editor) = page.widget_editor() {
             // The header stays; the widget container under it scrolls (ADR-019 phase 3).
@@ -532,6 +506,151 @@ impl DevicePageFrame<'_> {
             .id(ElementId::Name(SharedString::from(key.0.clone())))
             .size_full()
             .into_any_element()
+    }
+}
+
+/// The header row of `page`: the device icon, the type word, the model, the main value, the page
+/// toggles and the range switch (UI-PRF-010, UI-PRF-058).
+pub fn page_header(
+    page: &dyn DevicePage,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let s = m.ui_scale;
+    let key = page.key();
+    let (word, model) = page.header();
+    let range_words = page_words(cx).range.clone();
+    h_flex()
+        .tl_selector(|| "perf-page-header".into())
+        .flex_none()
+        .w_full()
+        .h(px(PAGE_HEADER_H * s))
+        .items_center()
+        .gap(m.sp[4])
+        .children(key.kind().icon().map(|name| {
+            div()
+                .tl_selector(|| "perf-page-icon".into())
+                .flex_none()
+                .child(icon(name, m.icon.lg, key.kind().icon_color(theme)))
+        }))
+        .child(
+            div()
+                .tl_selector(|| "perf-page-type".into())
+                .flex_none()
+                .whitespace_nowrap()
+                // The style first: it replaces the whole text refinement, colour included.
+                .map_text(label_style(m, m.text.lg, FontWeight::MEDIUM))
+                .text_color(theme.text_primary)
+                .child(word),
+        )
+        .child(model_text(model, key, m, theme, window, cx))
+        .children(header_value(key, window, cx))
+        .child(
+            h_flex()
+                .tl_selector(|| "perf-page-toggles".into())
+                .flex_none()
+                .gap(m.sp[4])
+                .children(
+                    page.toggles(window, cx)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, toggle)| {
+                            // Column direction stretches the button to the minimum width.
+                            v_flex()
+                                .tl_selector(move || format!("perf-page-toggle-{i}"))
+                                .min_w(px(TOGGLE_MIN_W * s))
+                                .child(toggle)
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .tl_selector(|| RANGE_ID.into())
+                .flex_none()
+                .child(page_range_switch(
+                    PAGE_SWITCH,
+                    &range_words,
+                    page.hub(),
+                    window,
+                    cx,
+                )),
+        )
+        .into_any_element()
+}
+
+/// Draws a page's header for its [`PageHeaderView`]. `None` once the page is gone.
+pub type HeaderDraw = Rc<dyn Fn(&mut Window, &mut App) -> Option<AnyElement>>;
+
+/// A device page's header row as a view of its own, drawn cached by
+/// [`DevicePageFrame::render_with_header`] (tasklens-wlf.40). The moving charts under the
+/// header draw the page again on every frame; the header then keeps its last layout and paint.
+/// It draws again when the page notifies, when the settings, strings, theme or scale change,
+/// when the sidebar changes its cards, when a snapshot turns the device history on or off, and
+/// when the header value changes ([`HeaderValue`]).
+pub struct PageHeaderView {
+    draw: HeaderDraw,
+    /// `history.device_metrics` of the host at the last snapshot; the range switch disables
+    /// 24 h and 7 d without it.
+    history_kept: bool,
+    _subs: SmallVec<[Subscription; 8]>,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub render_count: Cell<u32>,
+}
+
+impl PageHeaderView {
+    /// The header of `page`, whose snapshots come from `hub`. The page may be leased now (it
+    /// makes its header in its render), but not while the header renders: the header is a child
+    /// view, so it renders after the page's own render returned.
+    pub fn new<P: DevicePage + Render>(
+        page: &Entity<P>,
+        hub: Option<Entity<SnapshotHub>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut subs = SmallVec::new();
+        subs.push(cx.observe(page, |_, _, cx| cx.notify()));
+        subs.push(cx.observe_global::<TlSettings>(|_, cx| cx.notify()));
+        subs.push(cx.observe_global::<UiMetrics>(|_, cx| cx.notify()));
+        subs.push(cx.observe_global::<Strings>(|_, cx| cx.notify()));
+        subs.push(cx.observe_global::<ThemeStore>(|_, cx| cx.notify()));
+        if let Some(sidebar) = cx.try_global::<PerfSidebar>().and_then(|s| s.0.upgrade()) {
+            subs.push(cx.observe(&sidebar, |_, _, cx| cx.notify()));
+        }
+        let kept = history_kept(hub.as_ref(), cx);
+        if let Some(hub) = hub {
+            subs.push(
+                cx.subscribe(&hub, |this: &mut Self, hub, _: &SnapshotChanged, cx| {
+                    let kept = history_kept(Some(&hub), cx);
+                    if kept != this.history_kept {
+                        this.history_kept = kept;
+                        cx.notify();
+                    }
+                }),
+            );
+        }
+        let page = page.downgrade();
+        let draw: HeaderDraw = Rc::new(move |window: &mut Window, cx: &mut App| {
+            let page = page.upgrade()?;
+            let m = *metrics(cx);
+            let theme = current(cx).clone();
+            Some(page.update(cx, |page, cx| page_header(page, &m, &theme, window, cx)))
+        });
+        Self {
+            draw,
+            history_kept: kept,
+            _subs: subs,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            render_count: Cell::new(0),
+        }
+    }
+}
+
+impl Render for PageHeaderView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
+        div().size_full().children((self.draw)(window, cx))
     }
 }
 
@@ -625,13 +744,23 @@ fn header_value(key: &DeviceKey, window: &mut Window, cx: &mut App) -> Option<An
 /// element tree.
 struct HeaderValue {
     chart: Entity<ChartView>,
+    /// The value of the last render. The chart notifies on every animation frame while it
+    /// moves; the view draws again only when this changes (tasklens-wlf.40).
+    shown: Option<CardValue>,
     _observe: Subscription,
 }
 
 impl HeaderValue {
     fn new(chart: Entity<ChartView>, cx: &mut Context<Self>) -> Self {
         Self {
-            _observe: cx.observe(&chart, |_, _, cx| cx.notify()),
+            _observe: cx.observe(&chart, |this, chart, cx| {
+                let now = CardValue::of(chart.read(cx), NetFormat::of(cx));
+                if now != this.shown {
+                    this.shown = now;
+                    cx.notify();
+                }
+            }),
+            shown: CardValue::of(chart.read(cx), NetFormat::of(cx)),
             chart,
         }
     }
@@ -653,7 +782,10 @@ impl Render for HeaderValue {
             .flex()
             .flex_none()
             .items_center();
-        let Some(v) = CardValue::of(self.chart.read(cx), NetFormat::of(cx)) else {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        VALUE_RENDERS.with(|n| n.set(n.get() + 1));
+        self.shown = CardValue::of(self.chart.read(cx), NetFormat::of(cx));
+        let Some(v) = self.shown.clone() else {
             return el;
         };
         if v.validity == Validity::Restricted {
@@ -664,6 +796,19 @@ impl Render for HeaderValue {
             .text_color(v.color(theme))
             .child(v.text)
     }
+}
+
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+thread_local! {
+    /// Renders of every [`HeaderValue`] on this thread.
+    static VALUE_RENDERS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Renders of the page header values on this thread, for the frame cost tests
+/// (tasklens-wlf.40).
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+pub fn header_value_renders() -> u32 {
+    VALUE_RENDERS.with(Cell::get)
 }
 
 /// Sets the text style of an element in one call.
