@@ -791,7 +791,12 @@ mod tests {
     #[test]
     fn unknown_id_dropped_and_logged() {
         let capture: &'static Capture = Box::leak(Box::default());
+        // Other test threads hit the same call site with no subscriber, and tracing can cache
+        // it as never enabled. A second live dispatcher makes tracing ask every dispatcher,
+        // and the rebuild drops an interest cached before this one was installed.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let layout = tracing::subscriber::with_default(capture, || {
+            tracing::callsite::rebuild_interest_cache();
             ColumnLayout::from_state(
                 TableId::Processes,
                 &state(&["name", "pid", "bogus"], &["name", "pid"], &[]),

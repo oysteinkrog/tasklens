@@ -85,7 +85,14 @@ mod tests {
             .with_writer(move || writer.clone())
             .with_ansi(false)
             .finish();
-        tracing::subscriber::with_default(subscriber, f);
+        // Other test threads hit the same call sites with no subscriber, and tracing can
+        // cache them as never enabled. A second live dispatcher makes tracing ask every
+        // dispatcher, and the rebuild drops an interest cached before this one was installed.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            f();
+        });
         String::from_utf8(out.0.lock().unwrap().clone()).unwrap()
     }
 

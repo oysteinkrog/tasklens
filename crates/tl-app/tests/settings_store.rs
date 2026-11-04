@@ -57,7 +57,14 @@ fn capture_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
         .with_ansi(false)
         .without_time()
         .finish();
-    let result = tracing::subscriber::with_default(subscriber, f);
+    // Other test threads hit the same call sites with no subscriber, and tracing can cache
+    // them as never enabled. A second live dispatcher makes tracing ask every dispatcher,
+    // and the rebuild drops an interest cached before this one was installed.
+    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let result = tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        f()
+    });
     let logs = String::from_utf8(out.0.lock().expect("log buffer").clone()).expect("utf-8 logs");
     (result, logs)
 }
