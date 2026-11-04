@@ -929,7 +929,104 @@ decision (bead AC, ADR-014 rule 3). Re-measure after wlf.39 and wlf.40 before de
 
 ## First frame, minimized CPU and RSS
 
-Not run yet.
+### Gate runs (tasklens-wlf.19, 2026-11-04)
+
+Result: all four gates FAIL. Warm first frame median 660 ms (gate 200 ms), cold first frame
+1240 ms (gate 500 ms), minimized CPU 1.13% (gate 0.3%), RSS after `table-2000` 238.33 MB
+(gate 150 MB). Every number comes from a hidden nested KWin session, not the 144 Hz screen.
+
+#### Setup
+
+- Binary: `/usr/bin/tasklens`, `tasklens 1.5.2`, the release build without bench code.
+- Session: hidden nested KWin (`harness.sh start wlf19`), app on the nested Xwayland (X11),
+  private XDG folders. `history.enabled` is false by default, so recording is off.
+- Load rule: a run starts only when the 1-minute load average is below 8. One untimed launch
+  ran first so the binary was in the page cache.
+- `first_frame_ms` comes from `/proc/uptime`, so it has 10 ms resolution.
+- Each launch waited for a new `first_frame_ms` line in the newest `tasklens.*.log`, then
+  stopped the app by its PID.
+
+#### First frame, warm
+
+| Run | `first_frame_ms` | Load at start (1, 5, 15 min) |
+|---|---|---|
+| 1 | 710 | 5.05, 4.56, 7.00 |
+| 2 | 660 | 5.77, 4.72, 7.03 |
+| 3 | 800 | 5.77, 4.72, 7.03 |
+| 4 | 590 | 7.50, 7.64, 7.92 |
+| 5 | 490 | 7.50, 7.64, 7.92 |
+| Median | 660 | |
+
+Gate: median <= 200 ms. FAIL (hidden nested KWin, not the 144 Hz screen). Runs 2 and 3, and
+runs 4 and 5, share one load reading because they started within the same load sample.
+
+#### First frame, cold
+
+1240 ms. Gate <= 500 ms. FAIL (hidden nested KWin, not the 144 Hz screen). Run by the agent
+with `sudo sysctl vm.drop_caches=3` after `sync`, in place of the owner (owner decision,
+bead comment 1007). Load at start 6.66, 7.44, 7.86.
+
+#### Minimized CPU
+
+| Item | Value |
+|---|---|
+| Window state | minimized with `xdotool windowminimize`, `WM_STATE` Iconic |
+| `CLK_TCK` | 100 |
+| `utime + stime` at t = 0 (10 s after minimizing) | 187 ticks |
+| `utime + stime` at t = 60 s | 255 ticks |
+| Delta | 68 ticks |
+| CPU | 100 x 68 / 100 / 60 = 1.13% of one core |
+| Load at start | 6.25, 7.28, 7.79 |
+
+Gate: <= 0.3%. FAIL (hidden nested KWin, not the 144 Hz screen).
+
+#### RSS
+
+Copied from the gate-run table of the scene section above.
+
+| Gate | Limit | Result | Runs | Verdict |
+|---|---|---|---|---|
+| RSS after `table-2000` | <= 150 MB | 238.33 MB (hidden nested KWin, 60 Hz) | 238.33, 239.01, 238.04 | FAIL |
+
+#### Profile for the fix beads
+
+Start-up steps, median of the 5 warm runs, from the `tasklens::perf` step lines (ms since
+the previous step):
+
+| Step | Median ms |
+|---|---|
+| `logging` | 2.1 |
+| `single_instance` | 1.6 |
+| `args_settings` | 0.2 |
+| `engine_start` | 21.2 |
+| `platform` | 45.2 |
+| `fonts` | 2.3 |
+| `kit` | 3.4 |
+| `ui_init` | 4.8 |
+| `window_open` | 570.4 |
+| `first_frame` | 0.5 |
+
+`window_open` is 570 ms here, against 276 ms in the cr0.23 run on the real screen. It holds
+gpui's adapter probe, which tasklens cannot change without a gpui patch (see the cr0.23
+section below). I did not measure why it is slower in the nested session.
+The cold run is a single run and also pays for reading the binary and libraries from disk.
+
+Minimized CPU: this was an extra run, not a gate run (`perf` is blocked here,
+`perf_event_paranoid` is 2, so per-thread ticks from `/proc/<pid>/task/*/stat` were used).
+Over 30 s after a 10 s settle, the whole process used 31 ticks (1.03%). By thread:
+
+| Thread | Ticks in 30 s |
+|---|---|
+| `tl-src-Processes` | 9 |
+| `tl-engine-0` | 8 |
+| `tl-src-Cpu` | 4 |
+| `tasklens` (two threads) | 3 + 3 |
+| `tl-src-Net` | 2 |
+| `tl-src-Sensors` | 1 |
+| `tl-src-Disk` | 1 |
+
+The engine sources keep sampling while the window is minimized, with recording off. The
+fix is to turn demand off for every source when the main window is hidden or minimized.
 
 ### Start-up timing (tasklens-cr0.23, 2026-10-07)
 
