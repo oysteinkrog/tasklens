@@ -613,8 +613,6 @@ pub struct HistoryPage {
     top: hover::TopController,
     /// The hover card's texts and shaped lines.
     card: hover::CardCache,
-    /// Counts installed views other than TopAt answers. The strip rebuilds when it changes.
-    frame_version: u64,
     /// Ctrl-pause holds the shown view.
     paused: bool,
     /// Created in `new`, never in render.
@@ -737,7 +735,6 @@ impl HistoryPage {
             minimap_view: None,
             top: hover::TopController::default(),
             card: hover::CardCache::default(),
-            frame_version: 0,
             paused: false,
             _subs: subs,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -792,7 +789,6 @@ impl HistoryPage {
             self.on_top_view(&history, cx);
             return;
         }
-        self.frame_version += 1;
         self.install(Arc::clone(&history));
         self.note_store_state(cx);
         self.install_table(cx);

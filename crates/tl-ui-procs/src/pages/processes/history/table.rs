@@ -200,6 +200,8 @@ pub struct HistoryTableDelegate {
     order: Vec<u32>,
     /// Display index of each shown row.
     index: FxHashMap<ProcessKey, u32>,
+    /// Scratch for a numeric sort: packed sort key and row index.
+    keyed: Vec<(u128, u32)>,
     /// Bumps on every rebuild of `order`.
     version: u64,
     sort: SortSpec,
@@ -259,6 +261,7 @@ impl HistoryTableDelegate {
             view: Arc::new(HistoryView::default()),
             order: Vec::new(),
             index: FxHashMap::default(),
+            keyed: Vec::new(),
             version: 0,
             sort,
             filter: Arc::from(""),
@@ -493,17 +496,27 @@ impl HistoryTableDelegate {
             }
             order.push(i as u32);
         }
-        let SortSpec { column, ascending } = self.sort;
-        order.sort_unstable_by(|&a, &b| {
-            let (a, b) = (&rows[a as usize], &rows[b as usize]);
-            b.present
-                .cmp(&a.present)
-                .then_with(|| {
-                    let o = compare(a, b, column);
-                    if ascending { o } else { o.reverse() }
-                })
-                .then_with(|| a.key.cmp(&b.key))
-        });
+        let sort = self.sort;
+        let SortSpec { column, ascending } = sort;
+        if is_numeric(column) {
+            // Each scrub installs a new view and sorts every row again, so numeric columns sort
+            // on keys packed once per row instead of reading two rows per comparison.
+            let keyed = &mut self.keyed;
+            keyed.clear();
+            keyed.extend(
+                order
+                    .iter()
+                    .map(|&i| (sort_key(&rows[i as usize], column, ascending), i)),
+            );
+            keyed.sort_unstable_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| rows[a.1 as usize].key.cmp(&rows[b.1 as usize].key))
+            });
+            order.clear();
+            order.extend(keyed.iter().map(|&(_, i)| i));
+        } else {
+            order.sort_unstable_by(|&a, &b| row_order(&rows[a as usize], &rows[b as usize], sort));
+        }
         self.index.clear();
         self.index.reserve(order.len());
         for (ix, &i) in order.iter().enumerate() {
@@ -543,6 +556,53 @@ fn matches_filter(r: &HistoryProcessRow, filter: &str, lower: &mut String) -> bo
         lower.extend(s.chars().flat_map(char::to_lowercase));
         lower.contains(filter)
     })
+}
+
+/// The display order of two rows: present rows first, then `sort`, then the process key.
+fn row_order(a: &HistoryProcessRow, b: &HistoryProcessRow, sort: SortSpec) -> Ordering {
+    b.present
+        .cmp(&a.present)
+        .then_with(|| {
+            let o = compare(a, b, sort.column);
+            if sort.ascending { o } else { o.reverse() }
+        })
+        .then_with(|| a.key.cmp(&b.key))
+}
+
+/// True for the columns [`sort_key`] packs.
+fn is_numeric(col: ColumnId) -> bool {
+    matches!(
+        col,
+        ColumnId::Pid
+            | ColumnId::Cpu
+            | ColumnId::Memory
+            | ColumnId::Disk
+            | ColumnId::Network
+            | ColumnId::Gpu
+    )
+}
+
+/// [`row_order`] of a numeric column without the key tie-break, packed into one integer: bit 64
+/// is set for an absent row, the low 64 bits hold the value in `total_cmp` order, inverted for a
+/// descending sort.
+fn sort_key(r: &HistoryProcessRow, col: ColumnId, ascending: bool) -> u128 {
+    let value = match col {
+        ColumnId::Pid => u64::from(r.key.pid),
+        ColumnId::Memory => r.mem_anon_bytes,
+        ColumnId::Disk => f32_key(r.disk_bps),
+        ColumnId::Network => f32_key(r.net_bps),
+        ColumnId::Gpu => f32_key(r.gpu_pct),
+        _ => f32_key(r.cpu_pct),
+    };
+    let value = if ascending { value } else { !value };
+    (u128::from(!r.present) << 64) | u128::from(value)
+}
+
+/// `v` as an unsigned integer that orders as `f32::total_cmp`.
+fn f32_key(v: f32) -> u64 {
+    let bits = v.to_bits() as i32;
+    let total = bits ^ ((((bits >> 31) as u32) >> 1) as i32);
+    u64::from(total as u32 ^ 0x8000_0000)
 }
 
 /// `col`'s order of `a` and `b`, ascending. Text compares without ASCII case.
@@ -895,5 +955,110 @@ impl TreeTableDelegate for HistoryTableDelegate {
 
     fn empty_text(&self) -> Option<SharedString> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use tl_model::time::BootId;
+
+    fn row(i: u32, present: bool, v: f32, mem: u64) -> HistoryProcessRow {
+        let name: Arc<str> = Arc::from("p");
+        HistoryProcessRow {
+            key: ProcessKey {
+                start_ticks: u64::from(i % 3),
+                boot_id: BootId(0),
+                pid: i,
+            },
+            name: Arc::clone(&name),
+            comm: Arc::clone(&name),
+            user: name,
+            exe: None,
+            app_id: None,
+            system: false,
+            present,
+            previous_boot: false,
+            cpu_pct: v,
+            mem_anon_bytes: mem,
+            disk_bps: -v,
+            net_bps: v * 2.0,
+            gpu_pct: v,
+            peak: None,
+        }
+    }
+
+    const SPECIAL: [f32; 8] = [
+        0.0,
+        -0.0,
+        1.5,
+        -1.5,
+        f32::NAN,
+        -f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    ];
+
+    fn value() -> impl Strategy<Value = f32> {
+        prop_oneof![
+            (0..SPECIAL.len()).prop_map(|i| SPECIAL[i]),
+            (0u8..4).prop_map(f32::from),
+            any::<f32>(),
+        ]
+    }
+
+    proptest! {
+        /// The packed keys sort numeric columns exactly as `row_order` does, ties, NaN, signed
+        /// zero and absent rows included.
+        #[test]
+        fn packed_sort_matches_row_order(
+            rows in prop::collection::vec((any::<bool>(), value(), 0u64..4), 0..60),
+            col in 0usize..6,
+            ascending in any::<bool>(),
+        ) {
+            let col = [
+                ColumnId::Pid,
+                ColumnId::Cpu,
+                ColumnId::Memory,
+                ColumnId::Disk,
+                ColumnId::Network,
+                ColumnId::Gpu,
+            ][col];
+            let sort = SortSpec { column: col, ascending };
+            let rows: Vec<HistoryProcessRow> = rows
+                .into_iter()
+                .enumerate()
+                .map(|(i, (present, v, mem))| row(i as u32 / 2, present, v, mem))
+                .collect();
+            let mut want: Vec<usize> = (0..rows.len()).collect();
+            want.sort_by(|&a, &b| row_order(&rows[a], &rows[b], sort));
+            let mut got: Vec<(u128, usize)> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (sort_key(r, col, ascending), i))
+                .collect();
+            got.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| rows[a.1].key.cmp(&rows[b.1].key)));
+            let got: Vec<&ProcessKey> = got.iter().map(|&(_, i)| &rows[i].key).collect();
+            let want: Vec<&ProcessKey> = want.iter().map(|&i| &rows[i].key).collect();
+            prop_assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn f32_key_orders_as_total_cmp() {
+        let mut vs = SPECIAL.to_vec();
+        vs.extend([
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::MAX,
+            f32::MIN,
+            1e-40,
+        ]);
+        for &a in &vs {
+            for &b in &vs {
+                assert_eq!(f32_key(a).cmp(&f32_key(b)), a.total_cmp(&b), "{a} {b}");
+            }
+        }
     }
 }

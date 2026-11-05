@@ -947,8 +947,18 @@ fn scrubber_geometry_cached_until_key_changes(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     draw(vcx);
     assert_eq!(builds(&page, vcx), first);
-    // A new view version rebuilds once.
+    // A new view with the same strip data, as each scrub inside one window brings, builds
+    // nothing (tasklens-8fx.47).
     publish_view(&engine, vcx, strip_view(2, Vec::new()));
+    draw(vcx);
+    draw(vcx);
+    assert_eq!(builds(&page, vcx), first);
+    // A view with other strip data rebuilds once.
+    let mut other = strip_view(3, Vec::new());
+    let mut stack = other.stack.to_vec();
+    stack[0].other += 1.0;
+    other.stack = stack.into();
+    publish_view(&engine, vcx, other);
     draw(vcx);
     draw(vcx);
     assert_eq!(builds(&page, vcx), first + 1);

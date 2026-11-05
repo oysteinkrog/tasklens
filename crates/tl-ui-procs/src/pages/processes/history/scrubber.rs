@@ -5,7 +5,9 @@
 //! axis (y 100) carries time labels at the grid lines, the scrub handle and the range bounds.
 //!
 //! Geometry is built in strip-local physical px and kept in [`ScrubberCache`] until the
-//! [`GeometryKey`] changes: view version, size, scale, strip window, metric, words or style.
+//! [`GeometryKey`] changes (newest second, size, scale, strip window, metric, words or style) or
+//! the view's stack, series or gaps differ by content from the last build. A scrub inside one
+//! strip window brings a new view with the same strip data, so it builds nothing.
 //! Every other frame clones the cached paths into place, paints the handle, range and hover
 //! hairline as quads, and paints the label lines shaped at the last build. A frame where only the
 //! hover hairline or the handle moved builds no path and shapes no text.
@@ -28,7 +30,7 @@ use gpui_kit::{
     Style, WeakEntity, Window, fill, point, px, relative, size,
 };
 use smallvec::SmallVec;
-use tl_model::history::{HistoryMetric, HistoryView};
+use tl_model::history::{HistoryMetric, HistorySeries, HistoryStackBucket, HistoryView};
 use tl_model::time::TimeNs;
 
 use super::actions::{HistoryLive, HistoryScrub, HistorySetRange};
@@ -195,11 +197,13 @@ pub fn series_color(accent: Hsla, k: usize) -> Hsla {
     }
 }
 
-/// Everything that forces a geometry rebuild when it changes.
+/// Everything except the view data that forces a geometry rebuild when it changes. The data is
+/// compared by content in [`BuiltData`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct GeometryKey {
-    version: u64,
-    query_id: u64,
+    has_frames: bool,
+    /// The newest retained second: the time labels count back from it.
+    now: TimeNs,
     physical_width: u32,
     physical_height: u32,
     scale_factor_bits: u32,
@@ -208,6 +212,59 @@ struct GeometryKey {
     metric: HistoryMetric,
     strings_version: u64,
     style_version: u64,
+}
+
+/// The view data the last build drew. A scrub inside one strip window gets a new view with the
+/// same stack, series and gaps, so comparing them by content skips the path build (UI-PRC-032:
+/// geometry rebuilds only when the series, view range or size change).
+#[derive(Default)]
+struct BuiltData {
+    stack: Arc<[HistoryStackBucket]>,
+    series: Arc<[HistorySeries]>,
+    gaps: Arc<[(TimeNs, TimeNs)]>,
+}
+
+impl BuiltData {
+    fn of(view: Option<&HistoryView>) -> Self {
+        view.map_or_else(Self::default, |v| Self {
+            stack: Arc::clone(&v.stack),
+            series: Arc::clone(&v.series),
+            gaps: Arc::clone(&v.gaps),
+        })
+    }
+
+    /// True when `view` holds the same strip data, bit for bit. No view counts as empty data.
+    fn same(&self, view: Option<&HistoryView>) -> bool {
+        let (stack, series, gaps): (&[_], &[_], &[_]) = match view {
+            Some(v) => (&v.stack, &v.series, &v.gaps),
+            None => (&[], &[], &[]),
+        };
+        same_slice(&self.stack, stack, same_bucket)
+            && same_slice(&self.series, series, same_series)
+            && *self.gaps == *gaps
+    }
+}
+
+/// True when `a` and `b` are the same slice or hold equal items by `eq`.
+fn same_slice<T>(a: &[T], b: &[T], eq: impl Fn(&T, &T) -> bool) -> bool {
+    std::ptr::eq(a, b) || (a.len() == b.len() && a.iter().zip(b).all(|(x, y)| eq(x, y)))
+}
+
+/// Bit equality, so NaN values compare equal to themselves.
+fn same_bucket(a: &HistoryStackBucket, b: &HistoryStackBucket) -> bool {
+    a.t_ns == b.t_ns
+        && a.other.to_bits() == b.other.to_bits()
+        && a.top.map(f32::to_bits) == b.top.map(f32::to_bits)
+}
+
+fn same_series(a: &HistorySeries, b: &HistorySeries) -> bool {
+    a.key == b.key
+        && a.metric == b.metric
+        && same_slice(&a.points, &b.points, |p, q| {
+            p.t_ns == q.t_ns
+                && p.min.to_bits() == q.min.to_bits()
+                && p.max.to_bits() == q.max.to_bits()
+        })
 }
 
 /// One built path and its colour.
@@ -249,6 +306,7 @@ pub enum Drag {
 #[derive(Default)]
 pub struct ScrubberCache {
     key: Option<GeometryKey>,
+    data: BuiltData,
     /// Stacked layers from the bottom: top 1, top 1 + 2, top 1 + 2 + 3, all.
     fills: SmallVec<[PathSet; 4]>,
     /// System total, then one per selected process.
@@ -445,7 +503,6 @@ impl Element for HistoryScrubber {
                 words,
                 strings_version,
                 scrubber,
-                frame_version,
                 ..
             } = page;
             let input = Input {
@@ -454,7 +511,6 @@ impl Element for HistoryScrubber {
                 state,
                 now_word: &words.now,
                 strings_version: *strings_version,
-                frame_version: *frame_version,
             };
             paint_strip(scrubber, &input, &env, bounds, window, cx);
         });
@@ -721,8 +777,6 @@ struct Input<'a> {
     state: &'a HistoryUiState,
     now_word: &'a SharedString,
     strings_version: u64,
-    /// The page's count of installed views; a TopAt answer does not change it.
-    frame_version: u64,
 }
 
 impl Input<'_> {
@@ -790,8 +844,8 @@ fn paint_strip(
     }
 
     let key = GeometryKey {
-        version: input.frame_version,
-        query_id: input.view.map_or(0, |v| v.query_id),
+        has_frames,
+        now: input.now(),
         physical_width: pw,
         physical_height: ph,
         scale_factor_bits: sf.to_bits(),
@@ -801,8 +855,9 @@ fn paint_strip(
         strings_version: input.strings_version,
         style_version: env.metrics.style_version,
     };
-    if cache.key != Some(key) {
+    if cache.key != Some(key) || !cache.data.same(input.view) {
         cache.key = Some(key);
+        cache.data = BuiltData::of(input.view);
         build(cache, input, env, &map, ph as f32, window);
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
