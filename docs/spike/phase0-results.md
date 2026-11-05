@@ -1127,6 +1127,77 @@ first steps and need no GPUI change. I do not know whether they can reach 1.0 ms
 own. The per-vertex copies listed in Reading would need a GPUI change, which is the owner's
 decision (bead AC, ADR-014 rule 3). Re-measure after wlf.39 and wlf.40 before deciding.
 
+### History scrub gate (tasklens-8fx.41, 2026-11-05)
+
+Result: FAIL. Median `scrub_frame_ms.p99` is 6.59 ms (hidden nested KWin, 60 Hz), gate 4.0 ms.
+Fix bead: tasklens-8fx.47. All numbers here are close to, not exactly, the 144 Hz screen.
+
+#### Setup
+
+- Same session and run script as the wlf.18 gate (`/var/tmp/claude/8fx41/harness.sh`, `run.sh`):
+  `kwin_wayland --virtual`, 1920 x 1200, `--scale 1.1`, one 60 Hz output, `TL_BENCH_REFRESH_HZ=60`,
+  private `XDG_*` folders, bench slot lock, nonexistent system bus to skip the lock check.
+  Office PC, Ryzen 9 5950X, RTX 5070 Ti.
+- Command: `cargo xtask bench --scene history-scrub --runs 3`. HEAD 48de50342 (summary says
+  `-dirty`: `.beads/issues.jsonl` and untracked folders). No Rust file was changed.
+- The gate metric is `scrub_frame_ms.p99`. xtask's own table shows `frame_cpu_ms` and picks its
+  median run by that, so the values below are read from each run JSON
+  (`/var/tmp/claude/8fx41/history-scrub-{1,2,3}.json`).
+
+#### Runs
+
+All values are hidden nested KWin, 60 Hz. Load is the 1-minute load average from `load.log` at
+the run start (report mtime minus 35 s).
+
+Attempt 1 is void: xtask rebuilt `tl-app` inside the run, so the load was 27.5 at run 1 and
+11 to 17 at runs 2 and 3. Its p99 values were 7.10, 8.89 and 13.08 ms (median 8.89 ms). Files
+are in `/var/tmp/claude/8fx41/attempt1/`.
+
+Attempt 2 (counts as the gate):
+
+| Run | Start | Load 1 min | scrub p50 | p95 | p99 | max | scrub_frames | missed_frames |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 01:44:16 | 7.6 | 5.23 ms | 8.04 ms | 9.26 ms | 13.06 ms | 1692 | 43 |
+| 2 | 01:44:51 | 9.0 (run 1 just ended) | 4.48 ms | 5.42 ms | 6.41 ms | 9.92 ms | 1799 | 0 |
+| 3 | 01:45:27 | 6.6 | 4.42 ms | 5.72 ms | 6.59 ms | 9.25 ms | 1799 | 0 |
+
+Run 2 started with load slightly above 8 because of run 1's own load. Its p99 is the lowest of
+the three, so the median is not inflated by it. Missed frames use the 60 Hz limits (25.0 ms,
+50.0 ms); there is no missed-frame gate for this scene.
+
+#### Gate
+
+| Metric | Rule | Median of 3 | Result |
+|---|---|---|---|
+| `scrub_frame_ms.p99` (UI-PRC-032) | <= 4.0 ms | 6.59 ms (hidden nested KWin, 60 Hz) | FAIL |
+
+Even p50 (4.42 to 5.23 ms) is above 4.0 ms.
+
+#### Profile
+
+One profiled run (profiling build, relinked as in the wlf.41 section, `perf record -e cpu-clock:u
+-F 499 --call-graph dwarf,65528`): p99 6.58 ms, load 7.35 at start. 4,906 main-thread samples,
+2,960 (60%) reach `main`, so shares are lower bounds. Files: `/var/tmp/claude/8fx41/`
+(`prof.data`, `script.txt`).
+
+Inclusive share of main-thread samples whose stack holds the frame (hidden nested KWin, 60 Hz):
+
+| Frame | Share |
+|---|---|
+| `HistoryTableDelegate` (any method) | 40.7% |
+| taffy | 28.1% |
+| `lyon` (path tessellation) | 17.0% |
+| `render_frame` (GPU submit) | 12.7% |
+| `StyledText` | 8.7% |
+| `sort` | 7.0% |
+| `BoundsTree` | 5.4% |
+| `HistoryTableDelegate::rebuild` | about 4% (any frame matching `rebuild`: 4.1%) |
+
+By kind (exclusive): GPUI elements 44.6%, GPU submit 17.5%, taffy 15.3%, text 10.4%, our code
+8.3%, scene build 3.7%. These match the 2026-10-15 suspects: lyon fill tessellation of the chart
+and scrubber paths, taffy layout, `BoundsTree::insert`, and row re-sorting. The fix belongs in
+`crates/tl-ui-procs/src/pages/processes/history/`, not in the bench scene (tasklens-8fx.47).
+
 ## First frame, minimized CPU and RSS
 
 ### Gate runs (tasklens-wlf.19, 2026-11-04)
