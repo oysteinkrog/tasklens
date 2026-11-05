@@ -33,6 +33,10 @@ pub const PACING_ENV: &str = "TL_PIXEL_PACING";
 /// A paced chart is notified by a frame that comes at most this long before its pixel step: about
 /// half a frame at 120 Hz to 144 Hz, so the frame nearest the step draws it.
 pub const PACE_SLACK: Duration = Duration::from_millis(4);
+/// Once one paced requester is due, the ones due up to this much later draw in the same frame.
+/// Charts that paint in one frame request one after another, so their due times differ by up to
+/// about 1 ms; without this they split over two frames (wlf.31 measurement).
+pub const PACE_MERGE: Duration = Duration::from_millis(2);
 
 /// How moving charts are paced (wlf.31).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -452,7 +456,10 @@ impl AnimationDriver {
             App::notify(cx, id);
         }
         if !self.paced.is_empty() {
-            let edge = now + PACE_SLACK;
+            let mut edge = now + PACE_SLACK;
+            if self.paced.values().any(|due| *due <= edge) {
+                edge += PACE_MERGE;
+            }
             self.paced.retain(|&id, due| {
                 let is_due = *due <= edge;
                 if is_due {

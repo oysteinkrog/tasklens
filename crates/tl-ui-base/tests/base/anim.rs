@@ -464,6 +464,28 @@ fn driver_paced_fastest_chart_wins(cx: &mut TestAppContext) {
     );
 }
 
+/// Charts that paint in one frame request a little apart; they still draw in one frame.
+#[gpui_kit::test]
+fn driver_paced_merges_charts_painted_together(cx: &mut TestAppContext) {
+    let (driver, vcx) = rig(cx);
+    set_pacing(&driver, vcx, Pacing::Timer);
+    let paced = Paced::new(vcx, &[30, 30, 30]);
+    // Due at 30, 30.7 and 31.5 ms, as three paints a few hundred microseconds apart give.
+    for (i, extra_us) in [(1, 700), (2, 1_500)] {
+        let (id, _) = paced.ids[i];
+        vcx.update(|window, cx| {
+            AnimationDriver::global(window, cx).update(cx, |d, cx| {
+                d.request_paced(id, 30 * MS + extra_us * 1_000, window, cx)
+            })
+        });
+    }
+    advance(vcx, 26);
+    assert!(armed(&driver, vcx), "armed 4 ms before the first step");
+    assert_eq!(frame(vcx), 1);
+    assert_eq!(paced.notified(), [1, 1, 1], "one frame draws all three");
+    assert_eq!(notify_frames(&driver, vcx), 1);
+}
+
 #[gpui_kit::test]
 fn driver_unpaced_request_keeps_vsync_with_pacing_on(cx: &mut TestAppContext) {
     let (driver, vcx) = rig(cx);
