@@ -789,6 +789,10 @@ impl FillMesh {
         self.path.as_ref().map_or(0, |p| p.vertices.len())
     }
 
+    fn vertices(&self) -> &[PathVertex<Pixels>] {
+        self.path.as_ref().map_or(&[], |p| &p.vertices)
+    }
+
     /// The vertex buffer (the unused spare when no triangle was added) with the bounds so far.
     fn into_parts(self) -> MeshParts {
         let vertices = match (self.path, self.spare) {
@@ -958,8 +962,12 @@ impl StrokeMesh {
         self.stroke_line_marked(points, |_| {});
     }
 
-    /// `stroke_line` that calls `mark` with the vertex count after each segment.
-    fn stroke_line_marked(&mut self, points: &[Point<Pixels>], mut mark: impl FnMut(usize)) {
+    /// `stroke_line` that calls `mark` with every vertex so far after each segment.
+    fn stroke_line_marked(
+        &mut self,
+        points: &[Point<Pixels>],
+        mut mark: impl FnMut(&[PathVertex<Pixels>]),
+    ) {
         if self.half_width <= 0.0 || points.len() < 2 {
             return;
         }
@@ -1011,7 +1019,7 @@ impl StrokeMesh {
             if let Some((a, b, c)) = bevel {
                 self.tri(a, b, c);
             }
-            mark(self.len());
+            mark(self.vertices());
             start = next_start;
         }
     }
@@ -1065,6 +1073,10 @@ impl StrokeMesh {
     /// Vertices pushed so far.
     fn len(&self) -> usize {
         self.path.as_ref().map_or(0, |p| p.vertices.len())
+    }
+
+    fn vertices(&self) -> &[PathVertex<Pixels>] {
+        self.path.as_ref().map_or(&[], |p| &p.vertices)
     }
 
     /// The vertex buffer (the unused spare when no triangle was added) with the bounds so far.
@@ -1773,13 +1785,39 @@ impl CellPiece {
     }
 }
 
+/// One segment of a piece mesh: its vertex count and the smallest and largest x and y of those
+/// vertices (`f32::MAX` and `f32::MIN` when it has none).
+#[derive(Clone, Copy, Debug)]
+struct Seg {
+    n: u8,
+    min: (f32, f32),
+    max: (f32, f32),
+}
+
+impl Seg {
+    /// The segment made of `verts`.
+    fn of(verts: &[PathVertex<Pixels>]) -> Self {
+        let (mut min, mut max) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+        for v in verts {
+            let (x, y) = (f32::from(v.xy_position.x), f32::from(v.xy_position.y));
+            min = (min.0.min(x), min.1.min(y));
+            max = (max.0.max(x), max.1.max(y));
+        }
+        Self {
+            n: verts.len() as u8,
+            min,
+            max,
+        }
+    }
+}
+
 /// One mesh of a piece. A deque, so dropping old segments at the front and adding new ones at
 /// either end moves no other vertex.
 #[derive(Default)]
 struct PieceMesh {
     verts: VecDeque<PathVertex<Pixels>>,
-    /// Vertices per segment, oldest first, while the piece can splice.
-    seg: VecDeque<u8>,
+    /// Each segment's vertex count and bounds, oldest first, while the piece can splice.
+    seg: VecDeque<Seg>,
     /// Smallest and largest x and y of `verts`.
     min: (f32, f32),
     max: (f32, f32),
@@ -1807,8 +1845,8 @@ impl PieceMesh {
 
     /// Drops every segment outside `keep`.
     fn keep(&mut self, keep: std::ops::Range<usize>) {
-        let count = |segs: std::collections::vec_deque::Iter<'_, u8>| -> usize {
-            segs.map(|&n| usize::from(n)).sum()
+        let count = |segs: std::collections::vec_deque::Iter<'_, Seg>| -> usize {
+            segs.map(|s| usize::from(s.n)).sum()
         };
         let tail = count(self.seg.range(keep.end..));
         self.verts.truncate(self.verts.len() - tail);
@@ -1818,8 +1856,8 @@ impl PieceMesh {
         self.seg.drain(..keep.start);
     }
 
-    /// Adds `verts` with their per-segment counts `seg` before (`front`) or after the rest.
-    fn add(&mut self, verts: &[PathVertex<Pixels>], seg: &[u8], front: bool) {
+    /// Adds `verts` with their segments `seg` before (`front`) or after the rest.
+    fn add(&mut self, verts: &[PathVertex<Pixels>], seg: &[Seg], front: bool) {
         if front {
             for v in verts.iter().rev() {
                 self.verts.push_front(v.clone());
@@ -1833,13 +1871,13 @@ impl PieceMesh {
         }
     }
 
-    /// Measures the bounds again after a splice.
+    /// The bounds again after a splice, from the segments' bounds: the same numbers as a scan
+    /// of every vertex.
     fn rebound(&mut self) {
         let (mut min, mut max) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
-        for v in &self.verts {
-            let (x, y) = (f32::from(v.xy_position.x), f32::from(v.xy_position.y));
-            min = (min.0.min(x), min.1.min(y));
-            max = (max.0.max(x), max.1.max(y));
+        for s in &self.seg {
+            min = (min.0.min(s.min.0), min.1.min(s.min.1));
+            max = (max.0.max(s.max.0), max.1.max(s.max.1));
         }
         self.min = min;
         self.max = max;
@@ -1851,8 +1889,8 @@ impl PieceMesh {
 struct SpliceBufs {
     fill: Vec<PathVertex<Pixels>>,
     stroke: Vec<PathVertex<Pixels>>,
-    fill_seg: Vec<u8>,
-    stroke_seg: Vec<u8>,
+    fill_seg: Vec<Seg>,
+    stroke_seg: Vec<Seg>,
 }
 
 impl SpliceBufs {
@@ -1876,11 +1914,11 @@ impl SpliceBufs {
             if let Some(b) = baseline {
                 let n = fill.len();
                 fill.band(&pts[j..j + 2], |_, p| point(p.x, b));
-                self.fill_seg.push((fill.len() - n) as u8);
+                self.fill_seg.push(Seg::of(&fill.vertices()[n..]));
             }
             let n = stroke.len();
             stroke.segment(pts, j);
-            self.stroke_seg.push((stroke.len() - n) as u8);
+            self.stroke_seg.push(Seg::of(&stroke.vertices()[n..]));
         }
         self.fill = fill.into_parts().0;
         self.stroke = stroke.into_parts().0;
@@ -2084,14 +2122,14 @@ pub fn build_cell(
                     for w in clipped.windows(2) {
                         let n = fill.len();
                         fill.band(w, |_, p| point(p.x, b));
-                        piece_fill.seg.push_back((fill.len() - n) as u8);
+                        piece_fill.seg.push_back(Seg::of(&fill.vertices()[n..]));
                     }
                 }
                 if clipped.len() >= 2 && !has_short_segment(clipped) {
                     let mut last = stroke.len();
-                    stroke.stroke_line_marked(clipped, |n| {
-                        piece_stroke.seg.push_back((n - last) as u8);
-                        last = n;
+                    stroke.stroke_line_marked(clipped, |verts| {
+                        piece_stroke.seg.push_back(Seg::of(&verts[last..]));
+                        last = verts.len();
                     });
                     piece_pts.clear();
                     piece_pts.extend_from_slice(clipped);
@@ -2325,7 +2363,7 @@ mod tests {
         assert!(!has_short_segment(&pts));
         let mut whole = StrokeMesh::reusing(None, GRID_LINE_WIDTH, false);
         let mut marks = Vec::new();
-        whole.stroke_line_marked(&pts, |n| marks.push(n));
+        whole.stroke_line_marked(&pts, |v| marks.push(v.len()));
         let mut parts = StrokeMesh::reusing(None, GRID_LINE_WIDTH, false);
         let mut ends = Vec::new();
         for j in 0..pts.len() - 1 {
