@@ -326,6 +326,14 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     /// Row line canvases (guides and separators) built since the last render.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub line_canvases: Cell<u32>,
+    /// Metric cells built as a `div` since the last render. Plain cells of rows that are not
+    /// hovered are painted by the row canvas and not counted.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub cell_divs_last_frame: Cell<u32>,
+    /// Builds every metric cell as a `div`, as before the row canvas. For tests that compare the
+    /// two paths.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub force_div_cells: bool,
 }
 
 /// The typed table state the core does not hold.
@@ -470,6 +478,10 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             guide_quads: Rc::default(),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             line_canvases: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            cell_divs_last_frame: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            force_div_cells: false,
         }
     }
 
@@ -490,6 +502,10 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             guide_quads,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             line_canvases,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            cell_divs_last_frame,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            force_div_cells,
             ..
         } = self;
         let host = Host {
@@ -502,6 +518,8 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             hooks: Hooks {
                 rows_built: rows_built_last_frame,
                 line_canvases,
+                cell_divs: cell_divs_last_frame,
+                force_div_cells: *force_div_cells,
                 separators: separator_quads,
                 guides: guide_quads,
             },
@@ -798,6 +816,8 @@ impl<D: TreeTableDelegate> ColumnHost for WeakEntity<TlTreeTable<D>> {
 struct Hooks<'a> {
     rows_built: &'a Cell<u32>,
     line_canvases: &'a Cell<u32>,
+    cell_divs: &'a Cell<u32>,
+    force_div_cells: bool,
     separators: &'a Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
     guides: &'a Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
 }
@@ -1061,6 +1081,15 @@ impl<D: TreeTableDelegate, X> DynRows for Host<'_, D, X> {
         n.set(n.get() + 1);
     }
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    fn count_cell_div(&self) {
+        let n = self.hooks.cell_divs;
+        n.set(n.get() + 1);
+    }
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    fn force_div_cells(&self) -> bool {
+        self.hooks.force_div_cells
+    }
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     fn quad_logs(&self) -> QuadLogs {
         (self.hooks.guides.clone(), self.hooks.separators.clone())
     }
@@ -1255,6 +1284,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             self.separator_quads.borrow_mut().clear();
             self.guide_quads.borrow_mut().clear();
             self.line_canvases.set(0);
+            self.cell_divs_last_frame.set(0);
         }
         self.core.x_offset = -ScrollbarHandle::offset(&self.core.scroll).x;
         self.with_host(cx, |core, h| {

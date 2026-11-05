@@ -667,11 +667,7 @@ impl Element for CellText {
         cx: &mut App,
     ) {
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-        PAINTED_TEXTS.with_borrow_mut(|log| {
-            if let Some(log) = log {
-                log.push((bounds, self.inner.layout().text().into()));
-            }
-        });
+        log_painted_text(bounds, self.inner.layout().text().into());
         let mask = (self.fit == Fit::Clip).then_some(ContentMask { bounds });
         window.with_content_mask(mask, |window| {
             self.inner
@@ -690,6 +686,17 @@ thread_local! {
     /// recording.
     static PAINTED_TEXTS: std::cell::RefCell<Option<Vec<PaintedText>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Adds one painted cell text to the record, when recording. The row canvas calls it with the
+/// bounds `CellText` would have.
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+pub(crate) fn log_painted_text(bounds: Bounds<Pixels>, text: SharedString) {
+    PAINTED_TEXTS.with_borrow_mut(|log| {
+        if let Some(log) = log {
+            log.push((bounds, text));
+        }
+    });
 }
 
 /// Starts recording the shaped text of every text, path and numeric cell painted on this

@@ -16,9 +16,9 @@
 //! round half toward zero, relative to the row's origin (the list lays out each row as a root).
 
 use gpui_kit::{
-    App, Bounds, ContentMask, HighlightStyle, Hsla, IntoElement, Pixels, Point, SharedString,
-    Styled, TextOverflow, TextRun, TextStyle, TextStyleRefinement, TruncateFrom, WhiteSpace,
-    Window, canvas, fill, point, px, size,
+    App, Bounds, ContentMask, HighlightStyle, Hsla, IntoElement, Pixels, Point, Refineable as _,
+    SharedString, Styled, TextOverflow, TextRun, TextStyle, TextStyleRefinement, TruncateFrom,
+    WhiteSpace, Window, canvas, fill, point, px, size,
 };
 use smallvec::SmallVec;
 use std::rc::Rc;
@@ -169,7 +169,7 @@ pub(crate) fn row_canvas(
 
 /// GPUI's layout rounding of a logical length to whole device pixels (`round_to_device_pixel`).
 fn dp(v: Pixels, s: f32) -> f32 {
-    round_half_toward_zero(v.0 * s)
+    round_half_toward_zero(f32::from(v) * s)
 }
 
 fn round_half_toward_zero(v: f32) -> f32 {
@@ -249,7 +249,7 @@ fn paint_cell(
     let wrap = (style.white_space == WhiteSpace::Normal).then_some(available);
     let (text, runs) = fit_text(cell, &style, available, line_height, &runs, window, cx);
     // One line: the measured height rounds up to whole device pixels.
-    let text_h = (line_height.0 * s).ceil();
+    let text_h = (f32::from(line_height) * s).ceil();
     let top = (row_h - text_h) / 2.;
     let text_box = snapped(
         row,

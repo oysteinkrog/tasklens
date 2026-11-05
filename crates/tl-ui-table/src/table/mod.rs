@@ -5,6 +5,7 @@ pub mod cells;
 pub mod columns;
 pub mod columns_window;
 pub mod header;
+mod row_paint;
 pub mod selection;
 pub mod sys_copy;
 pub mod sys_status;

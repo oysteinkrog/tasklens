@@ -34,7 +34,8 @@ use tl_ui_table::table::actions::{
 };
 use tl_ui_table::table::cells::{
     CellCtx, CellOut, DIM_OPACITY, attach_cell_tooltip, cell_background, cell_text_color,
-    glyph_cell, guide_quads, numeric_cell, text_cell, with_overrides,
+    glyph_cell, guide_quads, numeric_cell, record_painted_texts, take_painted_texts, text_cell,
+    with_overrides,
 };
 use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
@@ -746,6 +747,55 @@ fn tree_table_renders_visible_range_only() {
     assert!(built <= 27, "{built} rows built after scrolling");
 }
 
+/// rsf.32: the row canvas paints the plain metric cells, so a row that is not hovered builds no
+/// metric cell `div`. The hovered row builds one per metric column, and a cell with a status dot
+/// stays a `div` on every row. Pins the lower per-row layout work (UI-PRC-023).
+#[test]
+fn plain_rows_build_no_cell_divs() {
+    let cell_divs = |table: &Entity<TlTreeTable<TDelegate>>, vcx: &mut VisualTestContext| {
+        vcx.update(|_, cx| table.read(cx).cell_divs_last_frame.get())
+    };
+    let mut cx = cosmic_cx();
+    let rows = (0..20).map(plain).collect();
+    let (table, vcx) = open_table(&mut cx, five_columns(rows), 600., 200.);
+    let built = vcx.update(|_, cx| table.read(cx).rows_built_last_frame.get());
+    assert!(built >= 7, "{built} rows built");
+    assert_eq!(
+        cell_divs(&table, vcx),
+        0,
+        "no hover: every metric cell painted"
+    );
+    record_painted_texts();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    let painted = take_painted_texts().len() as u32;
+    assert_eq!(painted, built * 4, "four metric cells on each row");
+
+    // PID, CPU, Memory and User of the hovered row.
+    hover_row(vcx, 1);
+    assert_eq!(cell_divs(&table, vcx), 4);
+
+    // A dot cell is never painted by the canvas.
+    let mut cx = cosmic_cx();
+    let rows = (0..20).map(plain).collect();
+    let mut d = five_columns(rows);
+    d.dots
+        .push((3, ColumnId::Cpu, DotStyle::Filled(LabelTone::Danger)));
+    let (table, vcx) = open_table(&mut cx, d, 600., 200.);
+    assert_eq!(cell_divs(&table, vcx), 1);
+    assert!(vcx.debug_bounds("TlCell-dot-3-cpu").is_some());
+
+    // The test hook builds every cell as a `div` again.
+    vcx.update(|_, cx| {
+        table.update(cx, |t, cx| {
+            t.force_div_cells = true;
+            cx.notify();
+        })
+    });
+    redraw(vcx);
+    let built = vcx.update(|_, cx| table.read(cx).rows_built_last_frame.get());
+    assert_eq!(cell_divs(&table, vcx), built * 4);
+}
+
 /// rsf.28: `name_weight` sets the Name text's weight. The same name at 500 is wider than at the
 /// default, normal weight, which every other table keeps.
 #[test]
@@ -856,6 +906,15 @@ fn hover_at(cx: &mut VisualTestContext, x: f32, y: f32) {
         modifiers: Modifiers::none(),
     });
     redraw(cx);
+}
+
+/// Hovers body row `ix`. The hovered row builds its metric cells as `div`s, so they get debug
+/// selectors; the row canvas paints the cells of every other row.
+fn hover_row(cx: &mut VisualTestContext, ix: usize) {
+    let body = cx.debug_bounds("TlTreeTable-body").expect("body");
+    let x = f32::from(body.left()) + 4.;
+    let y = f32::from(body.top()) + ROW_H * (ix as f32 + 0.5);
+    hover_at(cx, x, y);
 }
 
 #[test]
@@ -1054,6 +1113,7 @@ fn horizontal_scrollbar_only_on_overflow() {
         200.,
     );
     assert!(vcx.update(|_, cx| table.read(cx).horizontal_overflow()));
+    hover_row(vcx, 2);
     let label = vcx
         .debug_bounds("TlTreeTableHeader-label-cpu")
         .expect("cpu label");
@@ -1108,6 +1168,7 @@ fn last_column_clears_the_vertical_scrollbar_at_full_right_scroll() {
         200.,
     );
     scroll_x(vcx, &table, 400. + SCROLLBAR_W);
+    hover_row(vcx, 2);
     let body = vcx.debug_bounds("TlTreeTable-body").expect("body");
     let cell = vcx.debug_bounds("TlCell-numeric-2-cpu").expect("cpu cell");
     assert!(
@@ -1203,6 +1264,11 @@ fn stale_row_dims_metric_cells() {
     };
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![row]), 600., 100.);
     assert!(vcx.debug_bounds("TlNameCell-0-name").is_some());
+    // The row canvas paints the metric cells of a row that is not hovered.
+    record_painted_texts();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(!take_painted_texts().is_empty(), "metric cells painted");
+    hover_row(vcx, 0);
     assert!(vcx.debug_bounds("TlCell-numeric-0-cpu").is_some());
 }
 
@@ -3008,7 +3074,7 @@ fn separators_off_by_default() {
     let rows = (0..3).map(plain).collect();
     let (table, vcx) = open_table(&mut cx, five_columns(rows), 600., 200.);
     assert!(
-        vcx.debug_bounds("TlCell-numeric-0-pid").is_some(),
+        vcx.debug_bounds("TlNameCell-0-name").is_some(),
         "rows drawn"
     );
     assert!(separators(vcx, &table).is_empty());
@@ -3052,6 +3118,7 @@ fn separators_move_with_horizontal_scroll() {
     let mut cx = cosmic_cx();
     let (table, vcx) = open_table(&mut cx, five_columns(vec![plain(0)]), 300., 200.);
     separators_on(vcx, &table);
+    hover_row(vcx, 0);
     let before = separators(vcx, &table);
     let cell = vcx.debug_bounds("TlCell-numeric-0-pid").expect("pid cell");
     vcx.update(|_, cx| {

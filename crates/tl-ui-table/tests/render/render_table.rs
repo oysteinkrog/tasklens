@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 
 use gpui_kit::{
-    AnyView, App, AppContext as _, Context, Entity, IntoElement, Modifiers, MouseMoveEvent,
+    AnyView, App, AppContext as _, Context, Entity, Hsla, IntoElement, Modifiers, MouseMoveEvent,
     ParentElement, Pixels, Render, SharedString, Styled, TestAppContext, TestDispatcher, TextRun,
     VisualTestContext, Window, div, font, point, px, size,
 };
@@ -27,7 +27,7 @@ use tl_ui_kit::components::menu::TlMenu;
 use tl_ui_kit::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use tl_ui_pagehost::render::{RenderHarness, run_on_lavapipe};
 use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
-use tl_ui_table::table::cells::{CellOut, IconSourceCache, name_primary_text};
+use tl_ui_table::table::cells::{CellOut, CellSuffix, IconSourceCache, name_primary_text};
 use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
@@ -670,8 +670,281 @@ fn rtl_name_in_ltr_cell() {
         primary.right() <= cell.right() - px(8.),
         "{primary:?} in {cell:?}"
     );
+    // Only the hovered row builds its metric cells as `div`s with debug selectors.
+    hover_at(vcx, 30., HEADER_H_ONE + ROW_H * 1.5);
     let cpu = vcx
         .debug_bounds("TlCell-numeric-1-cpu")
         .expect("CPU cell drawn");
     assert_eq!(cpu.origin.x, cell.origin.x + px(RTL_NAME_W));
+}
+
+// ---------------------------------------------------------------------------------------------
+// tasklens-rsf.32: the row canvas paints the plain metric cells of rows that are not hovered.
+// It must draw what the `div` cells draw, pixel for pixel, or a row would jump when the pointer
+// moves onto it.
+
+/// Parity columns: an end-ellipsized text, a middle-ellipsized path with a suffix, a numeric
+/// that fits, a numeric that is clipped, a numeric with a suffix and a numeric with heat.
+fn parity_specs() -> Vec<ColumnSpec> {
+    vec![
+        spec(ColumnId::Name, "Name", ColumnKind::Text, 110.),
+        spec(ColumnId::Cmdline, "Command", ColumnKind::Text, 90.),
+        spec(ColumnId::ImagePath, "Path", ColumnKind::Path, 120.),
+        spec(ColumnId::Cpu, "CPU", ColumnKind::Numeric, 70.),
+        spec(ColumnId::Memory, "Memory", ColumnKind::Numeric, 50.),
+        spec(ColumnId::Pid, "PID", ColumnKind::Numeric, 80.),
+        spec(ColumnId::Swap, "Swap", ColumnKind::Numeric, 70.),
+    ]
+}
+
+const PARITY_W: f32 = 640.;
+const PARITY_ROWS: usize = 6;
+/// Row 3 is selected: no heat, selected text colours.
+const PARITY_SELECTED: u32 = 3;
+
+/// The colours the parity cells use, read from the theme when the delegate is made.
+#[derive(Clone, Copy)]
+struct ParityColors {
+    heat: Hsla,
+    danger: Hsla,
+    secondary: Hsla,
+    selected_secondary: Hsla,
+    custom: Hsla,
+}
+
+struct ParityDelegate {
+    specs: Vec<ColumnSpec>,
+    layout: ColumnLayout,
+    colors: ParityColors,
+}
+
+impl ParityDelegate {
+    fn new(ui_scale: f32, cx: &App) -> Self {
+        let specs = parity_specs();
+        let order: Vec<ColumnId> = specs.iter().map(|s| s.id).collect();
+        let mut layout = ColumnLayout::defaults(TableId::Processes, &specs, &order, &order);
+        layout.rebuild(ui_scale);
+        let theme = current(cx);
+        Self {
+            specs,
+            layout,
+            colors: ParityColors {
+                heat: theme.accent.opacity(0.35),
+                danger: theme.status.danger,
+                secondary: theme.text_secondary,
+                selected_secondary: theme.text_selected_secondary,
+                custom: theme.status.warning,
+            },
+        }
+    }
+}
+
+const PARITY_PATH: &str = "/usr/lib/firefox/firefox-bin (deleted)";
+const DELETED: &str = " (deleted)";
+
+impl TreeTableDelegate for ParityDelegate {
+    type RowId = u32;
+    type Column = ColumnId;
+    type Sort = SortSpec;
+
+    fn row_count(&self) -> usize {
+        PARITY_ROWS
+    }
+    fn row_id(&self, ix: usize) -> u32 {
+        ix as u32
+    }
+    fn row_index(&self, id: u32) -> Option<usize> {
+        ((id as usize) < PARITY_ROWS).then_some(id as usize)
+    }
+    fn row_kind(&self, _: usize) -> RowKind {
+        RowKind::Process
+    }
+    fn row_depth(&self, _: usize) -> u8 {
+        0
+    }
+    fn row_expandable(&self, _: usize) -> Option<bool> {
+        None
+    }
+    /// Row 2 is a STALE row, row 4 a NEW row, row 5 an EXITED row.
+    fn row_flags(&self, ix: usize) -> RowFlags {
+        let mut flags = RowFlags::default();
+        flags.bits = match ix {
+            2 => RowFlags::STALE,
+            4 => RowFlags::NEW,
+            5 => RowFlags::EXITED,
+            _ => 0,
+        };
+        flags
+    }
+    fn table_version(&self) -> u64 {
+        1
+    }
+    fn columns(&self) -> &ColumnLayout {
+        &self.layout
+    }
+    fn column_spec(&self, id: ColumnId) -> &ColumnSpec {
+        self.specs
+            .iter()
+            .find(|s| s.id == id)
+            .expect("spec for every column")
+    }
+    fn cell(&self, ix: usize, col: ColumnId, out: &mut CellOut) {
+        let c = self.colors;
+        let pos = self.specs.iter().position(|s| s.id == col).unwrap_or(0);
+        out.bits = (ix * 16 + pos) as u64;
+        // Row 1 shows Stale values in CPU and Memory.
+        out.validity = if ix == 1 && matches!(col, ColumnId::Cpu | ColumnId::Memory) {
+            Validity::Stale
+        } else {
+            Validity::Valid
+        };
+        let heat = ix != 1 && matches!(col, ColumnId::Cpu | ColumnId::Swap);
+        if heat {
+            out.background = Some(c.heat);
+        }
+        let text = match col {
+            ColumnId::Cmdline => {
+                if ix == 1 {
+                    out.text_color = Some(c.custom);
+                }
+                "/usr/bin/some-very-long-command --with --flags"
+            }
+            ColumnId::ImagePath => {
+                out.arc = Some(PARITY_PATH.into());
+                out.suffix = Some(CellSuffix {
+                    len: DELETED.len(),
+                    color: c.danger,
+                    selected_color: c.danger,
+                });
+                PARITY_PATH
+            }
+            ColumnId::Cpu => "12.5%",
+            ColumnId::Memory => "123,456.7 MiB",
+            ColumnId::Pid => {
+                out.suffix = Some(CellSuffix {
+                    len: " +3".len(),
+                    color: c.secondary,
+                    selected_color: c.selected_secondary,
+                });
+                "4242 +3"
+            }
+            ColumnId::Swap => {
+                out.dim = ix == 4;
+                "1.2 GiB"
+            }
+            _ => "",
+        };
+        if out.want_text {
+            out.text.push_str(text);
+        }
+    }
+    fn name_cell(&self, ix: usize) -> NameCell {
+        NameCell {
+            icon: NameIcon::None,
+            icon_size: IconSlot::Small,
+            primary: SharedString::new_static(NAMES[ix % NAMES.len()]),
+            count_run: None,
+            secondary: None,
+            glyphs: SmallVec::new(),
+            highlight_fffd: true,
+            trailing: None,
+        }
+    }
+    fn header_total(&self, _: ColumnId, _: &mut CellOut) -> bool {
+        false
+    }
+    fn sort(&self) -> SortSpec {
+        SortSpec {
+            column: ColumnId::Cpu,
+            ascending: false,
+        }
+    }
+    fn selectable(&self, _: usize) -> bool {
+        true
+    }
+    fn context_menu(
+        &mut self,
+        _: &[u32],
+        _: Option<ColumnId>,
+        menu: TlMenu,
+        _: &mut Window,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) -> TlMenu {
+        menu
+    }
+    fn on_toggle_expand(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_sort(&mut self, _: ColumnId, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_columns_changed(&mut self, _: &ColumnLayout, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_visible_range(&mut self, _: &[u32], _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_activate(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+    fn row_tooltip(&self, _: usize) -> Option<AnyView> {
+        None
+    }
+    fn empty_text(&self) -> Option<SharedString> {
+        None
+    }
+    fn header_lines(&self) -> HeaderLines {
+        HeaderLines::One
+    }
+}
+
+struct ParityRoot {
+    table: Entity<TlTreeTable<ParityDelegate>>,
+}
+
+impl Render for ParityRoot {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(current(cx).window_bg)
+            .child(self.table.clone())
+    }
+}
+
+/// The parity table at `scale`, with every metric cell a `div` when `divs` is set, else with
+/// the row canvas.
+fn render_parity(scale: f32, divs: bool) -> RgbaImage {
+    let mut harness = RenderHarness::new();
+    harness.set_theme("Default Dark");
+    harness.set_scale(scale);
+    let height = HEADER_H_ONE + ROW_H * PARITY_ROWS as f32 + 8.;
+    harness.render(size(px(PARITY_W), px(height)), |window, cx| {
+        tl_ui_base::i18n::init_strings(cx, "en-US");
+        let s = metrics(cx).ui_scale;
+        let delegate = ParityDelegate::new(s, cx);
+        let table = cx.new(|cx| {
+            let mut t = TlTreeTable::new(delegate, window, cx);
+            t.selection.click(PARITY_SELECTED);
+            t.force_div_cells = divs;
+            t
+        });
+        cx.new(|_| ParityRoot { table })
+    })
+}
+
+fn check_parity(scale: f32) {
+    let divs = render_parity(scale, true);
+    let canvas = render_parity(scale, false);
+    assert_eq!(divs.dimensions(), canvas.dimensions());
+    let diff: Vec<(u32, u32)> = divs
+        .enumerate_pixels()
+        .filter(|(x, y, p)| canvas.get_pixel(*x, *y) != *p)
+        .map(|(x, y, _)| (x, y))
+        .collect();
+    assert!(
+        diff.is_empty(),
+        "ui_scale {scale}: {} pixels differ, first {:?}",
+        diff.len(),
+        &diff[..diff.len().min(8)]
+    );
+}
+
+#[test]
+fn canvas_rows_match_div_rows() {
+    run_on_lavapipe("render_table::canvas_rows_match_div_rows", || {
+        check_parity(1.0);
+        check_parity(1.1);
+    });
 }

@@ -45,6 +45,7 @@ use crate::table::cells::{
 };
 use crate::table::columns::{ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId};
 use crate::table::columns_window::ColumnHost;
+use crate::table::row_paint::{CanvasCells, CanvasStyles, canvas_cell, plain_cell, row_canvas};
 use crate::table::tree_header::HeaderCore;
 use crate::table::tree_table::{
     CHEVRON, CHEVRON_HIT_W, EMPTY_STATE_TOP, HeaderLines, ICON_GAP, NameCell, NameIcon,
@@ -232,6 +233,12 @@ pub(crate) trait DynRows {
     fn set_rows_built(&self, rows: u32);
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     fn count_line_canvas(&self);
+    /// Counts one metric cell built as a `div`.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    fn count_cell_div(&self);
+    /// `TlTreeTable::force_div_cells`.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    fn force_div_cells(&self) -> bool;
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     fn quad_logs(&self) -> QuadLogs;
 }
@@ -293,6 +300,8 @@ struct FrameCtx {
     visible: Arc<[ColKey]>,
     offsets: Arc<[Pixels]>,
     name_col: Option<ColKey>,
+    /// The text styles of the row canvases.
+    canvas: Rc<CanvasStyles>,
 }
 
 /// The table state that does not depend on the delegate type.
@@ -563,6 +572,7 @@ impl TreeTableCore {
             visible,
             offsets,
             name_col: host.name_column(),
+            canvas: Rc::new(CanvasStyles::new(&m)),
         };
         let columns = frame.visible.len();
         if self.hover_clips.len() < columns {
@@ -681,6 +691,13 @@ impl TreeTableCore {
         let focused = host.is_focus(ix);
         // The Name cell's tree guides, when this row draws any: (depth, cell left, cell width).
         let mut guides = None;
+        // Plain metric cells go to the row canvas, except on the hovered row: its cells need
+        // the truncation flags and the tooltips only a `div` cell has.
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        let paint = !hovered && !host.force_div_cells();
+        #[cfg(not(any(test, debug_assertions, feature = "test-hooks")))]
+        let paint = !hovered;
+        let mut painted = CanvasCells::new();
 
         row = row.on_mouse_move(listen(
             &self.link,
@@ -752,7 +769,19 @@ impl TreeTableCore {
                 continue;
             }
 
-            let (mut cell, text) = self.build_cell(ix, key, col, pos, hovered, &ctx, window, host);
+            let (kind, text) = self.cell_text(ix, key, col, hovered, &ctx, window, host);
+            if paint && plain_cell(&self.out) {
+                painted.push(canvas_cell(kind, text, &self.out, &ctx, x, plain));
+                continue;
+            }
+            let flag = if hovered {
+                self.hover_clips[pos].clone()
+            } else {
+                self.clip_sink.clone()
+            };
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            host.count_cell_div();
+            let mut cell = value_cell(kind, text.clone(), &self.out, flag, &ctx);
             if let Some(color) = cell_text_color(&self.out, &ctx) {
                 cell = cell.text_color(color);
             }
@@ -767,6 +796,10 @@ impl TreeTableCore {
                 cell = self.attach_cell_tip(cell, col, pos, text, row_key, window, host);
             }
             row = row.child(cell.absolute().top_0().left(x));
+        }
+        if !painted.is_empty() {
+            let opacity = stale.then(|| metric_cell_opacity(flags));
+            row = row.child(row_canvas(painted, f.canvas.clone(), opacity));
         }
         if f.separators || guides.is_some() {
             // Painted after the cells so the cell fills do not cover the lines.
@@ -903,30 +936,24 @@ impl TreeTableCore {
         )
     }
 
-    /// One metric cell and the text it shows. Leaves the delegate's output in `self.out` for the
-    /// caller's overrides.
+    /// The kind and the shown text of one metric cell. Leaves the delegate's output in
+    /// `self.out` for the caller, which builds the cell.
     #[allow(clippy::too_many_arguments)]
-    fn build_cell(
+    fn cell_text(
         &mut self,
         ix: usize,
         key: RowKey,
         col: ColKey,
-        pos: usize,
         hovered: bool,
         ctx: &CellCtx,
         window: &mut Window,
         host: &mut dyn DynTreeDelegate,
-    ) -> (Div, SharedString) {
+    ) -> (ColumnKind, SharedString) {
         self.out.reset();
         // Only the hovered row attaches tooltips, so only it asks for the ones that allocate.
         self.out.want_tooltip = hovered && self.hover_tips_ready;
         host.cell(ix, col, &mut self.out);
         let kind = host.col_kind(col);
-        let flag = if hovered {
-            self.hover_clips[pos].clone()
-        } else {
-            self.clip_sink.clone()
-        };
         let text = match self.out.arc.clone() {
             Some(arc) if kind == ColumnKind::Path => {
                 let room = (ctx.width - ctx.m.sp[4] * 2.0).max(Pixels::ZERO);
@@ -952,8 +979,7 @@ impl TreeTableCore {
             Some(arc) => self.text_cache.get_or_insert_arc(key, col, &arc),
             None => self.formatted_text(ix, key, col, host),
         };
-        let cell = value_cell(kind, text.clone(), &self.out, flag, ctx);
-        (cell, text)
+        (kind, text)
     }
 
     /// The cached display text of a cell whose delegate output in `self.out` has no `arc`.
