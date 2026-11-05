@@ -762,9 +762,20 @@ fn settle_path_views(
     panic!("the CPU page path views did not settle in 200 frames: {ids:?}");
 }
 
+/// The sequence of the snapshot the local hub holds.
+fn hub_sequence(cx: &mut VisualTestContext) -> u64 {
+    cx.update(|_, cx| {
+        HostContext::local_hub(cx)
+            .expect("the local hub")
+            .read(cx)
+            .current()
+            .sequence
+    })
+}
+
 /// The view renders of one perf-cpu animation frame on the CPU page path (tasklens-wlf.40),
-/// pinned: the median over 40 frames of each view's renders in a frame, so a frame that also
-/// took a 10 Hz publish does not move it.
+/// pinned: the median over 40 frames of each view's renders in a frame. Only frames in which
+/// the hub installed no 10 Hz publish are counted (tasklens-ff0y5).
 ///
 /// Before tasklens-wlf.40 the header row had no view of its own: each CPU page render built it
 /// again, with the header value view, whose card chart notified it on every frame. Now the
@@ -776,7 +787,7 @@ fn settle_path_views(
 ///
 /// The frames are counted from the steady state (tasklens-ff0y5): after the first 1 Hz SYSTEM
 /// publish, which places the CPU page's widgets again, and once no path view is replaced for 3
-/// frames. A view replaced during the counted frames fails the test by name.
+/// frames. A view replaced or a render count that goes down later fails the test by name.
 #[gpui_kit::test]
 fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
@@ -789,9 +800,17 @@ fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
     wait_for_first_system(&mut vcx);
     let settled = settle_path_views(&scene, &mut vcx);
     let frames = 40usize;
+    let max_frames = 400usize;
     let mut per_frame: Vec<[u32; PATH_VIEWS.len()]> = Vec::with_capacity(frames);
     let mut before = path_counts(&scene, &mut vcx);
-    for frame in 0..frames {
+    let mut sequence = hub_sequence(&mut vcx);
+    let mut frame = 0;
+    while per_frame.len() < frames {
+        assert!(
+            frame < max_frames,
+            "only {} of {max_frames} frames took no 10 Hz publish; {frames} are needed",
+            per_frame.len()
+        );
         // The test platform draws a dirty window once the update's effects are flushed, as a
         // real platform draws on the next frame. A forced `draw` would render the root and its
         // plain children a second time.
@@ -802,7 +821,7 @@ fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
         let ids = path_ids(&scene, &mut vcx);
         assert!(
             ids == settled,
-            "a CPU page path view was replaced in counted frame {frame}: {}",
+            "a CPU page path view was replaced in frame {frame}: {}",
             replaced_view(&settled, &ids)
         );
         let after = path_counts(&scene, &mut vcx);
@@ -810,13 +829,20 @@ fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
         for (i, d) in delta.iter_mut().enumerate() {
             *d = after[i].checked_sub(before[i]).unwrap_or_else(|| {
                 panic!(
-                    "{} render count went down in counted frame {frame}: {} to {}",
+                    "{} render count went down in frame {frame}: {} to {}",
                     PATH_VIEWS[i], before[i], after[i]
                 )
             });
         }
-        per_frame.push(delta);
+        // A frame that installed a 10 Hz publish also renders for the new data. Under load
+        // most frames can take one, so only the frames without one are counted.
+        let now = hub_sequence(&mut vcx);
+        if now == sequence {
+            per_frame.push(delta);
+        }
+        sequence = now;
         before = after;
+        frame += 1;
     }
     engine.stop();
     let median: Vec<u32> = (0..PATH_VIEWS.len())
