@@ -1251,6 +1251,183 @@ mod delegate {
         assert_eq!(tr_calls(), before, "a frame called tr");
     }
 
+    /// The seed-42 scene shape (40 App groups of 50 records). Values depend only on the index, so
+    /// two calls with different versions hold equal values.
+    fn synth_2000(version: u64) -> Arc<Snapshot> {
+        let mut rows = vec![TableRow {
+            expanded: true,
+            has_children: true,
+            descendants: 2040,
+            ..row(GroupHeader::Apps.node(), 0, None, None)
+        }];
+        let mut groups = Vec::new();
+        let mut records = Vec::new();
+        for g in 0..40u32 {
+            let node = NodeId::Group(
+                GroupKind::App {
+                    app_id: Arc::from(format!("app{g}")),
+                }
+                .key(),
+            );
+            let mut gr = group(node.clone(), GroupRowKind::App, &format!("App {g}"), 50);
+            gr.cpu_pct = (g % 10) as f32 * 0.5;
+            gr.memory_bytes = (u64::from(g) + 1) * 1024 * 1024;
+            groups.push(gr);
+            rows.push(TableRow {
+                expanded: true,
+                has_children: true,
+                descendants: 50,
+                ..row(node, 1, None, Some(g))
+            });
+            for m in 0..50u32 {
+                let i = g * 50 + m;
+                let mut r = record(1000 + i, &format!("proc{i}"), ProcFlags::empty());
+                r.cpu_pct = (m % 50) as f32 * 0.1;
+                r.rss_bytes = (u64::from(i) + 1) * 1024 * 1024;
+                r.threads = 1 + m;
+                let ix = records.len() as u32;
+                records.push(r);
+                rows.push(row(NodeId::Process(key(1000 + i)), 2, Some(ix), None));
+            }
+        }
+        snapshot(version, rows, groups, records)
+    }
+
+    struct Host2000 {
+        table: Entity<TlTreeTable<ProcessDelegate>>,
+        height: f32,
+    }
+
+    impl Render for Host2000 {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(800.))
+                .h(px(self.height))
+                .flex()
+                .flex_col()
+                .child(self.table.clone())
+        }
+    }
+
+    fn open_2000(
+        cx: &mut TestAppContext,
+        height: f32,
+    ) -> (Entity<TlTreeTable<ProcessDelegate>>, &mut VisualTestContext) {
+        setup(cx);
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine;
+        cx.update(|cx| cx.set_global(EngineGlobal(client)));
+        let snap = synth_2000(1);
+        let slot = Rc::new(std::cell::RefCell::new(None));
+        let out = slot.clone();
+        let (_, vcx) = cx.add_window_view(move |window, cx| {
+            let mut d = ProcessDelegate::new(
+                &HostContext::local(cx),
+                snap,
+                &Settings::default(),
+                &UiState::default(),
+                window,
+                cx,
+            );
+            d.set_fixed_now(Some(1_000_000_000));
+            let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
+            *out.borrow_mut() = Some(table.clone());
+            Host2000 { table, height }
+        });
+        vcx.update(|window, _| window.activate_window());
+        redraw(vcx);
+        let table = slot.borrow_mut().take().expect("table created");
+        redraw(vcx);
+        (table, vcx)
+    }
+
+    /// Installs `snap` and redraws. Returns whether the delegate took a new version.
+    fn install(
+        vcx: &mut VisualTestContext,
+        table: &Entity<TlTreeTable<ProcessDelegate>>,
+        snap: Arc<Snapshot>,
+    ) -> bool {
+        let took = vcx.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                let took = t.delegate.install(&snap);
+                if took {
+                    t.on_new_version(cx);
+                }
+                took
+            })
+        });
+        redraw(vcx);
+        took
+    }
+
+    fn cache_stats(
+        vcx: &mut VisualTestContext,
+        table: &Entity<TlTreeTable<ProcessDelegate>>,
+    ) -> (u64, u64) {
+        vcx.update(|_, cx| table.read(cx).text_cache_stats())
+    }
+
+    /// 10 identical table versions give a text cache hit rate above 95 % (ADR-009, PROC-013).
+    #[gpui_kit::test]
+    fn tree_table_text_cache_hit_rate(cx: &mut TestAppContext) {
+        let (table, vcx) = open_2000(cx, 720.);
+        let (h0, m0) = cache_stats(vcx, &table);
+        assert!(m0 > 0, "the first frame formats");
+        for v in 2..=11u64 {
+            assert!(install(vcx, &table, synth_2000(v)), "version {v} installed");
+        }
+        let (h1, m1) = cache_stats(vcx, &table);
+        let (hits, misses) = (h1 - h0, m1 - m0);
+        assert!(hits > 0);
+        let rate = hits as f64 / (hits + misses) as f64;
+        assert!(
+            rate > 0.95,
+            "hit rate {rate} ({hits} hits, {misses} misses)"
+        );
+    }
+
+    /// Two installs with equal values format no cell text: a cache miss is the only path that
+    /// calls the formatter.
+    #[gpui_kit::test]
+    fn no_format_on_unchanged_install(cx: &mut TestAppContext) {
+        let (table, vcx) = open_2000(cx, 720.);
+        assert!(install(vcx, &table, synth_2000(2)));
+        let (_, m1) = cache_stats(vcx, &table);
+        assert!(
+            install(vcx, &table, synth_2000(3)),
+            "a new version was built"
+        );
+        let (_, m2) = cache_stats(vcx, &table);
+        assert_eq!(m2 - m1, 0, "{} cells formatted again", m2 - m1);
+    }
+
+    /// At most 27 row elements are built in a 720 px viewport, and the unhovered metric cells
+    /// build no element at all (so they carry no element id).
+    #[gpui_kit::test]
+    fn row_elements_capped_by_viewport(cx: &mut TestAppContext) {
+        use gpui_kit::base::ScrollbarHandle;
+        use gpui_kit::point;
+        let (table, vcx) = open_2000(cx, 720.);
+        let built = vcx.update(|_, cx| table.read(cx).rows_built_last_frame.get());
+        assert!(built > 0 && built <= 27, "{built} rows built");
+        let divs = vcx.update(|_, cx| table.read(cx).cell_divs_last_frame.get());
+        assert_eq!(divs, 0, "no hover: metric cells are painted, not elements");
+
+        vcx.update(|_, cx| {
+            let handle = table.read(cx).scroll_handle();
+            ScrollbarHandle::set_offset(&handle, point(px(0.), px(-14. * 1000.)));
+        });
+        vcx.update(|window, _| window.refresh());
+        redraw(vcx);
+        let built = vcx.update(|_, cx| table.read(cx).rows_built_last_frame.get());
+        assert!(
+            built > 0 && built <= 27,
+            "{built} rows built after scrolling"
+        );
+        let divs = vcx.update(|_, cx| table.read(cx).cell_divs_last_frame.get());
+        assert_eq!(divs, 0);
+    }
+
     /// "Resize columns to fit content" makes the Type column at least as wide as its widest
     /// value, even when no visible row shows that value (bead tasklens-pdu.65 d, shot 19c).
     /// Fails before the fix: the fit measured only the visible rows' "System process" and
