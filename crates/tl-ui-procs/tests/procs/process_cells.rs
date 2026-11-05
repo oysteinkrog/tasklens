@@ -4424,9 +4424,12 @@ mod live {
             })
         );
         assert!(cell(vcx, &table, 0, ColumnId::Cpu).suffix.is_none());
-        // The table draws the row with both suffixes.
+        // The table draws the row with both suffixes. The row canvas paints the PID cell of a
+        // row that is not hovered.
+        tl_ui_table::table::cells::record_painted_texts();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(vcx.debug_bounds("TlCell-numeric-0-pid").is_some());
+        let painted = tl_ui_table::table::cells::take_painted_texts();
+        assert!(painted.iter().any(|(_, text)| text.as_ref() == "10 +3"));
     }
 
     /// Both pseudo rows as the engine sends them (PROC-012), with names the UI must not show:
