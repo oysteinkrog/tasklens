@@ -2186,6 +2186,43 @@ mod grid_element {
         });
     }
 
+    /// tasklens-wlf.45 (gpui-pre patch): a cached grid that replays its last paint copies each
+    /// path vertex once, and a repaint copies none, because the scene moves the painted path in.
+    #[gpui_kit::test]
+    fn grid_replay_copies_each_path_once(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, 32, true, 1, 1, |i| 10.0 + f32::from(i));
+        let (grid, vcx) = grid_in_window(cx, &engine, spec(32, true));
+        draw(vcx);
+        let paints =
+            |vcx: &mut VisualTestContext| vcx.read_entity(&grid, |v, _| v.path_paints.get());
+
+        // Notified: the grid paints its 3 paths again. A test app draws a dirty window when
+        // the update ends, so the update itself is the paint.
+        let (copies, painted) = (gpui_kit::scene_path_vertex_copies(), paints(vcx));
+        vcx.update(|_, cx| grid.update(cx, |_, cx| cx.notify()));
+        assert_eq!(paints(vcx) - painted, 3, "painted");
+        assert_eq!(
+            gpui_kit::scene_path_vertex_copies() - copies,
+            0,
+            "a paint moves its paths into the scene"
+        );
+        let vertices: usize = vcx.read_entity(&grid, |v, _| {
+            v.live_paths().iter().map(|p| p.vertices.len()).sum()
+        });
+        assert!(vertices > 1000, "the grid has geometry: {vertices}");
+
+        // Not notified: the cached view replays the last scene.
+        let (copies, painted) = (gpui_kit::scene_path_vertex_copies(), paints(vcx));
+        draw(vcx);
+        assert_eq!(paints(vcx), painted, "replayed, not painted");
+        assert_eq!(
+            gpui_kit::scene_path_vertex_copies() - copies,
+            vertices,
+            "a replay copies each vertex once"
+        );
+    }
+
     #[gpui_kit::test]
     fn grid_offline_cell_draws_no_path(cx: &mut TestAppContext) {
         let engine = FakeEngine::new();

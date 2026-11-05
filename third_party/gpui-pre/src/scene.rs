@@ -22,6 +22,23 @@ pub type PathVertex_ScaledPixels = PathVertex<ScaledPixels>;
 #[expect(missing_docs)]
 pub type DrawOrder = u32;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static PATH_VERTEX_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn count_path_vertex_copies(vertices: usize) {
+    PATH_VERTEX_COPIES.with(|copies| copies.set(copies.get() + vertices));
+}
+
+/// Path vertices `Scene` has copied on this thread so far (tasklens patch, wlf.45). A test
+/// reads it before and after a frame to pin how many vertices a paint copies.
+#[cfg(any(test, feature = "test-support"))]
+pub fn scene_path_vertex_copies() -> usize {
+    PATH_VERTEX_COPIES.with(|copies| copies.get())
+}
+
 /// A boolean stored as a `u32` so that GPU-facing structs contain no
 /// compiler-inserted padding bytes, which would be undefined behavior to
 /// reinterpret as `&[u8]` when writing instance buffers. Guaranteed to be
@@ -40,6 +57,9 @@ impl From<bool> for PaddedBool32 {
 #[expect(missing_docs)]
 pub struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
+    /// For each path id (insertion index), its index in `paths` after `finish` sorted them.
+    /// Lets `replay` find a path without keeping a second copy in `paint_operations`.
+    path_slots: Vec<u32>,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
     pub shadows: Vec<Shadow>,
@@ -56,6 +76,7 @@ pub struct Scene {
 impl Scene {
     pub fn clear(&mut self) {
         self.paint_operations.clear();
+        self.path_slots.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
         self.paths.clear();
@@ -85,7 +106,7 @@ impl Scene {
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
-        let mut primitive = primitive.into();
+        let primitive = primitive.into();
         let clipped_bounds = primitive
             .bounds()
             .intersect(&primitive.content_mask().bounds);
@@ -99,6 +120,19 @@ impl Scene {
             .last()
             .copied()
             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
+        let mut primitive = match primitive {
+            Primitive::Path(mut path) => {
+                path.order = order;
+                let id = self.paths.len();
+                path.id = PathId(id);
+                // Move the path in. `paint_operations` keeps only its id, so the vertices are
+                // stored once, not twice.
+                self.paths.push(path);
+                self.paint_operations.push(PaintOperation::Path(id));
+                return;
+            }
+            primitive => primitive,
+        };
         match &mut primitive {
             Primitive::Shadow(shadow) => {
                 shadow.order = order;
@@ -108,11 +142,7 @@ impl Scene {
                 quad.order = order;
                 self.quads.push(*quad);
             }
-            Primitive::Path(path) => {
-                path.order = order;
-                path.id = PathId(self.paths.len());
-                self.paths.push(path.clone());
-            }
+            Primitive::Path(_) => unreachable!("paths are stored above"),
             Primitive::Underline(underline) => {
                 underline.order = order;
                 self.underlines.push(*underline);
@@ -142,6 +172,18 @@ impl Scene {
         for operation in &prev_scene.paint_operations[range] {
             match operation {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
+                PaintOperation::Path(id) => {
+                    // A finished scene has sorted its paths; an unfinished one still holds
+                    // them in insertion order.
+                    let slot = prev_scene
+                        .path_slots
+                        .get(*id)
+                        .map_or(*id, |slot| *slot as usize);
+                    let path = &prev_scene.paths[slot];
+                    #[cfg(any(test, feature = "test-support"))]
+                    count_path_vertex_copies(path.vertices.len());
+                    self.insert_primitive(path.clone());
+                }
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
             }
@@ -152,6 +194,11 @@ impl Scene {
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
+        self.path_slots.clear();
+        self.path_slots.resize(self.paths.len(), 0);
+        for (slot, path) in self.paths.iter().enumerate() {
+            self.path_slots[path.id.0] = slot as u32;
+        }
         self.underlines.sort_by_key(|underline| underline.order);
         self.monochrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
@@ -213,6 +260,8 @@ pub(crate) enum PrimitiveKind {
 
 pub(crate) enum PaintOperation {
     Primitive(Primitive),
+    /// A path, by its id (its index in `Scene::paths` before `finish` sorts them).
+    Path(usize),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
 }
@@ -827,6 +876,26 @@ impl Path<Pixels> {
             vertices: self
                 .vertices
                 .iter()
+                .map(|vertex| vertex.scale(factor))
+                .collect(),
+            start: self.start.map(|start| start.scale(factor)),
+            current: self.current.scale(factor),
+            contour_count: self.contour_count,
+            color: self.color,
+        }
+    }
+
+    /// Scale this path by the given factor, reusing its vertex buffer.
+    pub fn into_scaled(self, factor: f32) -> Path<ScaledPixels> {
+        Path {
+            id: self.id,
+            order: self.order,
+            bounds: self.bounds.scale(factor),
+            content_mask: self.content_mask.scale(factor),
+            // Same size and alignment, so `collect` reuses the allocation in place.
+            vertices: self
+                .vertices
+                .into_iter()
                 .map(|vertex| vertex.scale(factor))
                 .collect(),
             start: self.start.map(|start| start.scale(factor)),
