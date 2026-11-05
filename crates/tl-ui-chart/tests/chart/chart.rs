@@ -2199,6 +2199,131 @@ mod grid_element {
         draw(vcx);
         assert_eq!(vcx.read_entity(&grid, |v, _| v.legend_shapes()), 2);
     }
+
+    /// Publishes `n` cores with kernel overlays, `len` samples 100 ms apart ending at `newest`,
+    /// at `version`. A sample's value depends only on its time, so a later publish with a newer
+    /// end shows the same old samples plus new ones, as the engine's ring does.
+    fn publish_window(engine: &Arc<FakeEngine>, n: u16, len: u64, newest: u64, version: u64) {
+        let view = |id: SeriesId, salt: u64, scale: f32| {
+            let samples: Vec<Sample> = (0..len)
+                .map(|i| {
+                    let t = newest - (len - 1 - i) * 100 * MS;
+                    let x = (t / (100 * MS) + salt)
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .rotate_left(17);
+                    Sample::valid(t, 5.0 + (x % 9_000) as f32 / 100.0 * scale)
+                })
+                .collect();
+            Arc::new(SeriesView {
+                id,
+                version,
+                period_ns: 100 * MS,
+                samples: samples.into(),
+            })
+        };
+        let mut views = Vec::new();
+        for i in 0..n {
+            views.push(view(core(i), u64::from(i) * 7, 1.0));
+            views.push(view(kernel(i), u64::from(i) * 7 + 3, 0.5));
+        }
+        views.sort_by_key(|v| v.id);
+        engine.publish_with(|s: &mut Snapshot| {
+            s.series = Arc::new(SeriesSet {
+                header: s.series.header,
+                series: Arc::from(views),
+                slow: Arc::from([]),
+            });
+        });
+    }
+
+    struct TwoGrids {
+        a: Entity<ChartGridView>,
+        b: Entity<ChartGridView>,
+    }
+
+    impl Render for TwoGrids {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let grid = |g: &Entity<ChartGridView>| {
+                div()
+                    .w(px(1300.))
+                    .child(g.clone().cached(StyleRefinement::default().w_full()))
+            };
+            div().child(grid(&self.a)).child(grid(&self.b))
+        }
+    }
+
+    /// tasklens-wlf.39: when only new samples arrive, a rebuild splices the pieces. Each of 30
+    /// appends emits under 2% of the vertices of the first full builds, paints 3 paths, and draws
+    /// exactly the paths of a grid that builds in full every time at the same anchor.
+    #[gpui_kit::test]
+    fn grid_append_emits_few_vertices(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        // The newest sample 60 s ahead of now, so a slow test run never turns the series stale.
+        let start = now_boot_ns() + 60_000 * MS;
+        publish_window(&engine, 32, 600, start, 1);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui_base::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        });
+        let (root, vcx) = cx.add_window_view(|_, cx| {
+            let hub = super::hub_for(&engine, cx);
+            let a = cx.new(|cx| ChartGridView::new(spec(32, true), &hub, cx));
+            let b = cx.new(|cx| {
+                let mut v = ChartGridView::new(spec(32, true), &hub, cx);
+                v.full_builds_only = true;
+                v
+            });
+            TwoGrids { a, b }
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.run_until_parked();
+        let (a, b) = vcx.read_entity(&root, |r, _| (r.a.clone(), r.b.clone()));
+        draw(vcx);
+
+        let counters = |vcx: &mut VisualTestContext, g: &Entity<ChartGridView>| {
+            vcx.read_entity(g, |v, _| {
+                (
+                    v.build_count.get(),
+                    v.append_builds.get(),
+                    v.emitted_vertices.get(),
+                    v.path_paints.get(),
+                )
+            })
+        };
+        for k in 1..=30u64 {
+            let (before, full_before) = (counters(vcx, &a), counters(vcx, &b));
+            publish_window(&engine, 32, 600, start + k * 100 * MS, k + 1);
+            vcx.run_until_parked();
+            draw(vcx);
+            let (after, full_after) = (counters(vcx, &a), counters(vcx, &b));
+            assert_eq!(after.0 - before.0, 1, "append {k}: one build");
+            assert_eq!(after.1 - before.1, 1, "append {k}: it spliced");
+            assert_eq!(after.3 - before.3, 3, "append {k}: 3 path paints");
+            let emitted = after.2 - before.2;
+            let full = full_after.2 - full_before.2;
+            assert!(full > 100_000, "append {k}: a full build emits {full}");
+            assert!(emitted * 50 < full, "append {k}: {emitted} of {full}");
+
+            let pa = vcx.read_entity(&a, |v, _| v.live_paths());
+            let pb = vcx.read_entity(&b, |v, _| v.live_paths());
+            assert_eq!(pa.len(), 3);
+            assert_eq!(pa.len(), pb.len());
+            for (j, (x, y)) in pa.iter().zip(&pb).enumerate() {
+                assert_eq!(x.vertices.len(), y.vertices.len(), "append {k}, path {j}");
+                for (va, vb) in x.vertices.iter().zip(&y.vertices) {
+                    assert_eq!(va.xy_position, vb.xy_position, "append {k}, path {j}");
+                }
+                assert_eq!(x.bounds, y.bounds, "append {k}, path {j}");
+            }
+        }
+        vcx.read_entity(&b, |v, _| assert_eq!(v.append_builds.get(), 0));
+    }
 }
 
 /// tasklens-yrf.20: the offline text is a Fluent key read once per strings version, and every

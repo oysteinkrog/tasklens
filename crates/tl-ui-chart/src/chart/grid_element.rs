@@ -1,11 +1,18 @@
 //! `ChartGridView` and `ChartGridElement`: one element paints n chart cells, such as the CPU
 //! per-core grid and the GPU engine grid (ADR-009 rule 7, UI-PRF-002, PERF-028, PERF-063).
 //!
-//! Every cell's geometry goes into one fill path, one total-line path and one overlay-line path,
-//! so a frame clones 3 paths (plus up to 3 stale sets) however many cells there are. Cells share
-//! one time map, so one translate serves them all, and their paths are clipped to the cell at
-//! build time, so one content mask covers the element. Labels are cached shaped lines and
+//! Every cell's geometry is painted as one fill path, one total-line path and one overlay-line
+//! path, so a frame paints 3 paths (plus up to 3 stale sets) however many cells there are. Cells
+//! share one time map, so one translate serves them all, and their paths are clipped to the cell
+//! at build time, so one content mask covers the element. Labels are cached shaped lines and
 //! re-shape only when their text changes.
+//!
+//! Appends (tasklens-wlf.39): the live geometry is kept per (cell, series) piece. When only the
+//! series changed and the anchor, y range, layout and scale stay, a build keeps the anchor and
+//! splices each piece: the segments at both ends are emitted again and the rest keep their
+//! vertices. Paint writes every piece of a colour into one path, the one vertex copy a paint
+//! needs, so there is no second merged copy. The anchor moves at the next full build, at the
+//! latest when the newest sample is one range past it.
 //!
 //! Dotted gaps (PERF-022): the build keeps each cell's gap spans, and paint draws them as quads
 //! along the cell's plot bottom, as a single chart does, so they add no path paint.
@@ -39,9 +46,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Context, Edges, Element, ElementId,
     Entity, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    IntoElement, LayoutId, Length, MouseDownEvent, MouseMoveEvent, Pixels, Render, SharedString,
-    Size, Style, Subscription, TransformationMatrix, Window, point, px, quad, relative, size,
-    transparent_black,
+    IntoElement, LayoutId, Length, MouseDownEvent, MouseMoveEvent, Path, Pixels, Render,
+    SharedString, Size, Style, Subscription, TransformationMatrix, Window, point, px, quad,
+    relative, size, transparent_black,
 };
 use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
@@ -50,7 +57,7 @@ use tl_model::snapshot::{ComponentMask, Snapshot};
 use tl_model::validity::Validity;
 
 use super::element::translated;
-use super::geometry::{self, BuildInput, TimeMap};
+use super::geometry::{self, BuildInput, CellPiece, PieceLayer, TimeMap};
 use super::grid::{self, GridPaint};
 use super::hover::{self, HoverPaint, HoverState};
 use super::labels::{self, CachedLine, LabelCache, LineStyle, NetFormat};
@@ -221,8 +228,14 @@ pub struct ChartGridView {
     /// from (tasklens-q4x76.35).
     clock: HostClock,
     _hub_sub: Subscription,
-    /// All cells in one cache: `fills[0]`, `strokes[0]` (total), `strokes[1]` (overlay).
+    /// The key, anchor, y range and stale sets of the cached geometry. A grid's live geometry
+    /// is in `pieces`, so the cache holds no live set.
     cache: Rc<RefCell<ChartCache>>,
+    /// Live geometry per cell: the total series (fill and line) and the overlay line.
+    pieces: Vec<[CellPiece; 2]>,
+    /// The last full build drew live samples (not the device history), so a build that only
+    /// sees new samples may splice the pieces.
+    appendable: bool,
     scratch: geometry::Scratch,
     /// Right edge the cached geometry was built for (see `ChartView`).
     built_right_edge_ns: u64,
@@ -271,9 +284,22 @@ pub struct ChartGridView {
     /// Hitboxes the last prepaint inserted.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub hitbox_count: std::cell::Cell<u32>,
-    /// Geometry rebuilds.
+    /// Geometry rebuilds, appends included.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub build_count: std::cell::Cell<u32>,
+    /// Rebuilds that spliced the pieces instead of building every cell in full.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub append_builds: std::cell::Cell<u32>,
+    /// Live path vertices written by every rebuild, full and spliced.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub emitted_vertices: std::cell::Cell<u64>,
+    /// Builds every time in full, at the anchor an append would keep: the oracle for tests that
+    /// compare an appending grid with full builds.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub full_builds_only: bool,
+    /// The paint shift of the last paint, physical px.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    last_dx: std::cell::Cell<f32>,
     /// `paint_path` calls, over every paint.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub path_paints: std::cell::Cell<u32>,
@@ -310,6 +336,8 @@ impl ChartGridView {
             clock: hub.read(cx).clock().clone(),
             _hub_sub,
             cache: Rc::default(),
+            pieces: Vec::new(),
+            appendable: false,
             scratch: geometry::Scratch::default(),
             built_right_edge_ns: 0,
             built_layout: None,
@@ -338,6 +366,14 @@ impl ChartGridView {
             hitbox_count: std::cell::Cell::new(0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             build_count: std::cell::Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            append_builds: std::cell::Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            emitted_vertices: std::cell::Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            full_builds_only: false,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            last_dx: std::cell::Cell::new(0.0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             path_paints: std::cell::Cell::new(0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -540,11 +576,37 @@ impl ChartGridView {
         self.legend.shape_count
     }
 
-    /// Fill and stroke sets in the geometry cache, stale sets excluded.
+    /// Fill and stroke sets the cached geometry paints, stale sets excluded: the total fill, the
+    /// total line and the overlay line, each when some piece has vertices for it.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn cached_fill_stroke_counts(&self) -> (usize, usize) {
-        let c = self.cache.borrow();
-        (c.fills.len(), c.strokes.len())
+        let any = |f: fn(&[CellPiece; 2]) -> bool| usize::from(self.pieces.iter().any(f));
+        (
+            any(|p| p[0].has_fill()),
+            any(|p| p[0].has_stroke()) + any(|p| p[1].has_stroke()),
+        )
+    }
+
+    /// The live paths the last paint drew (total fill, total line, overlay line, each when it
+    /// has vertices), logical px relative to the element's origin.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub fn live_paths(&self) -> Vec<gpui_kit::Path<Pixels>> {
+        let sf = self.built_layout.map_or(1.0, |(_, sf)| sf);
+        let offset = point(px(self.last_dx.get() / sf), px(0.));
+        let total = || self.pieces.iter().map(|p| &p[0]);
+        [
+            geometry::piece_path(total(), PieceLayer::Fill, offset, sf),
+            geometry::piece_path(total(), PieceLayer::Stroke, offset, sf),
+            geometry::piece_path(
+                self.pieces.iter().map(|p| &p[1]),
+                PieceLayer::Stroke,
+                offset,
+                sf,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// The offline text as last read from the strings.
@@ -573,12 +635,16 @@ impl ChartGridView {
             y0 + f32::from(self.spec.cell_h) * sf,
         );
         let c = self.cache.borrow();
-        c.fills
+        let stale = c
+            .stale_fills
             .iter()
-            .chain(&c.strokes)
-            .chain(&c.stale_fills)
             .chain(&c.stale_strokes)
-            .flat_map(|s| s.path.vertices.iter())
+            .flat_map(|s| s.path.vertices.iter());
+        self.pieces
+            .iter()
+            .flatten()
+            .flat_map(CellPiece::vertices)
+            .chain(stale)
             .filter(|v| {
                 let (x, y) = (f32::from(v.xy_position.x), f32::from(v.xy_position.y));
                 x > x0 && x < x1 && y > y0 && y < y1
@@ -916,6 +982,8 @@ fn paint_grid_view(
         value_text,
         hover: hover_state,
         boots,
+        pieces,
+        appendable,
         ..
     } = view;
     let (cell_h, gap) = (spec.cell_h, spec.gap);
@@ -998,24 +1066,64 @@ fn paint_grid_view(
             style_version: env.metrics.style_version,
             curved: false,
         };
+        let frame_before = (cache.key.scalars, cache.key.series_versions.get(1).copied());
         let changed = cache
             .key
             .sync([versions, layout.cols as u64].into_iter(), scalars);
         if changed || (stale && right_edge != *built_right_edge_ns) {
-            let map = TimeMap {
-                anchor_ns: newest_ns,
+            // Only the series changed: keep the anchor and splice the pieces (tasklens-wlf.39).
+            // The stale sets are shared, so a grid that has or gets them builds in full.
+            let append = *appendable
+                && !stale
+                && history.is_none()
+                && frame_before == (scalars, Some(layout.cols as u64))
+                && *built_layout == Some((layout, sf))
+                && cache.stale_fills.is_empty()
+                && cache.stale_strokes.is_empty()
+                && newest_ns >= cache.anchor_ns
+                && newest_ns - cache.anchor_ns <= range_ns;
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            let full_only = view.full_builds_only;
+            #[cfg(not(any(test, debug_assertions, feature = "test-hooks")))]
+            let full_only = false;
+            let cached_anchor = cache.anchor_ns;
+            let map = |anchor_ns| TimeMap {
+                anchor_ns,
                 right_edge_ns: right_edge,
                 range_ns,
                 plot_width: pw as f32,
             };
-            build_cells(
-                spec, series, &layout, map, ph as f32, y.y_min, y.y_max, now, sf, &mut cache,
-                scratch, gaps,
-            );
+            let mut build = |map: TimeMap, append: bool| {
+                build_cells(
+                    spec, series, &layout, map, ph as f32, y.y_min, y.y_max, now, sf, &mut cache,
+                    scratch, gaps, pieces, append,
+                )
+            };
+            let appended = if append && !full_only {
+                build(map(cached_anchor), true)
+            } else {
+                None
+            };
+            let full_anchor = if append && full_only {
+                cached_anchor
+            } else {
+                newest_ns
+            };
+            let _emitted = match appended {
+                Some(n) => n,
+                None => build(map(full_anchor), false).unwrap_or(0),
+            };
+            *appendable = history.is_none();
             *built_right_edge_ns = right_edge;
             *built_layout = Some((layout, sf));
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-            view.build_count.set(view.build_count.get() + 1);
+            {
+                view.build_count.set(view.build_count.get() + 1);
+                view.append_builds
+                    .set(view.append_builds.get() + u32::from(appended.is_some()));
+                view.emitted_vertices
+                    .set(view.emitted_vertices.get() + _emitted as u64);
+            }
         }
     }
 
@@ -1030,6 +1138,8 @@ fn paint_grid_view(
         plot_width: pw as f32,
     };
     let dx = map.dx(pw as f32);
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    view.last_dx.set(dx);
     let theme = &*env.theme;
     let hairline = px(1.0 / sf);
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -1084,25 +1194,35 @@ fn paint_grid_view(
     }
 
     // Every cell's paths in one mask and one translate. Vertices already carry the cell origin
-    // and the 1 px plot inset.
+    // and the 1 px plot inset. Each colour's pieces go into one path in one pass.
     if has_data {
         let offset = point(bounds.left() + px(dx / sf), bounds.top());
-        let painted = |window: &mut Window, sets: &[PathSet], alpha: f32| {
+        let painted = |window: &mut Window, path: Path<Pixels>, color: Hsla| {
+            window.paint_path(path, color);
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            view.path_paints.set(view.path_paints.get() + 1);
+        };
+        let stale_sets = |window: &mut Window, sets: &[PathSet]| {
             for set in sets {
                 let color = Hsla {
-                    a: set.color.a * alpha,
+                    a: set.color.a * STALE_ALPHA,
                     ..set.color
                 };
-                window.paint_path(translated(&set.path, offset, sf), color);
-                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-                view.path_paints.set(view.path_paints.get() + 1);
+                painted(window, translated(&set.path, offset, sf), color);
+            }
+        };
+        let live = |window: &mut Window, si: usize, layer: PieceLayer, color: Hsla| {
+            let cells = pieces.iter().map(|p| &p[si]);
+            if let Some(path) = geometry::piece_path(cells, layer, offset, sf) {
+                painted(window, path, color);
             }
         };
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            painted(window, &cache.fills, 1.0);
-            painted(window, &cache.stale_fills, STALE_ALPHA);
-            painted(window, &cache.strokes, 1.0);
-            painted(window, &cache.stale_strokes, STALE_ALPHA);
+            live(window, 0, PieceLayer::Fill, spec.fill);
+            stale_sets(window, &cache.stale_fills);
+            live(window, 0, PieceLayer::Stroke, spec.line);
+            live(window, 1, PieceLayer::Stroke, spec.overlay_line);
+            stale_sets(window, &cache.stale_strokes);
         });
     }
 
@@ -1375,8 +1495,12 @@ fn cell_bounds(
     )
 }
 
-/// One geometry build for every non-offline cell into one fill, one total-line and one
-/// overlay-line builder. Replaces `gaps` with each cell's dotted-gap spans.
+/// One geometry build for every non-offline cell into its pieces, the live geometry of a cell's
+/// total and overlay series. Replaces `gaps` with each cell's dotted-gap spans.
+///
+/// With `append`, `map` has the cached anchor and the pieces are spliced where they can be
+/// (`geometry::build_cell`); `None` means some cell has stale content, and the caller then
+/// builds in full. A full build always returns the vertices it emitted.
 #[allow(
     clippy::too_many_arguments,
     reason = "one build call, every input is distinct"
@@ -1394,14 +1518,14 @@ fn build_cells(
     cache: &mut ChartCache,
     scratch: &mut geometry::Scratch,
     gaps: &mut Vec<(usize, Range<f32>)>,
-) {
+    pieces: &mut Vec<[CellPiece; 2]>,
+    append: bool,
+) -> Option<usize> {
     gaps.clear();
-    let mut fill = scratch.take_grid(cache);
-    let overlay = spec
-        .cells
-        .iter()
-        .any(|c| c.overlay_series.is_some())
-        .then_some(spec.overlay_line);
+    if !append {
+        scratch.begin_grid(cache);
+    }
+    pieces.resize_with(spec.cells.len(), Default::default);
     let total = ChartSeries {
         fill: Some(spec.fill),
         line: spec.line,
@@ -1421,11 +1545,10 @@ fn build_cells(
         stack: false,
         curved: false,
     };
-    for (i, cell) in spec.cells.iter().enumerate() {
-        if cell.offline {
-            continue;
-        }
-        let Some((a, b)) = series.get(i) else {
+    let mut emitted = 0;
+    for ((i, cell), piece) in spec.cells.iter().enumerate().zip(pieces.iter_mut()) {
+        let Some((a, b)) = series.get(i).filter(|_| !cell.offline) else {
+            piece.iter_mut().for_each(CellPiece::clear);
             continue;
         };
         let pairs = [(total.clone(), a.as_deref()), (over.clone(), b.as_deref())];
@@ -1435,10 +1558,13 @@ fn build_cells(
             series: &pairs,
             ..base
         };
-        geometry::build_cell(&input, origin, map.plot_width, &mut fill, scratch);
+        emitted += geometry::build_cell(&input, origin, map.plot_width, piece, append, scratch)?;
         gaps.extend(scratch.cell_gaps().iter().map(|g| (i, g.clone())));
     }
-    geometry::finish_grid(&base, (spec.fill, fill), spec.line, overlay, cache, scratch);
+    if !append {
+        geometry::finish_grid(&base, cache, scratch);
+    }
+    Some(emitted)
 }
 
 /// Newest valid value of `series` and its validity at `now`: Missing when absent, WarmingUp

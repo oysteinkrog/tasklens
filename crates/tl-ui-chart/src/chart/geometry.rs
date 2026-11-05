@@ -7,6 +7,8 @@
 //! directly (tasklens-wlf.33, tasklens-wlf.35). Time math is `u64` and the pixel scale is `f64`:
 //! 60 s in ns against 1,600 px loses precision in `f32`.
 
+use std::collections::VecDeque;
+
 use gpui_kit::{Bounds, Hsla, Path, PathVertex, Pixels, Point, point, px, size};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
@@ -314,36 +316,19 @@ pub struct Scratch {
     line: Line,
     live: Builders,
     stale: Builders,
-    /// Grid cells merge their live total and overlay strokes into these two meshes.
-    grid_stroke: StrokeMesh,
-    grid_overlay: StrokeMesh,
-    /// Which grid meshes produced the paths currently held by `ChartCache::strokes`. Empty
-    /// meshes add no path, so positions in that list alone cannot identify the owner.
-    grid_stroke_cached: bool,
-    grid_overlay_cached: bool,
+    /// Grid splices: the new segments at one end of a piece, before they move into it.
+    splice: SpliceBufs,
 }
 
 impl Scratch {
-    /// Starts a grid build and takes back the previous fill and stroke paths so their vertex
-    /// buffers can be reused. This must run before `finish_grid`.
-    pub fn take_grid(&mut self, cache: &mut ChartCache) -> FillMesh {
-        self.live.reclaim_fills(&mut cache.fills);
+    /// Starts a full grid build: drops the cache's live sets (a grid paints its pieces) and takes
+    /// back the stale paths so their vertex buffers can be reused. This must run before
+    /// `finish_grid`.
+    pub fn begin_grid(&mut self, cache: &mut ChartCache) {
+        cache.fills.clear();
+        cache.strokes.clear();
         self.stale.reclaim_fills(&mut cache.stale_fills);
         self.stale.reclaim_strokes(&mut cache.stale_strokes);
-        let mut strokes = cache.strokes.drain(..);
-        let stroke = self.grid_stroke_cached.then(|| strokes.next()).flatten();
-        let overlay = self.grid_overlay_cached.then(|| strokes.next()).flatten();
-        // A caller may reuse a cache that an ordinary chart build populated. The ownership flags
-        // deliberately ignore those paths; draining and dropping them makes the cache a grid
-        // cache without a debug-only panic.
-        drop(strokes);
-        self.grid_stroke_cached = false;
-        self.grid_overlay_cached = false;
-        let stroke = stroke.map(|set| set.path);
-        let overlay = overlay.map(|set| set.path);
-        self.grid_stroke = StrokeMesh::reusing(stroke, 1.0, false);
-        self.grid_overlay = StrokeMesh::reusing(overlay, 1.0, false);
-        self.live.mesh()
     }
 
     /// Dotted-gap spans of the cell `build_cell` built last, chart-local physical px as
@@ -798,6 +783,34 @@ impl FillMesh {
         };
         Some(path)
     }
+
+    /// Vertices pushed so far.
+    fn len(&self) -> usize {
+        self.path.as_ref().map_or(0, |p| p.vertices.len())
+    }
+
+    /// The vertex buffer (the unused spare when no triangle was added) with the bounds so far.
+    fn into_parts(self) -> MeshParts {
+        let vertices = match (self.path, self.spare) {
+            (Some(path), _) => path.vertices,
+            (None, Some(mut spare)) => {
+                spare.vertices.clear();
+                spare.vertices
+            }
+            (None, None) => Vec::new(),
+        };
+        (vertices, self.min, self.max)
+    }
+}
+
+/// A mesh's vertices with their smallest and largest x and y.
+type MeshParts = (Vec<PathVertex<Pixels>>, (f32, f32), (f32, f32));
+
+/// A path that only carries `vertices`, to hand a vertex buffer to a mesh for reuse.
+fn spare_path(vertices: Vec<PathVertex<Pixels>>) -> Path<Pixels> {
+    let mut path = Path::new(point(px(0.), px(0.)));
+    path.vertices = vertices;
+    path
 }
 
 /// One run's emitted vertices: the line, the band floor under it (stacked mode) and the tangent
@@ -942,6 +955,11 @@ impl StrokeMesh {
     }
 
     fn stroke_line(&mut self, points: &[Point<Pixels>]) {
+        self.stroke_line_marked(points, |_| {});
+    }
+
+    /// `stroke_line` that calls `mark` with the vertex count after each segment.
+    fn stroke_line_marked(&mut self, points: &[Point<Pixels>], mut mark: impl FnMut(usize)) {
         if self.half_width <= 0.0 || points.len() < 2 {
             return;
         }
@@ -993,8 +1011,73 @@ impl StrokeMesh {
             if let Some((a, b, c)) = bevel {
                 self.tri(a, b, c);
             }
+            mark(self.len());
             start = next_start;
         }
+    }
+
+    /// Segment `i` of `stroke_line(points)` on its own: the start join (or butt cap) at
+    /// `points[i]`, the end join (or cap) at `points[i + 1]` and that join's bevel. It reads
+    /// `points[i - 1 ..= i + 2]` only. Vertex for vertex the same as `stroke_line` when no
+    /// segment of `points` has zero length (`has_short_segment` is false); `stroke_line` carries
+    /// the previous direction over such a segment.
+    fn segment(&mut self, points: &[Point<Pixels>], i: usize) {
+        let hw = self.half_width;
+        if hw <= 0.0 {
+            return;
+        }
+        let Some(frame) = segment_frame(points[i], points[i + 1], hw) else {
+            return;
+        };
+        let (direction, normal, _) = frame;
+        let mut start = match i
+            .checked_sub(1)
+            .and_then(|h| segment_frame(points[h], points[i], hw))
+        {
+            Some(previous) => stroke_join(points[i], previous, frame, hw).1,
+            None => offset_pair(points[i], normal),
+        };
+        let p = points[i + 1];
+        let next = points
+            .get(i + 2)
+            .and_then(|&next| segment_frame(p, next, hw));
+        let (mut end, bevel) = match next {
+            Some(next) => {
+                let (end, _, bevel) = stroke_join(p, frame, next, hw);
+                (end, bevel)
+            }
+            None => (offset_pair(p, normal), None),
+        };
+        if i == 0 {
+            let side = offset_pair(p, normal);
+            start = butt_cap(points[0], start, side, direction, true);
+        }
+        if i + 2 == points.len() {
+            let side = offset_pair(points[i], normal);
+            end = butt_cap(p, end, side, direction, false);
+        }
+        self.quad(start, end);
+        if let Some((a, b, c)) = bevel {
+            self.tri(a, b, c);
+        }
+    }
+
+    /// Vertices pushed so far.
+    fn len(&self) -> usize {
+        self.path.as_ref().map_or(0, |p| p.vertices.len())
+    }
+
+    /// The vertex buffer (the unused spare when no triangle was added) with the bounds so far.
+    fn into_parts(self) -> MeshParts {
+        let vertices = match (self.path, self.spare) {
+            (Some(path), _) => path.vertices,
+            (None, Some(mut spare)) => {
+                spare.vertices.clear();
+                spare.vertices
+            }
+            (None, None) => Vec::new(),
+        };
+        (vertices, self.min, self.max)
     }
 
     fn quad(&mut self, start: (Point<Pixels>, Point<Pixels>), end: (Point<Pixels>, Point<Pixels>)) {
@@ -1648,15 +1731,248 @@ fn for_each_stretch(samples: &[Sample], run: Run, mut f: impl FnMut(Run, bool)) 
     }
 }
 
-/// Builds one grid cell into shared builders (UI-PRF-002, ADR-009 rule 7). Series 0 goes to
-/// `fill` (when it has a fill colour) and `stroke`; series 1, when present, goes to `overlay`
-/// as a stroke only; further series are ignored. Every vertex is moved by `origin` (physical px,
-/// the cell's plot corner relative to the element). `STALE` stretches and the stale tail go to
-/// the scratch's stale builders, which `finish_grid` finishes.
+/// Line width of grid cell strokes, physical px.
+const GRID_LINE_WIDTH: f32 = 1.0;
+
+/// One grid cell series' live geometry (tasklens-wlf.39): the clipped points and the fill and
+/// stroke vertices built from them, physical px relative to the element. A grid keeps one piece
+/// per (cell, series) across builds. When a build sees the same points with new ones at either
+/// end, it emits only the segments at the ends and keeps the vertices of the rest
+/// (`build_cell` with `append`).
+#[derive(Default)]
+pub struct CellPiece {
+    /// The points `fill` and `stroke` were built from, while `splice` is set.
+    pts: Vec<Point<Pixels>>,
+    fill: PieceMesh,
+    stroke: PieceMesh,
+    /// The piece is one live run with no short segment, and both meshes record their vertex
+    /// count per segment, so the next build may splice.
+    splice: bool,
+}
+
+impl CellPiece {
+    /// Empties the piece: an offline cell or an absent series.
+    pub fn clear(&mut self) {
+        self.pts.clear();
+        self.fill.clear();
+        self.stroke.clear();
+        self.splice = false;
+    }
+
+    /// Fill and stroke vertices, physical px relative to the element.
+    pub fn vertices(&self) -> impl Iterator<Item = &PathVertex<Pixels>> {
+        self.fill.verts.iter().chain(&self.stroke.verts)
+    }
+
+    pub fn has_fill(&self) -> bool {
+        !self.fill.verts.is_empty()
+    }
+
+    pub fn has_stroke(&self) -> bool {
+        !self.stroke.verts.is_empty()
+    }
+}
+
+/// One mesh of a piece. A deque, so dropping old segments at the front and adding new ones at
+/// either end moves no other vertex.
+#[derive(Default)]
+struct PieceMesh {
+    verts: VecDeque<PathVertex<Pixels>>,
+    /// Vertices per segment, oldest first, while the piece can splice.
+    seg: VecDeque<u8>,
+    /// Smallest and largest x and y of `verts`.
+    min: (f32, f32),
+    max: (f32, f32),
+}
+
+impl PieceMesh {
+    fn clear(&mut self) {
+        self.verts.clear();
+        self.seg.clear();
+    }
+
+    /// Empties the mesh and hands its vertex buffer to a mesh builder for reuse.
+    fn take_buffer(&mut self) -> Path<Pixels> {
+        self.seg.clear();
+        let mut verts = std::mem::take(&mut self.verts);
+        verts.clear();
+        spare_path(Vec::from(verts))
+    }
+
+    fn set(&mut self, (vertices, min, max): MeshParts) {
+        self.verts = VecDeque::from(vertices);
+        self.min = min;
+        self.max = max;
+    }
+
+    /// Drops every segment outside `keep`.
+    fn keep(&mut self, keep: std::ops::Range<usize>) {
+        let count = |segs: std::collections::vec_deque::Iter<'_, u8>| -> usize {
+            segs.map(|&n| usize::from(n)).sum()
+        };
+        let tail = count(self.seg.range(keep.end..));
+        self.verts.truncate(self.verts.len() - tail);
+        self.seg.truncate(keep.end);
+        let head = count(self.seg.range(..keep.start));
+        self.verts.drain(..head);
+        self.seg.drain(..keep.start);
+    }
+
+    /// Adds `verts` with their per-segment counts `seg` before (`front`) or after the rest.
+    fn add(&mut self, verts: &[PathVertex<Pixels>], seg: &[u8], front: bool) {
+        if front {
+            for v in verts.iter().rev() {
+                self.verts.push_front(v.clone());
+            }
+            for &n in seg.iter().rev() {
+                self.seg.push_front(n);
+            }
+        } else {
+            self.verts.extend(verts.iter().cloned());
+            self.seg.extend(seg);
+        }
+    }
+
+    /// Measures the bounds again after a splice.
+    fn rebound(&mut self) {
+        let (mut min, mut max) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+        for v in &self.verts {
+            let (x, y) = (f32::from(v.xy_position.x), f32::from(v.xy_position.y));
+            min = (min.0.min(x), min.1.min(y));
+            max = (max.0.max(x), max.1.max(y));
+        }
+        self.min = min;
+        self.max = max;
+    }
+}
+
+/// Vertex buffers for the segments a splice emits at one end of a piece.
+#[derive(Default)]
+struct SpliceBufs {
+    fill: Vec<PathVertex<Pixels>>,
+    stroke: Vec<PathVertex<Pixels>>,
+    fill_seg: Vec<u8>,
+    stroke_seg: Vec<u8>,
+}
+
+impl SpliceBufs {
+    /// Emits segments `range` of `pts` one at a time into the buffers: the fill down to
+    /// `baseline` (when given) and the stroke. Returns the vertices emitted.
+    fn emit(
+        &mut self,
+        pts: &[Point<Pixels>],
+        range: std::ops::Range<usize>,
+        baseline: Option<Pixels>,
+    ) -> usize {
+        self.fill_seg.clear();
+        self.stroke_seg.clear();
+        let mut fill = FillMesh::reusing(Some(spare_path(std::mem::take(&mut self.fill))));
+        let mut stroke = StrokeMesh::reusing(
+            Some(spare_path(std::mem::take(&mut self.stroke))),
+            GRID_LINE_WIDTH,
+            false,
+        );
+        for j in range {
+            if let Some(b) = baseline {
+                let n = fill.len();
+                fill.band(&pts[j..j + 2], |_, p| point(p.x, b));
+                self.fill_seg.push((fill.len() - n) as u8);
+            }
+            let n = stroke.len();
+            stroke.segment(pts, j);
+            self.stroke_seg.push((stroke.len() - n) as u8);
+        }
+        self.fill = fill.into_parts().0;
+        self.stroke = stroke.into_parts().0;
+        self.fill.len() + self.stroke.len()
+    }
+
+    /// Adds the buffers to `piece`'s meshes at the front or the back.
+    fn add_to(&self, piece: &mut CellPiece, fill: bool, front: bool) {
+        if fill {
+            piece.fill.add(&self.fill, &self.fill_seg, front);
+        }
+        piece.stroke.add(&self.stroke, &self.stroke_seg, front);
+    }
+}
+
+/// True when two neighbouring points are less than 1/1000 px apart. `stroke_line` carries the
+/// previous direction over a zero-length segment, so such a line is never spliced.
+fn has_short_segment(pts: &[Point<Pixels>]) -> bool {
+    pts.windows(2).any(|w| {
+        let (dx, dy) = (f32::from(w[1].x - w[0].x), f32::from(w[1].y - w[0].y));
+        dx * dx + dy * dy <= 1e-6
+    })
+}
+
+/// Splices `new` (one live run, no short segment) into `piece`. Every segment whose input
+/// points (`j − 1 ..= j + 2`) are unchanged keeps its vertices; the segments before and after
+/// them are emitted again. The point lists match bit for bit where both builds placed the same
+/// sample, since an append keeps the anchor and the y range. Returns the vertices emitted, or
+/// `None` when no segment can be kept.
+fn splice_piece(
+    piece: &mut CellPiece,
+    new: &[Point<Pixels>],
+    baseline: Option<Pixels>,
+    bufs: &mut SpliceBufs,
+) -> Option<usize> {
+    let old = &piece.pts;
+    let segs = old.len().checked_sub(1)?;
+    let fill = baseline.is_some();
+    if !piece.splice
+        || new.len() < 4
+        || piece.stroke.seg.len() != segs
+        || (fill && piece.fill.seg.len() != segs)
+    {
+        return None;
+    }
+    // The first stretch of at least 4 new points that are also old points, in order. x grows
+    // along both lists. A shorter match is a coincidence at the re-decimated start.
+    let (i, k, m) = (0..new.len()).find_map(|i| {
+        let k = old.partition_point(|o| o.x < new[i].x);
+        if old.get(k) != Some(&new[i]) {
+            return None;
+        }
+        let m = new[i..]
+            .iter()
+            .zip(&old[k..])
+            .take_while(|(a, b)| a == b)
+            .count();
+        (m >= 4).then_some((i, k, m))
+    })?;
+    // New segments `i + 1 .. i + m − 2` read matched points only; they are old segments
+    // `k + 1 .. k + m − 2`.
+    let keep = (i + 1, i + m - 2);
+    piece.stroke.keep(k + 1..k + m - 2);
+    if fill {
+        piece.fill.keep(k + 1..k + m - 2);
+    }
+    let mut emitted = bufs.emit(new, 0..keep.0, baseline);
+    bufs.add_to(piece, fill, true);
+    emitted += bufs.emit(new, keep.1..new.len() - 1, baseline);
+    bufs.add_to(piece, fill, false);
+    piece.stroke.rebound();
+    if fill {
+        piece.fill.rebound();
+    }
+    Some(emitted)
+}
+
+/// Builds one grid cell (UI-PRF-002, ADR-009 rule 7) into its two pieces: series 0 into
+/// `pieces[0]` (fill when it has a fill colour, and stroke), series 1 into `pieces[1]` (stroke
+/// only); further series are ignored. Every vertex is moved by `origin` (physical px, the cell's
+/// plot corner relative to the element). `STALE` stretches and the stale tail go to the
+/// scratch's stale builders, which `finish_grid` finishes.
 ///
 /// One content mask covers the whole grid, so x is clipped at build time to the `clip_w` wide
 /// window that `map` puts on screen (chart-local `−map.dx(clip_w) ..` that plus `clip_w`):
 /// points outside are dropped and the boundary point is interpolated. No stacking.
+///
+/// With `append` (tasklens-wlf.39) the pieces hold an earlier build with the same anchor, y
+/// range, layout and scale, and a piece that is still one live run is spliced (`splice_piece`);
+/// other pieces are emitted in full. Stale content returns `None` and changes no stale set: the
+/// stale sets are shared, so the caller builds every cell in full instead. Otherwise returns
+/// the vertices emitted.
 ///
 /// Series 0's dotted-gap spans replace `scratch.cell_gaps()`, chart-local and unclipped as
 /// `build` makes them. The caller paints them as quads per cell (PERF-022).
@@ -1664,9 +1980,10 @@ pub fn build_cell(
     input: &BuildInput,
     origin: (f32, f32),
     clip_w: f32,
-    fill: &mut FillMesh,
+    pieces: &mut [CellPiece; 2],
+    append: bool,
     scratch: &mut Scratch,
-) {
+) -> Option<usize> {
     let map = &input.map;
     let Scratch {
         runs,
@@ -1675,8 +1992,7 @@ pub fn build_cell(
         clipped,
         cell_gaps,
         stale,
-        grid_stroke,
-        grid_overlay,
+        splice,
         ..
     } = scratch;
     cell_gaps.clear();
@@ -1686,9 +2002,11 @@ pub fn build_cell(
         lo: -map.dx(clip_w),
         clip_w,
     };
+    let mut emitted = 0;
 
-    for (si, (spec, view)) in input.series.iter().enumerate().take(2) {
-        let Some(view) = view else {
+    for (si, piece) in pieces.iter_mut().enumerate() {
+        let Some((spec, Some(view))) = input.series.get(si) else {
+            piece.clear();
             continue;
         };
         let period = view.period_ns;
@@ -1700,6 +2018,50 @@ pub fn build_cell(
             push_gaps(samples, runs, map, period, cell_gaps);
         }
 
+        // Flat continuation of a stale series to the right edge (UI-PRF-007). Only when the
+        // series ends on a valid sample: newer gap samples are a gap, not a stale tail.
+        let stale_tail = runs
+            .last()
+            .filter(|r| r.end == samples.len())
+            .map(|r| samples[r.end - 1])
+            .filter(|s| is_stale(s.t_ns, input.now_boot_ns, period) && map.right_edge_ns > s.t_ns);
+        let baseline = (si == 0 && spec.fill.is_some()).then(|| place.baseline(input));
+
+        if append {
+            let has_stale = runs.iter().any(|r| {
+                samples[r.start..r.end]
+                    .iter()
+                    .any(|s| s.flags.contains(SampleFlags::STALE))
+            });
+            if has_stale || stale_tail.is_some() {
+                return None;
+            }
+            if let [run] = runs[..] {
+                decimate(samples, run, bucket, pts);
+                place.clip(pts, input, clipped);
+                if !has_short_segment(clipped)
+                    && let Some(n) = splice_piece(piece, clipped, baseline, splice)
+                {
+                    std::mem::swap(&mut piece.pts, clipped);
+                    emitted += n;
+                    continue;
+                }
+            }
+        }
+
+        // The whole piece: live stretches into its meshes, `STALE` ones into the stale sets.
+        let mut fill = FillMesh::reusing(Some(piece.fill.take_buffer()));
+        let mut stroke =
+            StrokeMesh::reusing(Some(piece.stroke.take_buffer()), GRID_LINE_WIDTH, false);
+        let CellPiece {
+            pts: piece_pts,
+            fill: piece_fill,
+            stroke: piece_stroke,
+            splice: piece_splice,
+        } = piece;
+        piece_pts.clear();
+        let mut live = 0;
+        let mut splice_ok = stale_tail.is_none();
         for run in runs.iter() {
             for_each_stretch(samples, *run, |span, is_stale_flag| {
                 let out = if is_stale_flag {
@@ -1710,63 +2072,73 @@ pub fn build_cell(
                 decimate(samples, span, bucket, out);
                 place.clip(out, input, clipped);
                 if is_stale_flag {
+                    splice_ok = false;
                     emit_stale(stale, spec, si == 0, clipped, &place, input);
-                } else if si == 0 {
-                    let f = spec.fill.is_some().then_some(&mut *fill);
-                    emit_cell(f, grid_stroke, clipped, &place, input);
+                    return;
+                }
+                if clipped.is_empty() {
+                    return;
+                }
+                live += 1;
+                if let Some(b) = baseline {
+                    for w in clipped.windows(2) {
+                        let n = fill.len();
+                        fill.band(w, |_, p| point(p.x, b));
+                        piece_fill.seg.push_back((fill.len() - n) as u8);
+                    }
+                }
+                if clipped.len() >= 2 && !has_short_segment(clipped) {
+                    let mut last = stroke.len();
+                    stroke.stroke_line_marked(clipped, |n| {
+                        piece_stroke.seg.push_back((n - last) as u8);
+                        last = n;
+                    });
+                    piece_pts.clear();
+                    piece_pts.extend_from_slice(clipped);
                 } else {
-                    emit_cell(None, grid_overlay, clipped, &place, input);
+                    splice_ok = false;
+                    stroke.stroke(clipped);
                 }
             });
         }
 
-        // Flat continuation of a stale series to the right edge (UI-PRF-007). Only when the
-        // series ends on a valid sample: newer gap samples are a gap, not a stale tail.
-        if let Some(last_run) = runs.last().filter(|r| r.end == samples.len()) {
-            let newest = samples[last_run.end - 1];
-            if is_stale(newest.t_ns, input.now_boot_ns, period) && map.right_edge_ns > newest.t_ns {
-                stale_pts.clear();
-                stale_pts.push(Pt {
-                    t_ns: newest.t_ns,
-                    value: newest.value,
-                });
-                stale_pts.push(Pt {
-                    t_ns: map.right_edge_ns,
-                    value: newest.value,
-                });
-                place.clip(stale_pts, input, clipped);
-                emit_stale(stale, spec, si == 0, clipped, &place, input);
-            }
+        if let Some(newest) = stale_tail {
+            stale_pts.clear();
+            stale_pts.push(Pt {
+                t_ns: newest.t_ns,
+                value: newest.value,
+            });
+            stale_pts.push(Pt {
+                t_ns: map.right_edge_ns,
+                value: newest.value,
+            });
+            place.clip(stale_pts, input, clipped);
+            emit_stale(stale, spec, si == 0, clipped, &place, input);
         }
+
+        let segs = piece_stroke.seg.len();
+        *piece_splice = splice_ok
+            && live == 1
+            && segs + 1 == piece_pts.len()
+            && (baseline.is_none() || piece_fill.seg.len() == segs);
+        if !*piece_splice {
+            piece_pts.clear();
+            piece_fill.seg.clear();
+            piece_stroke.seg.clear();
+        }
+        let (fill, stroke) = (fill.into_parts(), stroke.into_parts());
+        emitted += fill.0.len() + stroke.0.len();
+        piece_fill.set(fill);
+        piece_stroke.set(stroke);
     }
+    Some(emitted)
 }
 
-/// Finishes a grid's shared direct meshes into `cache`: `fills[0]` from `fill`, `strokes[0]` from
-/// the total mesh and `strokes[1]` from the overlay mesh, plus the stale sets from `scratch`.
-/// Empty paths add no set. Also stores the time map and y range the geometry was built for. Take
-/// `fill` from `Scratch::take_grid` so all three live meshes reuse their old vertex buffers.
-pub fn finish_grid(
-    input: &BuildInput,
-    fill: (Hsla, FillMesh),
-    stroke: Hsla,
-    overlay: Option<Hsla>,
-    cache: &mut ChartCache,
-    scratch: &mut Scratch,
-) {
-    scratch.live.reclaim_fills(&mut cache.fills);
-    cache.strokes.clear();
+/// Finishes a full grid build into `cache`: the stale sets from `scratch` (the live geometry
+/// stays in the pieces), and the time map and y range the geometry was built for. Run
+/// `Scratch::begin_grid` before the cells.
+pub fn finish_grid(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) {
     cache.gaps.clear();
-    cache.fills.extend(fill_set(fill.0, fill.1));
-    if let Some(set) = stroke_set(stroke, false, &mut scratch.grid_stroke) {
-        scratch.grid_stroke_cached = true;
-        cache.strokes.push(set);
-    }
-    if let Some(color) = overlay
-        && let Some(set) = stroke_set(color, false, &mut scratch.grid_overlay)
-    {
-        scratch.grid_overlay_cached = true;
-        cache.strokes.push(set);
-    }
     scratch
         .stale
         .finish(&mut cache.stale_fills, &mut cache.stale_strokes);
@@ -1774,6 +2146,54 @@ pub fn finish_grid(
     cache.px_per_ns = input.map.px_per_ns();
     cache.y_min = input.y_min;
     cache.y_max = input.y_max;
+}
+
+/// Which mesh of a grid piece.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PieceLayer {
+    Fill,
+    Stroke,
+}
+
+/// One layer of every piece as one path in logical px moved by `offset`, as `translated` makes
+/// it from one cached path: the bounds cover every piece, and each vertex is written once, so a
+/// paint copies the grid's vertices once. `None` when no piece has a vertex in that layer.
+pub fn piece_path<'a>(
+    pieces: impl Iterator<Item = &'a CellPiece> + Clone,
+    layer: PieceLayer,
+    offset: Point<Pixels>,
+    scale_factor: f32,
+) -> Option<Path<Pixels>> {
+    let mesh = |p: &'a CellPiece| match layer {
+        PieceLayer::Fill => &p.fill,
+        PieceLayer::Stroke => &p.stroke,
+    };
+    let meshes = pieces.map(mesh).filter(|m| !m.verts.is_empty());
+    let mut count = 0;
+    let (mut min, mut max) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+    for m in meshes.clone() {
+        count += m.verts.len();
+        min = (min.0.min(m.min.0), min.1.min(m.min.1));
+        max = (max.0.max(m.max.0), max.1.max(m.max.1));
+    }
+    if count == 0 {
+        return None;
+    }
+    let inv = 1.0 / scale_factor;
+    let mut out = Path::new(point(px(min.0), px(min.1)) * inv + offset);
+    out.bounds.size = size(px(max.0 - min.0) * inv, px(max.1 - min.1) * inv);
+    out.vertices.reserve_exact(count);
+    let moved = |v: &PathVertex<Pixels>| PathVertex {
+        xy_position: v.xy_position * inv + offset,
+        st_position: v.st_position,
+        content_mask: Default::default(),
+    };
+    for m in meshes {
+        let (a, b) = m.verts.as_slices();
+        out.vertices.extend(a.iter().map(moved));
+        out.vertices.extend(b.iter().map(moved));
+    }
+    Some(out)
 }
 
 /// Where one grid cell's points go: chart-local x in `lo .. lo + clip_w` is on screen.
@@ -1823,31 +2243,14 @@ impl CellPlace {
     }
 }
 
-/// A fill polygon down to the cell's baseline (when `fill` is given and there are 2 or more
-/// points) and a stroke along `pts`. A single point strokes 1 px to the right.
-fn emit_cell(
-    fill: Option<&mut FillMesh>,
-    stroke: &mut StrokeMesh,
-    pts: &[Point<Pixels>],
-    place: &CellPlace,
-    input: &BuildInput,
-) {
-    let Some((&_first, _rest)) = pts.split_first() else {
-        return;
-    };
-    if let Some(b) = fill {
-        emit_cell_fill(b, pts, place.baseline(input));
-    }
-    stroke.stroke(pts);
-}
-
 /// The fill under `pts` down to `baseline`.
 fn emit_cell_fill(b: &mut FillMesh, pts: &[Point<Pixels>], baseline: Pixels) {
     b.band(pts, |_, p| point(p.x, baseline));
 }
 
-/// `emit_cell` into the stale builders: series 0 (`main`) gets its fill when it has one; the
-/// overlay gets a stroke only.
+/// One stale stretch of a grid cell into the stale builders: a fill polygon down to the cell's
+/// baseline for series 0 (`main`) when it has a fill colour, and a stroke along `pts` (a single
+/// point strokes 1 px to the right). The overlay gets a stroke only.
 fn emit_stale(
     stale: &mut Builders,
     spec: &ChartSeries,
@@ -1902,6 +2305,37 @@ mod tests {
         let path = mesh.finish().expect("triangles");
         assert_eq!(path.bounds.origin, point(px(2.0), px(1.0)));
         assert_eq!(path.bounds.size, size(px(10.0), px(19.0)));
+    }
+
+    /// `StrokeMesh::segment` for every segment gives `stroke_line` vertex for vertex, and the
+    /// marks split the line into those segments (tasklens-wlf.39). The zigzag has sharp turns,
+    /// so bevels and folded joins are covered.
+    #[test]
+    fn segments_match_the_whole_line() {
+        let pts: Vec<_> = (0..40)
+            .map(|i| {
+                let y = if i % 3 == 0 {
+                    2.0
+                } else {
+                    40.0 - (i % 7) as f32 * 5.0
+                };
+                point(px(i as f32 * 1.7), px(y))
+            })
+            .collect();
+        assert!(!has_short_segment(&pts));
+        let mut whole = StrokeMesh::reusing(None, GRID_LINE_WIDTH, false);
+        let mut marks = Vec::new();
+        whole.stroke_line_marked(&pts, |n| marks.push(n));
+        let mut parts = StrokeMesh::reusing(None, GRID_LINE_WIDTH, false);
+        let mut ends = Vec::new();
+        for j in 0..pts.len() - 1 {
+            parts.segment(&pts, j);
+            ends.push(parts.len());
+        }
+        assert_eq!(marks, ends);
+        let xy =
+            |m: StrokeMesh| -> Vec<_> { m.into_parts().0.iter().map(|v| v.xy_position).collect() };
+        assert_eq!(xy(whole), xy(parts));
     }
 
     /// A segment with no width adds no triangle.

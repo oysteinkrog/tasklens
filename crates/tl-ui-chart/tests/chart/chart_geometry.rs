@@ -7,9 +7,9 @@ use gpui_kit::{Hsla, hsla};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_ui_chart::chart::geometry::{
-    BuildInput, Pt, Run, Scratch, TimeMap, bucket_ns, build, build_cell, decimate, emit_run,
-    finish_grid, is_stale, mean_samples, right_edge_ns, split_runs, stale_age_ns, window_start,
-    y_of,
+    BuildInput, CellPiece, PieceLayer, Pt, Run, Scratch, TimeMap, bucket_ns, build, build_cell,
+    decimate, emit_run, finish_grid, is_stale, mean_samples, piece_path, right_edge_ns, split_runs,
+    stale_age_ns, window_start, y_of,
 };
 use tl_ui_chart::chart::{ChartCache, ChartSeries, ChartSpec, PathSet, YScale};
 
@@ -1736,10 +1736,10 @@ fn rebuild_reuses_stroke_buffers() {
     assert_eq!(cache.strokes[0].path.vertices.as_ptr(), first);
 }
 
-/// A missing total series leaves only the overlay path in the cache. Its buffer must return to
-/// the overlay mesh on the next grid build instead of being consumed by the empty total mesh.
+/// A missing total series leaves only the overlay piece with geometry: a line and no fill. A
+/// second full build gives the same.
 #[test]
-fn grid_rebuild_reuses_overlay_buffer_when_total_is_absent() {
+fn grid_overlay_piece_without_total() {
     let s = series(200, 100 * MS, 10 * SEC, noise);
     let map = exact_map(&s);
     let v = view(s.clone(), 100 * MS);
@@ -1758,37 +1758,29 @@ fn grid_rebuild_reuses_overlay_buffer_when_total_is_absent() {
         curved: false,
     };
     let (mut cache, mut scratch) = (ChartCache::default(), Scratch::default());
-
-    let mut fill = scratch.take_grid(&mut cache);
-    build_cell(&input, (0.0, 0.0), 1_000.0, &mut fill, &mut scratch);
-    finish_grid(
-        &input,
-        (BLUE, fill),
-        RED,
-        Some(BLUE),
-        &mut cache,
-        &mut scratch,
-    );
-    assert_eq!(cache.strokes.len(), 1);
-    assert_eq!(cache.strokes[0].color, BLUE);
-    let first = cache.strokes[0].path.vertices.as_ptr();
-
-    let mut fill = scratch.take_grid(&mut cache);
-    build_cell(&input, (0.0, 0.0), 1_000.0, &mut fill, &mut scratch);
-    finish_grid(
-        &input,
-        (BLUE, fill),
-        RED,
-        Some(BLUE),
-        &mut cache,
-        &mut scratch,
-    );
-    assert_eq!(cache.strokes.len(), 1);
-    assert_eq!(cache.strokes[0].path.vertices.as_ptr(), first);
+    let mut pieces: [CellPiece; 2] = Default::default();
+    let mut counts = Vec::new();
+    for _ in 0..2 {
+        scratch.begin_grid(&mut cache);
+        let emitted = build_cell(
+            &input,
+            (0.0, 0.0),
+            1_000.0,
+            &mut pieces,
+            false,
+            &mut scratch,
+        );
+        finish_grid(&input, &mut cache, &mut scratch);
+        assert!(!pieces[0].has_fill() && !pieces[0].has_stroke());
+        assert!(pieces[1].has_stroke() && !pieces[1].has_fill());
+        assert_eq!(emitted, Some(pieces[1].vertices().count()));
+        counts.push(emitted);
+    }
+    assert_eq!(counts[0], counts[1]);
 }
 
-/// `Scratch` and `ChartCache` are reusable public buffers. Switching them from an ordinary chart
-/// build to a grid build discards the ordinary stroke instead of tripping a debug assertion.
+/// `Scratch` and `ChartCache` are reusable public buffers. A grid build drops the live sets an
+/// ordinary chart build left in the cache: a grid paints its pieces.
 #[test]
 fn grid_build_accepts_cache_from_ordinary_chart() {
     let s = series(20, 100 * MS, 10 * SEC, noise);
@@ -1809,11 +1801,228 @@ fn grid_build_accepts_cache_from_ordinary_chart() {
     build(&input, &mut cache, &mut scratch);
     assert_eq!(cache.strokes.len(), 1);
 
-    let mut fill = scratch.take_grid(&mut cache);
-    build_cell(&input, (0.0, 0.0), 1_000.0, &mut fill, &mut scratch);
-    finish_grid(&input, (BLUE, fill), RED, None, &mut cache, &mut scratch);
-    assert_eq!(cache.strokes.len(), 1);
-    assert_eq!(cache.strokes[0].color, RED);
+    let mut pieces: [CellPiece; 2] = Default::default();
+    scratch.begin_grid(&mut cache);
+    build_cell(
+        &input,
+        (0.0, 0.0),
+        1_000.0,
+        &mut pieces,
+        false,
+        &mut scratch,
+    );
+    finish_grid(&input, &mut cache, &mut scratch);
+    assert!(cache.strokes.is_empty() && cache.fills.is_empty());
+    assert!(pieces[0].has_stroke());
+}
+
+/// Grid append test rig: a total series with a fill and an overlay line, 10 Hz, values 5 to 95,
+/// a 60 s window 176 px wide whose right edge trails the newest sample by 50 ms, as a sliding
+/// grid's does.
+struct AppendRig {
+    total: Vec<Sample>,
+    overlay: Vec<Sample>,
+}
+
+impl AppendRig {
+    const PW: f32 = 176.0;
+    const RANGE: u64 = 60 * SEC;
+    const ORIGIN: (f32, f32) = (12.0, 30.0);
+
+    fn new(n: usize) -> Self {
+        Self {
+            total: series(n, 100 * MS, 10 * SEC, |i| 5.0 + noise(i) * 0.9),
+            overlay: series(n, 100 * MS, 10 * SEC, |i| 5.0 + noise(i + 7) * 0.45),
+        }
+    }
+
+    fn newest(&self) -> u64 {
+        self.total[self.total.len() - 1].t_ns
+    }
+
+    fn map(&self, anchor_ns: u64) -> TimeMap {
+        TimeMap {
+            anchor_ns,
+            right_edge_ns: self.newest() - 50 * MS,
+            range_ns: Self::RANGE,
+            plot_width: Self::PW,
+        }
+    }
+
+    /// Builds the cell into `pieces` with the map anchored at `anchor_ns`.
+    fn build(
+        &self,
+        anchor_ns: u64,
+        append: bool,
+        pieces: &mut [CellPiece; 2],
+        cache: &mut ChartCache,
+        scratch: &mut Scratch,
+    ) -> Option<usize> {
+        let (a, b) = (
+            view(self.total.clone(), 100 * MS),
+            view(self.overlay.clone(), 100 * MS),
+        );
+        let spec = [
+            (line(Some(BLUE), RED, false), Some(&a)),
+            (line(None, BLUE, false), Some(&b)),
+        ];
+        let input = BuildInput {
+            series: &spec,
+            map: self.map(anchor_ns),
+            plot_height: 80.0,
+            y_min: 0.0,
+            y_max: 100.0,
+            now_boot_ns: self.newest(),
+            stack: false,
+            curved: false,
+        };
+        if !append {
+            scratch.begin_grid(cache);
+        }
+        let emitted = build_cell(&input, Self::ORIGIN, Self::PW, pieces, append, scratch);
+        if !append {
+            finish_grid(&input, cache, scratch);
+        }
+        emitted
+    }
+
+    /// The painted fill, line and overlay paths of `pieces` built at `anchor_ns`, as screen
+    /// positions: shifted by the paint-time `dx`, scale 1.
+    fn painted(&self, anchor_ns: u64, pieces: &[CellPiece; 2]) -> Vec<Vec<(f32, f32)>> {
+        let dx = self.map(anchor_ns).dx(Self::PW);
+        let offset = gpui_kit::point(gpui_kit::px(dx), gpui_kit::px(0.0));
+        [
+            piece_path([&pieces[0]].into_iter(), PieceLayer::Fill, offset, 1.0),
+            piece_path([&pieces[0]].into_iter(), PieceLayer::Stroke, offset, 1.0),
+            piece_path([&pieces[1]].into_iter(), PieceLayer::Stroke, offset, 1.0),
+        ]
+        .into_iter()
+        .map(|p| {
+            p.map_or_else(Vec::new, |p| {
+                p.vertices
+                    .iter()
+                    .map(|v| (v.xy_position.x.as_f32(), v.xy_position.y.as_f32()))
+                    .collect()
+            })
+        })
+        .collect()
+    }
+
+    fn push(&mut self, flags: SampleFlags) {
+        let t = self.newest() + 100 * MS;
+        let i = self.total.len();
+        let mut s = Sample::valid(t, 5.0 + noise(i) * 0.9);
+        s.flags |= flags;
+        self.total.push(s);
+        self.overlay
+            .push(Sample::valid(t, 5.0 + noise(i + 7) * 0.45));
+    }
+}
+
+/// Every vertex of `a` within 1e-2 px of the same vertex of `b`, and the same count per path.
+fn assert_same_paths(a: &[Vec<(f32, f32)>], b: &[Vec<(f32, f32)>], step: usize) {
+    assert_eq!(a.len(), b.len());
+    for (k, (pa, pb)) in a.iter().zip(b).enumerate() {
+        assert_eq!(pa.len(), pb.len(), "step {step}, path {k}: vertex count");
+        for (i, (va, vb)) in pa.iter().zip(pb).enumerate() {
+            assert!(
+                (va.0 - vb.0).abs() < 1e-2 && (va.1 - vb.1).abs() < 1e-2,
+                "step {step}, path {k}, vertex {i}: {va:?} against {vb:?}"
+            );
+        }
+    }
+}
+
+/// tasklens-wlf.39: 40 one-sample appends keep the first build's anchor, splice the pieces and
+/// paint the same vertices as a full build of the same samples at each step: within 1e-2 px of
+/// one at the newest sample's anchor, and bit for bit the same as one at the kept anchor. Each
+/// append emits under 5% of a full build's vertices.
+#[test]
+fn grid_append_matches_full_build() {
+    let mut rig = AppendRig::new(900);
+    let (mut cache, mut scratch) = (ChartCache::default(), Scratch::default());
+    let mut pieces: [CellPiece; 2] = Default::default();
+    let anchor = rig.newest();
+    let full = rig
+        .build(anchor, false, &mut pieces, &mut cache, &mut scratch)
+        .expect("a full build always builds");
+    assert!(full > 3_000, "{full} vertices in a full build");
+    for step in 0..40 {
+        rig.push(SampleFlags::empty());
+        let emitted = rig
+            .build(anchor, true, &mut pieces, &mut cache, &mut scratch)
+            .expect("no stale content");
+        assert!(
+            emitted * 20 < full,
+            "step {step}: {emitted} of {full} vertices"
+        );
+        let (mut fresh, mut fresh_cache, mut fresh_scratch) = (
+            <[CellPiece; 2]>::default(),
+            ChartCache::default(),
+            Scratch::default(),
+        );
+        let newest = rig.newest();
+        rig.build(
+            newest,
+            false,
+            &mut fresh,
+            &mut fresh_cache,
+            &mut fresh_scratch,
+        );
+        let painted = rig.painted(anchor, &pieces);
+        assert_same_paths(&painted, &rig.painted(newest, &fresh), step);
+        // At the kept anchor a full build gives every vertex bit for bit.
+        rig.build(
+            anchor,
+            false,
+            &mut fresh,
+            &mut fresh_cache,
+            &mut fresh_scratch,
+        );
+        assert_eq!(painted, rig.painted(anchor, &fresh), "step {step}");
+    }
+}
+
+/// A new run (`GAP_BEFORE`) makes an append emit the cell's total piece in full and still
+/// match a full build; a `STALE` sample makes the append refuse, so the caller builds in full.
+#[test]
+fn grid_append_falls_back_on_breaks() {
+    let mut rig = AppendRig::new(900);
+    let (mut cache, mut scratch) = (ChartCache::default(), Scratch::default());
+    let mut pieces: [CellPiece; 2] = Default::default();
+    let anchor = rig.newest();
+    let full = rig
+        .build(anchor, false, &mut pieces, &mut cache, &mut scratch)
+        .expect("a full build always builds");
+
+    rig.push(SampleFlags::GAP_BEFORE);
+    let emitted = rig
+        .build(anchor, true, &mut pieces, &mut cache, &mut scratch)
+        .expect("a gap is not stale content");
+    assert!(
+        emitted * 2 > full,
+        "the total piece again: {emitted} of {full}"
+    );
+    let mut fresh = <[CellPiece; 2]>::default();
+    let newest = rig.newest();
+    rig.build(
+        newest,
+        false,
+        &mut fresh,
+        &mut ChartCache::default(),
+        &mut Scratch::default(),
+    );
+    assert_same_paths(
+        &rig.painted(anchor, &pieces),
+        &rig.painted(newest, &fresh),
+        0,
+    );
+
+    rig.push(SampleFlags::STALE);
+    assert_eq!(
+        rig.build(anchor, true, &mut pieces, &mut cache, &mut scratch),
+        None
+    );
 }
 
 #[test]
