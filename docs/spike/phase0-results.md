@@ -918,9 +918,12 @@ RSS: the RSS gate is not fixed here. It goes to the owner in tasklens-wlf.2 (see
 
 ### Static scene idle CPU (tasklens-wlf.27, 2026-11-04)
 
-Result: FAIL. The static scene used a median 13.27% process CPU of one core over 30 s
-(nested KWin, not the 144 Hz screen). The UI-PRF-053 gate is at most 2%. The fix goes to a
-new bead with the profile below (owner decision, wlf.27 comment 1005).
+Result: FAIL. The rerun on 2026-11-05 at `e44eb654a`, after the wlf.39 fix, used a median
+16.76% process CPU of one core over 30 s (nested KWin, not the 144 Hz screen). The first
+run on 2026-11-04 at `f62a4d71a` used a median 13.27% (nested KWin, not the 144 Hz
+screen). The UI-PRF-053 gate is at most 2%. The 2026-11-05 numbers are higher because of
+the machine state, not the code (see "Rerun after wlf.39" below). The first failure went to
+the fix bead wlf.39 (owner decision, wlf.27 comment 1005).
 
 The other two acceptance points pass. The bench requested no frames (a static run that
 requests frames fails before it writes a report, `scenes.rs:702`), and the report's `frames` field counts window
@@ -1015,6 +1018,98 @@ per draw. Before is wlf.27 comment 187 (2026-10-07), after is this run.
 | 9 card charts: renders, geometry builds, path paints | 20.7, 3.9, 48.3 | 2.5, 2.0, 6.5 |
 | Overall chart: renders, builds, paths | 2.3, 2.3, 6.9 | 1.2, 1.2, 3.6 |
 | CPU grid: renders, builds, paths, text shapes | 2.3, 2.3, 6.9, 61.5 | 1.2, 1.2, 3.6, 35.2 |
+
+#### Rerun after wlf.39 (2026-11-05)
+
+Result: FAIL, median 16.76% of one core (nested KWin, not the 144 Hz screen) against the 2%
+gate. That is about 16.8 ms of CPU per paint at 10 Hz. The bench requested no frames, and
+`frames` counted 300 paints in 30 s in every run.
+
+Setup, where it differs from the first run:
+
+- Build: `cargo build --locked --profile perf -p tl-app --features bench` at `e44eb654a`.
+  This has the wlf.39 grid mesh splice (`4367efe09`, `87fd35661`) and the wlf.43 lock check
+  skip. The binary was copied to `/var/tmp/claude/wlf27/g3/tasklens-perf`.
+- Same nested KWin (`harness.sh start wlf27`, 1920x1200, 60 Hz output, app on the nested
+  Xwayland). `harness.sh app` starts the app with `env -i`, so a wrapper
+  (`g3/nested.sh`) sets `TL_BENCH_NESTED=1`.
+- The real desktop (session 2) was locked for every run. With `TL_BENCH_NESTED=1` the bench
+  skips the lock check (wlf.43).
+- Quiet-machine rule: a run counts when the 1-minute and 5-minute load are both at most 8
+  at the start, and the 1-minute load is at most 8 at the end. All 3 runs counted.
+- Scripts, reports and the profile: `/var/tmp/claude/wlf27/g3/`.
+
+| Run | Start (local) | Load at start (1, 5, 15 min) | Load at end (1 min) | Frames | Process CPU (nested KWin, not the 144 Hz screen) | RSS |
+|---|---|---|---|---|---|---|
+| 1 | 07:40:31 | 5.68, 4.57, 4.84 | 3.82 | 300 | 16.99% | 370 MB |
+| 2 | 07:41:08 | 3.82, 4.24, 4.72 | 2.99 | 300 | 16.56% | 299 MB |
+| 3 | 07:41:44 | 2.99, 4.00, 4.63 | 2.07 | 300 | 16.76% | 304 MB |
+| Median | | | | 300 | 16.76% | |
+
+`window_active` was true and `stalls` was 0 in every run.
+
+Why the median is higher than the 13.27% of the first run: the wlf.39 lane ran the code of
+the first run (a binary built at `2b6adbf87`, which is `f62a4d71a` plus docs) in the same
+session as `e44eb654a`, interleaved. The old code measured 17.22% and 17.52%, and
+`e44eb654a` measured 16.84% to 17.15% (nested KWin, not the 144 Hz screen). So about 4 ms
+per paint of today's number comes from the machine state, and the wlf.39 splice saves about
+0.9 ms per paint. The cause of the machine-state difference is inferred, not proven: with
+the desktop locked and its display off, the GPU stays in a low power state (P5 to P8, PCIe
+link at Gen 1 or Gen 2, about 250 MHz), and the per-paint uploads and driver work may cost
+more CPU there. A run with the display on would settle it.
+
+Profile: one more 30 s run under `perf record -e cpu-clock:u -F 499 --call-graph
+dwarf,16384 --user-callchains` (07:42:20, load 2.07): 16.77% process CPU (nested KWin, not
+the 144 Hz screen), 300 frames, 2612 user-space samples. 98.8% of the samples (2580) are on
+the UI main thread.
+
+Top 10 self symbols, UI main thread. The libc rows at `0x1b18f0` to `0x1b1d00` are
+`__memcpy_avx_unaligned_erms`, summed into one row:
+
+| Share | Symbol |
+|---|---|
+| 48.37% | libc memcpy |
+| 7.04% | `gpui_wgpu::wgpu_renderer::WgpuRendererCore::render_frame` |
+| 4.79% | `gpui::bounds_tree::BoundsTree<ScaledPixels>::insert` |
+| 2.99% | `tl_ui_chart::chart::geometry::piece_path` (the one paint copy) |
+| 2.53% | `Vec<PathVertex<ScaledPixels>>` from iterator (`Path::scale`) |
+| 2.30% | `gpui::scene::Scene::insert_primitive::<Path<ScaledPixels>>` |
+| 1.23% | `taffy::compute::flexbox::compute_flexbox_layout` |
+| 1.00% | `tl_ui_chart::chart::geometry::build_cell` |
+| 1.00% | `tl_ui_chart::chart::geometry::decimate` |
+| 0.80% | `gpui::window::ElementId` hash |
+
+The stroke mesh rows of the first profile are gone from the top 10 (`StrokeMesh::stroke_line`
+4.77%, `StrokeMesh::tri` 4.36%, `FillMesh::tri` 2.46% on 2026-11-04).
+
+By phase (script `split2.py` from wlf.28, main-thread samples). Milliseconds per paint are
+the share times 16.77% process CPU times the 98.8% main-thread share, so the total is
+16.56 ms (nested KWin, not the 144 Hz screen):
+
+| Phase | Share | ms per paint |
+|---|---|---|
+| memcpy (libc) | 48.4% | 8.01 |
+| GPU submit (`render_frame`, wgpu, NVIDIA driver) | 11.1% | 1.84 |
+| Other GPUI (element tree, styles, hashing, entities) | 8.3% | 1.37 |
+| Scene build (BoundsTree, scene insert) | 8.3% | 1.37 |
+| Chart paint (`tl_ui_chart`: geometry, copy, paint) | 7.5% | 1.24 |
+| Layout (taffy) | 4.5% | 0.74 |
+| malloc, free, other libc | 3.7% | 0.62 |
+| Text (shaping, glyphs, atlas) | 3.0% | 0.49 |
+| GPUI `Path::scale` copy | 2.6% | 0.42 |
+| Rest | 1.6% | 0.26 |
+| Other tasklens UI code | 1.2% | 0.20 |
+
+Reading: tasklens chart code is now 1.24 ms per paint. About 15.3 ms per paint is outside
+it, and memcpy alone is 8.0 ms. The stacks do not unwind out of libc, so the memcpy callers
+are not measured. wlf.28 inferred them from the GPUI code: the scene clone, `Scene::replay`
+of cached views, the raster vertex `Vec` and `write_buffer`. Those levers are in GPUI, and
+the leader sent them to the owner in wlf.2 (options B, C and D).
+
+Redraw counters after the rerun (`bench_scenes::redraw_work_static`, test platform): paints
+2.2, sidebar renders 2.2, 9 cards renders 2.5, builds 2.0, paths 6.5, overall chart renders
+1.2, builds 1.2, paths 3.6, CPU grid renders 1.2, builds 1.2, paths 3.6, text shapes 34.8.
+These match the first run; wlf.39 made each grid build cheaper, not less frequent.
 
 ### Perf-cpu frame cost and pacing (tasklens-wlf.28, 2026-11-04)
 
