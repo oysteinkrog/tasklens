@@ -1789,17 +1789,62 @@ pub struct AnimationDriver {
 - The bench report adds `pacing`, `drawn_frames` (window paints) and `pixel_rate_hz` (one px step of the fastest paced chart, per second). With pacing on, `frames` counts the driver frames that notified a chart, the `FrameProbe` does not run, and missed frames are not judged.
 - No user setting until the owner has compared it side by side on a 144 Hz screen (`docs/research/tmog-inspiration.md`).
 
-Measured 2026-11-05 at 23be64f7d: `perf-cpu`, hidden nested KWin 6.8.2, one 60 Hz virtual output at scale 1.1, perf build, 30 s runs after a 5 s warm-up, median of 3 interleaved runs. The fastest paced chart in this scene is the 32-core grid: about 150 physical px per cell over 60 s, so one px every 400 ms (`pixel_rate_hz` 2.5). Its data and per-core labels change at 10 Hz, so most draws in the paced modes come from new data, not from sliding. KWin CPU is the nested KWin's user plus system time over each 35.6 s run, in 10 ms ticks.
+Measured 2026-11-05 at bd1200b1c, the final code: `perf-cpu`, hidden nested KWin 6.8.2, one 60 Hz virtual output at scale 1.1, perf build, `TL_BENCH_REFRESH_HZ=60`, 30 s runs after a 5 s warm-up, off and timer interleaved, then one 60 s timer soak. The fastest paced chart in this scene is the 32-core grid: about 150 physical px per cell over 60 s, so one px every 400 ms (`pixel_rate_hz` 2.5). Its data and per-core labels change at 10 Hz, so most draws with pacing on come from new data, not from sliding. KWin CPU is the nested KWin's user plus system time over each run, in 10 ms ticks (35.6 s for a 30 s run, 65.6 s for the soak). A run counts under the quiet-machine rule when the 1- and 5-minute load are both at most 8 at its start and the 1-minute load is at most 8 at its end. Every run of this pass counted.
 
-| Mode | `frames` | `drawn_frames` | Process CPU | Nested KWin CPU | Stalls, 60 s soak |
-|---|---|---|---|---|---|
-| off | 1,212 (probe) | 1,213 | 64.0% | 111 ticks | not run |
-| timer | 30 | 330 | 19.3% | 35 ticks | 0 |
-| skip | 30 | 330 | 20.0% | 39 ticks | 0 |
+| Mode | `frames` | `drawn_frames` | Process CPU | KWin ticks | Stalls | Load at start (1 / 5 min) | Load at end (1 min) | Counts |
+|---|---|---|---|---|---|---|---|---|
+| off | 1,774 | 1,775 | 63.9% | 125 | 0 | 4.07 / 7.91 | 3.82 | yes |
+| timer | 30 | 330 | 17.2% | 30 | 0 | 3.82 / 7.40 | 3.65 | yes |
+| off | 1,766 | 1,767 | 66.9% | 117 | 0 | 3.65 / 6.97 | 4.20 | yes |
+| timer | 30 | 330 | 18.9% | 33 | 0 | 4.20 / 6.72 | 3.60 | yes |
+| off | 1,745 | 1,746 | 70.3% | 119 | 0 | 3.60 / 6.31 | 4.04 | yes |
+| timer | 30 | 330 | 18.0% | 30 | 0 | 4.04 / 6.10 | 5.08 | yes |
+| timer soak | 60 | 660 | 18.4% | 57 | 0 | 5.08 / 6.12 | 4.58 | yes |
 
-- The wlf.31 target, `frames` at most the pixel rate plus 10% (2.5 × 30 s × 1.1 = 82.5), holds for both paced modes.
-- The 1-minute load rose from 7.6 to 23 during these runs (other agents' builds). Two earlier passes at load 3 to 6, before the 2 ms merge, gave the same picture: process CPU 61.2% and 63.8% off, 18.2% and 18.8% timer, 18.1% and 18.7% skip. In those passes timer drew 360 frames to skip's 330, because the frame armed for the first of the eight sidebar charts missed the others by under 1 ms. `PACE_MERGE` fixed that.
-- Skip was the other design: one `on_next_frame` every compositor frame while any chart moves, notifying only the charts that are due. Its CPU was within run-to-run noise of timer's (17.1% to 23.1% over all runs of both). Both drew the same frames, but skip still woke the UI thread and asked the compositor for a frame callback every vsync: 60 times a second here, 144 on the owner's screen. Timer wakes at the pixel steps only. This amendment keeps timer and removes skip.
+Medians of the three 30 s runs: off draws 1,767 frames at 66.9% process CPU and 119 KWin ticks; timer has 30 driver frames, draws 330 frames, and uses 18.0% process CPU and 30 KWin ticks.
+
+- The wlf.31 target, `frames` at most the pixel rate plus 10% (2.5 × 30 s × 1.1 = 82.5), holds: timer gives 30 in each 30 s run and 60 in the 60 s soak.
+- No stalls in any run, and none in the 60 s soak.
+- With pacing off, `frames` is the `FrameProbe` count and the probe judges missed frames (24, 32 and 54 in the three off runs). With pacing on, the probe does not run and missed frames are not judged.
+
+Earlier passes, kept here because the timer or skip choice rests on them. Passes 1 and 2 ran at d3aa2ac48, before `PACE_MERGE`. Pass 3 ran at 23be64f7d, which has `PACE_MERGE` and still has skip. bd1200b1c removed skip, so the final code has no skip to measure. Pass 1 did not record KWin ticks. Raw JSON for all passes is in `/var/tmp/claude/wlf31/` (`perf-cpu-*` pass 1, `p2-*` pass 2, `r3-*` pass 3, `r4-*` pass 4).
+
+| Pass | Commit | Mode | `frames` | `drawn_frames` | Process CPU | KWin ticks | Stalls | Load at start (1 / 5 min) | Load at end (1 min) | Counts |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | d3aa2ac48 | off | 1,190 | 1,191 | 61.8% | not recorded | 0 | 7.29 / 6.61 | 6.13 | yes |
+| 1 | d3aa2ac48 | timer | 60 | 360 | 18.2% | not recorded | 0 | 6.13 / 6.42 | 5.38 | yes |
+| 1 | d3aa2ac48 | skip | 31 | 331 | 18.9% | not recorded | 0 | 5.38 / 6.20 | 4.46 | yes |
+| 1 | d3aa2ac48 | off | 1,230 | 1,231 | 61.2% | not recorded | 0 | 4.46 / 5.88 | 4.09 | yes |
+| 1 | d3aa2ac48 | timer | 60 | 360 | 19.8% | not recorded | 0 | 4.09 / 5.63 | 3.77 | yes |
+| 1 | d3aa2ac48 | skip | 31 | 330 | 17.9% | not recorded | 0 | 3.77 / 5.39 | 4.05 | yes |
+| 1 | d3aa2ac48 | off | 1,140 | 1,141 | 57.9% | not recorded | 0 | 4.05 / 5.28 | 3.50 | yes |
+| 1 | d3aa2ac48 | timer | 60 | 348 | 17.1% | not recorded | 0 | 3.50 / 5.01 | 4.08 | yes |
+| 1 | d3aa2ac48 | skip | 30 | 330 | 18.1% | not recorded | 0 | 4.08 / 5.00 | 3.54 | yes |
+| 1 | d3aa2ac48 | timer soak | 120 | 720 | 18.8% | not recorded | 0 | 3.54 / 4.76 | 4.14 | yes |
+| 1 | d3aa2ac48 | skip soak | 60 | 660 | 18.2% | not recorded | 0 | 4.14 / 4.85 | 3.18 | yes |
+| 2 | d3aa2ac48 | timer | 60 | 360 | 18.4% | 30 | 0 | 3.18 / 4.42 | 5.01 | yes |
+| 2 | d3aa2ac48 | skip | 32 | 331 | 18.7% | 28 | 0 | 5.01 / 4.72 | 4.21 | yes |
+| 2 | d3aa2ac48 | timer | 60 | 359 | 18.8% | 30 | 0 | 4.21 / 4.54 | 3.28 | yes |
+| 2 | d3aa2ac48 | skip | 30 | 330 | 18.3% | 34 | 0 | 3.28 / 4.26 | 2.44 | yes |
+| 2 | d3aa2ac48 | timer | 60 | 360 | 19.6% | 32 | 0 | 2.44 / 3.95 | 4.36 | yes |
+| 2 | d3aa2ac48 | skip | 30 | 330 | 18.9% | 28 | 0 | 4.36 / 4.20 | 3.74 | yes |
+| 2 | d3aa2ac48 | off | 1,266 | 1,267 | 63.8% | 86 | 0 | 3.74 / 4.06 | 3.81 | yes |
+| 3 | 23be64f7d | off | 1,406 | 1,407 | 63.1% | 107 | 0 | 7.56 / 6.90 | 7.23 | yes |
+| 3 | 23be64f7d | timer | 30 | 330 | 18.6% | 31 | 0 | 7.23 / 6.94 | 8.06 | no |
+| 3 | 23be64f7d | skip | 30 | 330 | 19.1% | 34 | 0 | 8.06 / 7.14 | 5.76 | no |
+| 3 | 23be64f7d | off | 1,212 | 1,213 | 64.0% | 111 | 0 | 5.76 / 6.68 | 12.84 | no |
+| 3 | 23be64f7d | timer | 31 | 331 | 19.3% | 35 | 0 | 12.84 / 8.43 | 9.52 | no |
+| 3 | 23be64f7d | skip | 30 | 330 | 21.1% | 39 | 0 | 9.52 / 8.09 | 13.64 | no |
+| 3 | 23be64f7d | off | 1,030 | 1,031 | 64.5% | 112 | 0 | 13.64 / 9.47 | 14.87 | no |
+| 3 | 23be64f7d | timer | 30 | 330 | 23.1% | 38 | 0 | 14.87 / 10.33 | 23.37 | no |
+| 3 | 23be64f7d | skip | 30 | 329 | 20.0% | 39 | 0 | 23.37 / 13.41 | 19.99 | no |
+| 3 | 23be64f7d | timer soak | 61 | 661 | 22.1% | 83 | 0 | 19.99 / 13.63 | 29.37 | no |
+| 3 | 23be64f7d | skip soak | 61 | 658 | 23.7% | 82 | 0 | 29.37 / 17.68 | 33.65 | no |
+
+- Skip was the other design: one `on_next_frame` every compositor frame while any chart moves, notifying only the charts that are due. In the 7 counted skip runs of passes 1 and 2 (soak included), process CPU was 17.9% to 18.9%. In the 7 counted timer runs it was 17.1% to 19.8%. The difference is within run-to-run noise. Skip still woke the UI thread and asked the compositor for a frame callback every vsync: 60 times a second here, 144 on the owner's screen. Timer wakes at the pixel steps only. This amendment keeps timer and removes skip. That is a judgement on equal measured CPU, not a measured win.
+- In passes 1 and 2, timer drew about 360 frames to skip's 330, and had 60 driver frames to skip's 30. The frame armed for the first of the eight sidebar charts missed the others by under 1 ms. `PACE_MERGE` fixed that: from pass 3 on, timer has 30 driver frames and draws 330.
+- Pass 3 counted only its first run. Other agents' builds pushed the 1-minute load from 7.6 to 34 during it.
+- With pacing off, pass 4 drew 1,746 to 1,775 frames in 30 s, near the 1,800 vsyncs of a 60 Hz output. The counted off runs of passes 1 and 2 drew 1,141 to 1,267 at similar load. The cause is not known. Off process CPU was about the same (57.9% to 70.3% over all counted off runs).
 - The 144 Hz numbers wait for the owner's side-by-side check.
 
 **Process tree-table** (custom, on GPUI `uniform_list`):
