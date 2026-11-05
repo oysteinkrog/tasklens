@@ -10,7 +10,7 @@ use gpui_kit::{
     AppContext, Context, Entity, EntityId, IntoElement, Render, TestAppContext, VisualTestContext,
     Window, div,
 };
-use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::anim::{AnimationDriver, Pacing};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Level, Metadata, Subscriber};
 
@@ -295,6 +295,226 @@ fn driver_frame_cpu_from_the_real_clock(cx: &mut TestAppContext) {
         d.stats.samples.last().map(|s| s.thread_cpu_ns)
     });
     assert!(last.is_some_and(|ns| ns > 0), "{last:?}");
+}
+
+// Pixel pacing (wlf.31). A chart that is notified paints and requests again; `Paced` stands in
+// for it: the test requests again for every requester whose notify count went up.
+
+const MS: u64 = 1_000_000;
+
+fn request_paced(vcx: &mut VisualTestContext, id: EntityId, step_ms: u64) {
+    vcx.update(|window, cx| {
+        AnimationDriver::global(window, cx)
+            .update(cx, |d, cx| d.request_paced(id, step_ms * MS, window, cx))
+    });
+}
+
+fn set_pacing(driver: &Entity<AnimationDriver>, vcx: &mut VisualTestContext, pacing: Pacing) {
+    driver.update(vcx, |d, _| d.set_pacing(pacing));
+}
+
+fn armed(driver: &Entity<AnimationDriver>, vcx: &mut VisualTestContext) -> bool {
+    vcx.read_entity(driver, |d, _| d.is_armed())
+}
+
+fn notify_frames(driver: &Entity<AnimationDriver>, vcx: &mut VisualTestContext) -> u64 {
+    vcx.read_entity(driver, |d, _| d.stats.notify_frames)
+}
+
+/// Paced requesters with their step and a notify counter each.
+struct Paced {
+    ids: Vec<(EntityId, u64)>,
+    counts: Rc<RefCell<Vec<u32>>>,
+    seen: Vec<u32>,
+    _subs: Vec<gpui_kit::Subscription>,
+    _entities: Vec<Entity<Plain>>,
+}
+
+impl Paced {
+    fn new(vcx: &mut VisualTestContext, steps_ms: &[u64]) -> Self {
+        let counts = Rc::new(RefCell::new(vec![0u32; steps_ms.len()]));
+        let mut ids = Vec::new();
+        let mut subs = Vec::new();
+        let mut entities = Vec::new();
+        for (i, &step) in steps_ms.iter().enumerate() {
+            let e = vcx.new(|_| Plain);
+            let counts = Rc::clone(&counts);
+            subs.push(vcx.update(|_, cx| cx.observe(&e, move |_, _| counts.borrow_mut()[i] += 1)));
+            ids.push((e.entity_id(), step));
+            entities.push(e);
+        }
+        for &(id, step) in &ids {
+            request_paced(vcx, id, step);
+        }
+        Self {
+            ids,
+            seen: vec![0; steps_ms.len()],
+            counts,
+            _subs: subs,
+            _entities: entities,
+        }
+    }
+
+    /// Requests again for every requester notified since the last call, as its paint would.
+    fn repaint(&mut self, vcx: &mut VisualTestContext) {
+        let counts = self.counts.borrow().clone();
+        for (i, &(id, step)) in self.ids.iter().enumerate() {
+            if counts[i] > self.seen[i] {
+                request_paced(vcx, id, step);
+            }
+        }
+        self.seen = counts;
+    }
+
+    fn notified(&self) -> Vec<u32> {
+        self.counts.borrow().clone()
+    }
+}
+
+/// Runs `total_ms` of a compositor that offers a frame every `vsync_ms` while one is armed.
+/// Returns the frames delivered.
+fn run_vsync(
+    driver: &Entity<AnimationDriver>,
+    vcx: &mut VisualTestContext,
+    paced: &mut Paced,
+    vsync_ms: u64,
+    total_ms: u64,
+) -> u32 {
+    let mut frames = 0;
+    for t in 1..=total_ms {
+        advance(vcx, 1);
+        if t % vsync_ms == 0 && armed(driver, vcx) {
+            frames += u32::try_from(frame(vcx)).unwrap_or(0);
+            paced.repaint(vcx);
+        }
+    }
+    frames
+}
+
+#[test]
+fn pacing_parse() {
+    use std::ffi::OsStr;
+    assert_eq!(Pacing::parse(Some(OsStr::new("timer"))), Pacing::Timer);
+    assert_eq!(Pacing::parse(Some(OsStr::new("skip"))), Pacing::Skip);
+    assert_eq!(Pacing::parse(Some(OsStr::new("on"))), Pacing::Off);
+    assert_eq!(Pacing::parse(None), Pacing::Off);
+    assert_eq!(Pacing::Skip.as_str(), "skip");
+}
+
+#[gpui_kit::test]
+fn driver_pacing_off_request_paced_is_request(cx: &mut TestAppContext) {
+    let (driver, vcx) = rig(cx);
+    assert_eq!(vcx.read_entity(&driver, |d, _| d.pacing()), Pacing::Off);
+    let mut paced = Paced::new(vcx, &[30]);
+    assert!(armed(&driver, vcx), "armed at once, as request() does");
+    assert!(!vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+    let frames = run_vsync(&driver, vcx, &mut paced, 7, 70);
+    assert_eq!(frames, 10, "a frame every vsync");
+    assert_eq!(paced.notified(), [10]);
+    assert_eq!(vcx.read_entity(&driver, |d, _| d.stats.min_step_ns), 0);
+}
+
+#[gpui_kit::test]
+fn driver_paced_skip_notifies_once_per_step(cx: &mut TestAppContext) {
+    let (driver, vcx) = rig(cx);
+    set_pacing(&driver, vcx, Pacing::Skip);
+    let mut paced = Paced::new(vcx, &[30]);
+    assert!(armed(&driver, vcx), "skip keeps one frame armed per vsync");
+    let frames = run_vsync(&driver, vcx, &mut paced, 7, 301);
+    // Due at 30 ms, notified by the first frame at or after 26 ms: every 4th frame, 28 ms.
+    assert_eq!(frames, 43, "a frame callback every vsync");
+    assert_eq!(paced.notified(), [10]);
+    assert_eq!(notify_frames(&driver, vcx), 10);
+    assert_eq!(
+        vcx.read_entity(&driver, |d, _| d.stats.min_step_ns),
+        30 * MS
+    );
+}
+
+#[gpui_kit::test]
+fn driver_paced_timer_arms_no_frame_before_step(cx: &mut TestAppContext) {
+    let (driver, vcx) = rig(cx);
+    set_pacing(&driver, vcx, Pacing::Timer);
+    let paced = Paced::new(vcx, &[30]);
+    assert!(!armed(&driver, vcx), "no frame until the step");
+    assert!(vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+    advance(vcx, 25);
+    assert!(!armed(&driver, vcx), "25 ms: still before the step");
+    advance(vcx, 2);
+    assert!(armed(&driver, vcx), "27 ms: within 4 ms of the step");
+    assert_eq!(frame(vcx), 1);
+    assert_eq!(paced.notified(), [1]);
+    assert_eq!(notify_frames(&driver, vcx), 1);
+    assert!(!vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+}
+
+#[gpui_kit::test]
+fn driver_paced_fastest_chart_wins(cx: &mut TestAppContext) {
+    let (driver, vcx) = rig(cx);
+    set_pacing(&driver, vcx, Pacing::Timer);
+    let mut paced = Paced::new(vcx, &[30, 300]);
+    let frames = run_vsync(&driver, vcx, &mut paced, 7, 300);
+    // The 30 ms chart draws every 28 ms; the 300 ms chart is due at 296 ms, after the last vsync.
+    assert_eq!(paced.notified(), [10, 0]);
+    assert_eq!(frames, 10, "no frame that notifies nothing");
+    assert_eq!(notify_frames(&driver, vcx), 10);
+    assert_eq!(
+        vcx.read_entity(&driver, |d, _| d.stats.min_step_ns),
+        30 * MS
+    );
+}
+
+#[gpui_kit::test]
+fn driver_unpaced_request_keeps_vsync_with_pacing_on(cx: &mut TestAppContext) {
+    let (driver, vcx) = rig(cx);
+    set_pacing(&driver, vcx, Pacing::Timer);
+    let e = vcx.new(|_| Plain);
+    let hits = Rc::new(Cell::new(0u32));
+    let counter = Rc::clone(&hits);
+    let _sub = vcx.update(|_, cx| cx.observe(&e, move |_, _| counter.set(counter.get() + 1)));
+    request(vcx, e.entity_id());
+    assert!(armed(&driver, vcx), "request() arms at once");
+    assert!(!vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+    assert_eq!(frame(vcx), 1);
+    assert_eq!(hits.get(), 1);
+    assert_eq!(notify_frames(&driver, vcx), 1);
+}
+
+#[gpui_kit::test]
+fn driver_paced_counts_no_missed(cx: &mut TestAppContext) {
+    let (driver, vcx) = rig(cx);
+    driver.update(vcx, |d, _| d.stats.period_hint_ns = 6_944_444);
+    set_pacing(&driver, vcx, Pacing::Timer);
+    let mut paced = Paced::new(vcx, &[30]);
+    run_vsync(&driver, vcx, &mut paced, 7, 300);
+    let (_, frames, stalls, missed) = stats(&driver, vcx);
+    assert_eq!(frames, 10);
+    assert_eq!(
+        (stalls, missed),
+        (0, 0),
+        "28 ms intervals are not missed frames"
+    );
+}
+
+#[gpui_kit::test]
+fn driver_paced_hidden_arms_no_timer(cx: &mut TestAppContext) {
+    let (driver, vcx) = rig(cx);
+    set_pacing(&driver, vcx, Pacing::Timer);
+    let paced = Paced::new(vcx, &[30]);
+    assert!(vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+    driver.update(vcx, |d, _| d.set_hidden(true));
+    assert!(!vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+    let (id, _) = paced.ids[0];
+    request_paced(vcx, id, 30);
+    assert!(!vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+    advance(vcx, 100);
+    assert!(!armed(&driver, vcx), "no frame while hidden");
+    assert_eq!(stats(&driver, vcx).2, 0, "no stall while hidden");
+
+    driver.update(vcx, |d, _| d.set_hidden(false));
+    request_paced(vcx, id, 30);
+    advance(vcx, 27);
+    assert!(armed(&driver, vcx), "the next request paces again");
 }
 
 /// Test subscriber that keeps the messages of `tasklens::frame` warnings.

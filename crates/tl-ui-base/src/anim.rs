@@ -10,7 +10,13 @@
 //!
 //! No other code requests frames: `Window::request_animation_frame` is not used (ADR-009).
 //! Reduced motion is decided by the charts, which do not request; the driver does not read it.
+//!
+//! Pixel pacing (wlf.31 prototype, off by default): with [`PACING_ENV`] set, a moving chart asks
+//! through [`AnimationDriver::request_paced`] for its next frame only when its plot has moved one
+//! physical pixel. `timer` waits for that step on a timer and then arms one `on_next_frame`;
+//! `skip` keeps one `on_next_frame` per compositor frame and notifies only the charts that are due.
 
+use std::ffi::OsStr;
 use std::mem;
 use std::time::{Duration, Instant};
 
@@ -21,6 +27,49 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub const STALL_AFTER: Duration = Duration::from_millis(250);
 /// Capacity of `FrameStats.samples` and `PaintLog.records`. Neither grows past it.
 pub const SAMPLE_CAPACITY: usize = 65_536;
+/// Environment variable that turns pixel pacing on: `timer` or `skip`. Anything else, or unset,
+/// is off. Read once per driver. No user setting until the owner has compared it (wlf.31).
+pub const PACING_ENV: &str = "TL_PIXEL_PACING";
+/// A paced chart is notified by a frame that comes at most this long before its pixel step: about
+/// half a frame at 120 Hz to 144 Hz, so the frame nearest the step draws it.
+pub const PACE_SLACK: Duration = Duration::from_millis(4);
+
+/// How moving charts are paced (wlf.31).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pacing {
+    /// Every moving chart redraws on every compositor frame.
+    #[default]
+    Off,
+    /// A timer waits for the next pixel step, then one `on_next_frame` is armed.
+    Timer,
+    /// One `on_next_frame` per compositor frame; a chart is notified only when it is due.
+    Skip,
+}
+
+impl Pacing {
+    /// `timer` or `skip`; anything else, or `None`, is `Off`.
+    pub fn parse(value: Option<&OsStr>) -> Self {
+        match value.and_then(OsStr::to_str) {
+            Some("timer") => Self::Timer,
+            Some("skip") => Self::Skip,
+            _ => Self::Off,
+        }
+    }
+
+    /// From [`PACING_ENV`].
+    pub fn from_env() -> Self {
+        Self::parse(std::env::var_os(PACING_ENV).as_deref())
+    }
+
+    /// The bench report name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Timer => "timer",
+            Self::Skip => "skip",
+        }
+    }
+}
 
 type FrameCallback = Box<dyn Fn(&mut Window, &mut App)>;
 
@@ -36,6 +85,14 @@ pub struct AnimationDriver {
     /// The stall timer loop is running.
     stall_timer: bool,
     hidden: bool,
+    /// Read from [`PACING_ENV`] in `new`.
+    pacing: Pacing,
+    /// Paced requesters and the time each is due: one physical pixel after its last paint.
+    paced: FxHashMap<EntityId, Instant>,
+    /// Timer pacing: the time the pending pixel timer fires and its generation. A timer whose
+    /// generation is not the current one does nothing when it fires.
+    pixel_timer: Option<(Instant, u64)>,
+    pixel_timer_gen: u64,
     /// The thread CPU clock at the last frame, read only while sampling.
     last_cpu: Option<u64>,
     /// `tl_model::time::thread_cpu_ns`; tests swap it to count the calls.
@@ -81,8 +138,13 @@ pub struct FrameStats {
     pub frames: u64,
     /// Armed and no callback for 250 ms while visible.
     pub stalls: u64,
-    /// Callback interval longer than 1.5 × `period_hint_ns`.
+    /// Callback interval longer than 1.5 × `period_hint_ns`. Not counted while pacing is on.
     pub missed: u64,
+    /// Frame callbacks that notified at least one requester: the frames the driver asked to be
+    /// drawn (wlf.31).
+    pub notify_frames: u64,
+    /// Smallest pixel step of a paced request since the last `take_stats`, 0 when none.
+    pub min_step_ns: u64,
     /// Set by the bench (6_944_444 at 144 Hz). 0 turns missed-frame counting off.
     pub period_hint_ns: u64,
     pub last_interval_ns: u64,
@@ -116,6 +178,10 @@ impl AnimationDriver {
             stall_reported: false,
             stall_timer: false,
             hidden: false,
+            pacing: Pacing::from_env(),
+            paced: FxHashMap::default(),
+            pixel_timer: None,
+            pixel_timer_gen: 0,
             last_cpu: None,
             cpu_clock: tl_model::time::thread_cpu_ns,
             stats: FrameStats::default(),
@@ -154,6 +220,30 @@ impl AnimationDriver {
         self.arm(window, cx);
     }
 
+    /// A moving chart's frame request. `step_ns` is how long its plot takes to move one physical
+    /// pixel. With pacing off this is [`Self::request`]. With pacing on, `id` is notified by the
+    /// first frame at most [`PACE_SLACK`] before `step_ns` from now; a later call replaces the
+    /// due time, because the chart has just drawn.
+    pub fn request_paced(
+        &mut self,
+        id: EntityId,
+        step_ns: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pacing == Pacing::Off {
+            self.request(id, window, cx);
+            return;
+        }
+        let step_ns = step_ns.max(1);
+        if self.stats.min_step_ns == 0 || step_ns < self.stats.min_step_ns {
+            self.stats.min_step_ns = step_ns;
+        }
+        let due = cx.background_executor().now() + Duration::from_nanos(step_ns);
+        self.paced.insert(id, due);
+        self.schedule_paced(window, cx);
+    }
+
     /// Runs `f` once on the next frame, after the notifies. A second call with the same `id`
     /// before that frame replaces the first `f` (R-209). A callback that wants another frame
     /// calls `request_callback` again.
@@ -176,11 +266,30 @@ impl AnimationDriver {
             self.armed = false;
             self.pending_since = None;
         }
+        if hidden {
+            // A pending pixel timer does nothing when it fires.
+            self.pixel_timer = None;
+        }
         self.hidden = hidden;
     }
 
     pub fn is_armed(&self) -> bool {
         self.armed
+    }
+
+    pub fn pacing(&self) -> Pacing {
+        self.pacing
+    }
+
+    /// A pixel timer is pending (timer pacing).
+    pub fn has_pixel_timer(&self) -> bool {
+        self.pixel_timer.is_some()
+    }
+
+    /// Tests and the bench set pacing here, never through the environment.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub fn set_pacing(&mut self, pacing: Pacing) {
+        self.pacing = pacing;
     }
 
     /// Bench: returns the stats and resets the counters. Keeps `period_hint_ns` and `sampling`.
@@ -228,10 +337,62 @@ impl AnimationDriver {
         self.start_stall_timer(cx);
     }
 
+    /// Paced requests wait for their step: skip pacing arms the next frame, timer pacing a pixel
+    /// timer for the earliest due time.
+    fn schedule_paced(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.pacing {
+            Pacing::Off => {}
+            Pacing::Skip => self.arm(window, cx),
+            Pacing::Timer => self.start_pixel_timer(window, cx),
+        }
+    }
+
+    /// Starts the pixel timer for the earliest due time, unless one fires at or before it. The
+    /// timer arms a frame; a frame is never armed early, so no frame is drawn before a step.
+    fn start_pixel_timer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hidden {
+            return;
+        }
+        let Some(due) = self.paced.values().min().copied() else {
+            return;
+        };
+        let fire_at = due.checked_sub(PACE_SLACK).unwrap_or(due);
+        if self.pixel_timer.is_some_and(|(at, _)| at <= fire_at) {
+            return;
+        }
+        self.pixel_timer_gen += 1;
+        let generation = self.pixel_timer_gen;
+        self.pixel_timer = Some((fire_at, generation));
+        let wait = fire_at.saturating_duration_since(cx.background_executor().now());
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = cx.update(|window, cx| {
+                this.update(cx, |d, cx| d.pixel_timer_fired(generation, window, cx))
+            });
+        })
+        .detach();
+    }
+
+    /// Arms a frame when a paced requester is due, else waits again.
+    fn pixel_timer_fired(&mut self, generation: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pixel_timer.is_none_or(|(_, g)| g != generation) {
+            return;
+        }
+        self.pixel_timer = None;
+        let Some(due) = self.paced.values().min().copied() else {
+            return;
+        };
+        if due <= cx.background_executor().now() + PACE_SLACK {
+            self.arm(window, cx);
+        } else {
+            self.start_pixel_timer(window, cx);
+        }
+    }
+
     /// The `on_next_frame` callback. The callbacks run outside the driver's update so they can
     /// request again.
     fn frame(driver: &WeakEntity<Self>, window: &mut Window, cx: &mut App) {
-        let Ok(mut callbacks) = driver.update(cx, |d, cx| d.on_frame(cx)) else {
+        let Ok(mut callbacks) = driver.update(cx, |d, cx| d.on_frame(window, cx)) else {
             return;
         };
         for (_, f) in callbacks.drain() {
@@ -245,8 +406,13 @@ impl AnimationDriver {
         });
     }
 
-    /// Counts the frame, notifies every requester and returns the callbacks to run.
-    fn on_frame(&mut self, cx: &mut Context<Self>) -> FxHashMap<EntityId, FrameCallback> {
+    /// Counts the frame, notifies every requester and every paced requester that is due, and
+    /// returns the callbacks to run.
+    fn on_frame(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> FxHashMap<EntityId, FrameCallback> {
         self.armed = false;
         self.pending_since = None;
         self.stats.frames += 1;
@@ -259,7 +425,10 @@ impl AnimationDriver {
                 u64::try_from(now.saturating_duration_since(last).as_nanos()).unwrap_or(u64::MAX);
             self.stats.last_interval_ns = interval_ns;
             let period = self.stats.period_hint_ns;
-            if period > 0 && interval_ns > period.saturating_mul(3) / 2 {
+            if self.pacing == Pacing::Off
+                && period > 0
+                && interval_ns > period.saturating_mul(3) / 2
+            {
                 self.stats.missed += 1;
             }
             if self.stats.sampling {
@@ -278,8 +447,26 @@ impl AnimationDriver {
             }
         }
         self.last_frame = Some(now);
+        let mut notified = !self.requests.is_empty();
         for id in self.requests.drain() {
             App::notify(cx, id);
+        }
+        if !self.paced.is_empty() {
+            let edge = now + PACE_SLACK;
+            self.paced.retain(|&id, due| {
+                let is_due = *due <= edge;
+                if is_due {
+                    App::notify(cx, id);
+                    notified = true;
+                }
+                !is_due
+            });
+            // Requesters not yet due wait for their step; a notified chart requests again when it
+            // paints.
+            self.schedule_paced(window, cx);
+        }
+        if notified {
+            self.stats.notify_frames += 1;
         }
         mem::take(&mut self.callbacks)
     }

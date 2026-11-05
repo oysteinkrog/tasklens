@@ -270,7 +270,14 @@ pub struct BenchReport {
     pub scene: &'static str,
     /// The output refresh rate the missed-frame counts were judged against.
     pub refresh_hz: u32,
+    /// Pixel pacing of the window's driver: `off`, `timer` or `skip` (wlf.31).
+    pub pacing: &'static str,
+    /// With pacing on, the driver's frames that notified a chart; the probe does not run then.
     pub frames: u64,
+    /// Window paints in the measured window. `history-scrub` reports its probe frames here.
+    pub drawn_frames: u64,
+    /// One physical px per step of the fastest paced chart, per second. 0 with pacing off.
+    pub pixel_rate_hz: f64,
     pub frame_cpu_ms: Percentiles,
     pub missed_frames: u32,
     /// Intervals above 3 x period (R-160 OI-3).
@@ -356,7 +363,10 @@ mod tests {
         BenchReport {
             scene: "perf-cpu",
             refresh_hz: 144,
+            pacing: "off",
             frames: 5_760,
+            drawn_frames: 5_700,
+            pixel_rate_hz: 0.0,
             frame_cpu_ms: Percentiles {
                 p50: 0.5,
                 p99: 1.5,
@@ -475,7 +485,10 @@ mod tests {
         let expected = [
             "scene",
             "refresh_hz",
+            "pacing",
             "frames",
+            "drawn_frames",
+            "pixel_rate_hz",
             "frame_cpu_ms",
             "missed_frames",
             "long_missed_frames",
@@ -502,6 +515,7 @@ mod tests {
         assert!(text.contains("\"probe_cpu_pct\": null"), "{text}");
         assert!(text.contains("\"gpu\": null"), "{text}");
         assert!(text.contains("\"refresh_hz\": 144"), "{text}");
+        assert!(text.contains("\"pacing\": \"off\""), "{text}");
         assert_eq!(value["frame_cpu_ms"]["p99"], 1.5);
 
         let dir = tempfile::tempdir().unwrap();

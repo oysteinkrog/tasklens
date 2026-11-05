@@ -66,7 +66,7 @@ use super::{
     ChartCache, ChartLabels, ChartSeries, ChartSpec, ChartState, DEFAULT_RANGE_NS, GeometryScalars,
     GridStyle, LegendStyle, PathSet, ValueAlign, ValueFormat, YScale, scale,
 };
-use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::anim::{AnimationDriver, Pacing};
 use tl_ui_base::hub::{HostClock, SnapshotChanged, SnapshotHub};
 use tl_ui_base::i18n::{Strings, tr};
 use tl_ui_base::theme::{TlTheme, UiMetrics};
@@ -803,6 +803,8 @@ impl Element for ChartGridElement {
     ) {
         let env = PaintEnv {
             scale_factor: window.scale_factor(),
+            snap_dx: AnimationDriver::try_global(window, cx)
+                .is_some_and(|d| d.read(cx).pacing() != Pacing::Off),
             now: self.view.read(cx).clock.now_ns(),
             metrics: *cx.global::<UiMetrics>(),
             theme: tl_ui_base::theme::current(cx).clone(),
@@ -832,7 +834,9 @@ impl Element for ChartGridElement {
         });
         let moving = out.moving;
         if moving {
-            AnimationDriver::global(window, cx).update(cx, |d, cx| d.request(view_id, window, cx));
+            let step_ns = out.step_ns;
+            AnimationDriver::global(window, cx)
+                .update(cx, |d, cx| d.request_paced(view_id, step_ns, window, cx));
         }
         // A notify during paint reaches no observer, so the owner hears of it after the frame.
         if hover_changed {
@@ -905,6 +909,8 @@ impl Element for ChartGridElement {
 /// Per-paint inputs read from the window and the app before the view is borrowed.
 struct PaintEnv {
     scale_factor: f32,
+    /// Pixel pacing is on: the paint shift is whole physical px (wlf.31).
+    snap_dx: bool,
     now: u64,
     metrics: UiMetrics,
     theme: Arc<TlTheme>,
@@ -917,6 +923,8 @@ struct PaintEnv {
 struct PaintOut {
     /// The grid wants the next frame.
     moving: bool,
+    /// How long a cell plot takes to move one physical px; the paced frame request's step.
+    step_ns: u64,
     /// Paint-time mapping, for the hover listener.
     map: TimeMap,
     /// A hover pin survived this paint.
@@ -951,6 +959,7 @@ fn paint_grid_view(
     if n == 0 {
         return PaintOut {
             moving: false,
+            step_ns: 0,
             map: TimeMap {
                 anchor_ns: now,
                 right_edge_ns: now,
@@ -1137,7 +1146,9 @@ fn paint_grid_view(
         range_ns,
         plot_width: pw as f32,
     };
+    // Pixel pacing draws once per physical px, so the shift moves in whole px (wlf.31).
     let dx = map.dx(pw as f32);
+    let dx = if env.snap_dx { dx.round() } else { dx };
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     view.last_dx.set(dx);
     let theme = &*env.theme;
@@ -1474,6 +1485,7 @@ fn paint_grid_view(
             > now;
     PaintOut {
         moving,
+        step_ns: one_px_ns,
         map,
         pinned: hover_state.pinned_t_ns.is_some(),
         grid: sample_grid,

@@ -38,7 +38,7 @@ use super::stats::{
 };
 use super::synth::SEED;
 use crate::app::TasklensUi;
-use tl_ui_base::anim::{AnimationDriver, PaintRecord};
+use tl_ui_base::anim::{AnimationDriver, Pacing, PaintRecord};
 use tl_ui_base::app_env::{AppEnv, UiInit};
 use tl_ui_base::host::HostContext;
 use tl_ui_base::shell::APP_ID;
@@ -613,11 +613,15 @@ async fn measure(
 
     // Stalls during the warm-up are reported apart from the measured ones, never dropped.
     let at_start = counts(cx);
+    let pacing = cx.update(|cx| driver.read(cx).pacing());
+    // With pacing on, `frames` counts the driver's frames that notified a chart (wlf.31).
+    let paced = pacing != Pacing::Off && !scene.is_static() && !soak;
 
     // The probe arms `on_next_frame` every frame, so `static` runs without it, and `soak` too:
-    // forced frames would hide the zed#64499 stall it looks for.
+    // forced frames would hide the zed#64499 stall it looks for. With pacing on it would keep
+    // the UI thread waking every frame, so it does not run either (wlf.31).
     let probe = Rc::new(RefCell::new(FrameProbe::new(clocks, opts.budget.capacity)));
-    if !scene.is_static() && !soak {
+    if !scene.is_static() && !soak && !paced {
         let probe = Rc::clone(&probe);
         window
             .handle
@@ -654,6 +658,9 @@ async fn measure(
         cx.update(|cx| driver.update(cx, |d, _| d.install_paint_log()));
     }
     let at_measure = counts(cx);
+    let notify_frames = |cx: &mut AsyncApp| cx.update(|cx| driver.read(cx).stats.notify_frames);
+    let notified_at = notify_frames(cx);
+    cx.update(|cx| driver.update(cx, |d, _| d.stats.min_step_ns = 0));
     let is_active = |cx: &mut AsyncApp| {
         window
             .handle
@@ -677,8 +684,12 @@ async fn measure(
         scroller.borrow_mut().stop();
     }
     let samples = engine.bridge_samples().saturating_sub(samples_at);
-    let (requested, paint_log) =
-        cx.update(|cx| driver.update(cx, |d, _| (d.stats.requested, d.take_paint_log())));
+    let (requested, paint_log, min_step_ns) = cx.update(|cx| {
+        driver.update(cx, |d, _| {
+            (d.stats.requested, d.take_paint_log(), d.stats.min_step_ns)
+        })
+    });
+    let notified = notify_frames(cx).saturating_sub(notified_at);
     let at_end = counts(cx);
     let window_active = active_at && is_active(cx);
     let paints = cx
@@ -721,9 +732,12 @@ async fn measure(
     let probe = probe.borrow();
     let intervals = probe.intervals_ns();
     // The probe's frames; in `soak` the drivers' frame callbacks; in `static`, which runs
-    // without the probe, the window's paints.
+    // without the probe, the window's paints; with pacing on, the driver's frames that notified
+    // a chart.
     let frames = if soak {
         driver_frames
+    } else if paced {
+        notified
     } else if scene.is_static() {
         paints
     } else {
@@ -742,10 +756,18 @@ async fn measure(
     let bridge_latency_ms = paint_log
         .filter(|_| bridge)
         .and_then(|log| bridge_latency(&log.records, engine));
+    let pixel_rate_hz = if min_step_ns == 0 {
+        0.0
+    } else {
+        1e9 / min_step_ns as f64
+    };
     Ok(BenchReport {
         scene: scene.as_str(),
         refresh_hz: opts.budget.refresh_hz,
+        pacing: pacing.as_str(),
         frames,
+        drawn_frames: paints,
+        pixel_rate_hz,
         frame_cpu_ms: percentiles_ms(probe.cpu_ns()),
         missed_frames: missed,
         long_missed_frames: long_missed,

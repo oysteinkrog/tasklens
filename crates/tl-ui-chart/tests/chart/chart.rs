@@ -233,6 +233,7 @@ mod grid {
 
 mod element {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use gpui_kit::{
         AppContext, Context, Entity, Hsla, IntoElement, ParentElement, Pixels, Render, Styled,
@@ -242,7 +243,7 @@ mod element {
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::time::now_boot_ns;
-    use tl_ui_base::anim::AnimationDriver;
+    use tl_ui_base::anim::{AnimationDriver, Pacing};
     use tl_ui_chart::chart::view::ChartView;
     use tl_ui_chart::chart::{ChartSeries, ChartSpec, ChartState};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
@@ -365,6 +366,19 @@ mod element {
         fn armed(&mut self) -> bool {
             self.vcx.read_entity(&self.driver, |d, _| d.is_armed())
         }
+
+        fn set_pacing(&mut self, pacing: Pacing) {
+            self.driver.update(self.vcx, |d, _| d.set_pacing(pacing));
+        }
+
+        fn advance(&mut self, ms: u64) {
+            self.vcx.executor().advance_clock(Duration::from_millis(ms));
+            self.vcx.run_until_parked();
+        }
+
+        fn last_dx(&mut self) -> f32 {
+            self.vcx.read_entity(&self.chart, |v, _| v.last_dx.get())
+        }
     }
 
     fn spec(smooth: bool, fill: bool) -> ChartSpec {
@@ -475,6 +489,59 @@ mod element {
         r.draw();
         let after = r.vcx.read_entity(&r.chart, |v, _| v.render_count.get());
         assert!(after > before);
+    }
+
+    /// Timer pacing: a chart 600 physical px wide over 60 s asks for its next frame 100 ms after
+    /// it painted, not on the next vsync (wlf.31).
+    #[gpui_kit::test]
+    fn moving_chart_paces_to_one_physical_px(cx: &mut TestAppContext) {
+        let mut r = rig(cx, spec(true, false));
+        r.set_pacing(Pacing::Timer);
+        r.set(
+            view_of(600, now_boot_ns() - 50 * MS, 100 * MS, 1),
+            ChartState::Live,
+        );
+        r.draw();
+        let step = r.vcx.read_entity(&r.driver, |d, _| d.stats.min_step_ns);
+        assert_eq!(step, 100 * MS, "60 s over 600 physical px");
+        assert!(!r.armed(), "no frame before the pixel step");
+        assert!(r.vcx.read_entity(&r.driver, |d, _| d.has_pixel_timer()));
+        r.advance(95);
+        assert!(!r.armed(), "95 ms: before the step");
+        r.advance(2);
+        assert!(r.armed(), "97 ms: within 4 ms of the step");
+
+        let before = r.vcx.read_entity(&r.chart, |v, _| v.render_count.get());
+        r.vcx.update(|window, cx| window.simulate_next_frame(cx));
+        r.vcx.run_until_parked();
+        r.draw();
+        let after = r.vcx.read_entity(&r.chart, |v, _| v.render_count.get());
+        assert!(after > before, "the paced frame repaints the chart");
+        assert!(
+            r.vcx.read_entity(&r.driver, |d, _| d.has_pixel_timer()),
+            "its paint paces the next step"
+        );
+    }
+
+    /// The paint shift is whole physical px only with pacing on (wlf.31).
+    #[gpui_kit::test]
+    fn dx_snapped_only_with_pacing(cx: &mut TestAppContext) {
+        let mut r = rig(cx, spec(true, false));
+        // The right edge trails the clock by one period; the anchor is 0.7 px right of it.
+        r.set(
+            view_of(600, now_boot_ns() - 30 * MS, 100 * MS, 1),
+            ChartState::Live,
+        );
+        r.draw();
+        let off = r.last_dx();
+        assert!((off - off.round()).abs() > 0.05, "unsnapped: {off}");
+
+        r.set_pacing(Pacing::Skip);
+        r.chart.update(r.vcx, |_, cx| cx.notify());
+        r.draw();
+        let on = r.last_dx();
+        assert_eq!(on, on.round(), "snapped: {on}");
+        assert!((on - off).abs() <= 0.51, "{off} -> {on}");
     }
 
     #[gpui_kit::test]
@@ -870,7 +937,7 @@ mod anchor {
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
     use tl_model::validity::Validity;
-    use tl_ui_base::anim::AnimationDriver;
+    use tl_ui_base::anim::{AnimationDriver, Pacing};
     use tl_ui_chart::chart::geometry::y_of;
     use tl_ui_chart::chart::{ChartSeries, ChartSpec, ChartState, ChartView, GridStyle};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
@@ -1178,6 +1245,59 @@ mod anchor {
         vcx.run_until_parked();
         draw(vcx);
         assert_eq!(requested(vcx), 2);
+    }
+
+    /// Timer pacing: 32 moving charts of one width share one pixel timer and one frame (wlf.31).
+    #[gpui_kit::test]
+    fn thirty_two_charts_one_paced_request(cx: &mut TestAppContext) {
+        let specs = (0..32).map(|_| spec(A, true)).collect();
+        let (root, vcx) = window_with(cx, &FakeEngine::new(), specs, 202., 12.);
+        let driver = vcx.read_entity(&root, |r, _| r.driver.clone());
+        driver.update(vcx, |d, _| d.set_pacing(Pacing::Timer));
+        let now = now_boot_ns();
+        let charts: Vec<_> = (0..32).map(|i| chart(&root, vcx, i)).collect();
+        for c in &charts {
+            c.update(vcx, |v, cx| {
+                v.set_series_for_test(
+                    smallvec![Some(flat(A, 1, 600, now - 50 * MS, 100 * MS))],
+                    cx,
+                );
+            });
+        }
+        draw(vcx);
+        let requested =
+            |vcx: &mut VisualTestContext| vcx.read_entity(&driver, |d, _| d.stats.requested);
+        let advance = |vcx: &mut VisualTestContext, ms: u64| {
+            vcx.executor().advance_clock(Duration::from_millis(ms));
+            vcx.run_until_parked();
+        };
+        // Scale 2: 400 physical px over 60 s, one px per 150 ms.
+        let step = vcx.read_entity(&driver, |d, _| d.stats.min_step_ns);
+        assert_eq!(step, 150 * MS);
+        assert_eq!(requested(vcx), 0, "no frame before the step");
+        assert!(vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+        advance(vcx, 140);
+        assert_eq!(requested(vcx), 0);
+        advance(vcx, 10);
+        assert_eq!(requested(vcx), 1, "32 moving charts, one frame request");
+
+        let renders = |vcx: &mut VisualTestContext| -> Vec<u32> {
+            charts
+                .iter()
+                .map(|c| vcx.read_entity(c, |v, _| v.render_count.get()))
+                .collect()
+        };
+        let before = renders(vcx);
+        vcx.update(|window, cx| window.simulate_next_frame(cx));
+        vcx.run_until_parked();
+        draw(vcx);
+        let after = renders(vcx);
+        assert!(
+            before.iter().zip(&after).all(|(b, a)| a > b),
+            "{before:?} {after:?}"
+        );
+        assert_eq!(vcx.read_entity(&driver, |d, _| d.stats.notify_frames), 1);
+        assert_eq!(requested(vcx), 1, "the next step waits on the timer");
     }
 
     #[gpui_kit::test]

@@ -964,10 +964,14 @@ async fn measure(
     }
     let (missed, long_missed) = count_missed(intervals, &opts.budget);
     let (rss_mb, pss_mb) = read_rss_pss_mb();
+    let pacing = cx.update(|cx| anim.read(cx).pacing().as_str());
     let report = BenchReport {
         scene: name,
         refresh_hz: opts.budget.refresh_hz,
+        pacing,
         frames,
+        drawn_frames: frames,
+        pixel_rate_hz: 0.0,
         frame_cpu_ms: percentiles_ms(probe.cpu_ns()),
         missed_frames: missed,
         long_missed_frames: long_missed,

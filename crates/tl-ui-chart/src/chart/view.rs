@@ -114,6 +114,9 @@ pub struct ChartView {
     /// Right edge of the last paint.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_right_edge_ns: std::cell::Cell<u64>,
+    /// The paint shift of the last paint, physical px.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub last_dx: std::cell::Cell<f32>,
     /// Grid quads of the last paint (vertical and horizontal hairlines).
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_grid_quads: std::cell::Cell<u32>,
@@ -176,6 +179,8 @@ impl ChartView {
             path_colors: RefCell::default(),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_right_edge_ns: std::cell::Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            last_dx: std::cell::Cell::new(0.0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_grid_quads: std::cell::Cell::new(0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]

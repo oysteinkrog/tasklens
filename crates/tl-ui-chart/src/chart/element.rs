@@ -31,7 +31,7 @@ use super::labels::{self, LabelPaint, LabelRows, NetFormat};
 use super::lines;
 use super::view::ChartView;
 use super::{ChartSeries, ChartState, GeometryScalars, PathSet, scale};
-use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::anim::{AnimationDriver, Pacing};
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_base::theme::{TlTheme, UiMetrics};
 
@@ -121,6 +121,8 @@ impl Element for ChartElement {
     ) {
         let env = PaintEnv {
             scale_factor: window.scale_factor(),
+            snap_dx: AnimationDriver::try_global(window, cx)
+                .is_some_and(|d| d.read(cx).pacing() != Pacing::Off),
             now: self.view.read(cx).now_ns(),
             metrics: *cx.global::<UiMetrics>(),
             theme: tl_ui_base::theme::current(cx).clone(),
@@ -136,7 +138,9 @@ impl Element for ChartElement {
         });
 
         if out.moving {
-            AnimationDriver::global(window, cx).update(cx, |d, cx| d.request(view_id, window, cx));
+            AnimationDriver::global(window, cx).update(cx, |d, cx| {
+                d.request_paced(view_id, out.step_ns, window, cx)
+            });
         }
 
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -259,6 +263,8 @@ fn frame_of(
 /// Per-paint inputs read from the window and the app before the view is borrowed.
 struct PaintEnv {
     scale_factor: f32,
+    /// Pixel pacing is on: the paint shift is whole physical px (wlf.31).
+    snap_dx: bool,
     now: u64,
     metrics: UiMetrics,
     theme: Arc<TlTheme>,
@@ -272,6 +278,8 @@ struct PaintEnv {
 
 struct PaintOut {
     moving: bool,
+    /// How long the plot takes to move one physical px; the paced frame request's step.
+    step_ns: u64,
     /// The plot of this paint, for the hover listeners.
     plot: Bounds<Pixels>,
     /// Paint-time mapping, for the hover listeners.
@@ -489,7 +497,11 @@ fn paint_view(
         range_ns,
         plot_width: pw as f32,
     };
+    // Pixel pacing draws once per physical px, so the shift moves in whole px (wlf.31).
     let dx = map.dx(pw as f32);
+    let dx = if env.snap_dx { dx.round() } else { dx };
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    view.last_dx.set(dx);
     let radius = if spec.grid.rounded {
         env.metrics.radius_small
     } else {
@@ -548,6 +560,7 @@ fn paint_view(
         hover_state.clear();
         return PaintOut {
             moving: false,
+            step_ns: 0,
             plot,
             map,
             pinned: false,
@@ -704,6 +717,7 @@ fn paint_view(
 
     PaintOut {
         moving,
+        step_ns: one_px_ns,
         plot,
         map,
         pinned: hover_state.pinned_t_ns.is_some(),
