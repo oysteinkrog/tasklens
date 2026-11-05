@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{TestAppContext, VisualTestContext};
+use gpui_kit::{Entity, EntityId, TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
 use tl_model::demand::CpuDemand;
 use tl_model::ids::{NodeId, ProcessKey};
@@ -21,6 +21,7 @@ use tl_ui::bench::synth::{
 use tl_ui::bench::{BenchOptions, BenchScene};
 use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::demand::GlobalDemand;
+use tl_ui_base::host::HostContext;
 use tl_ui_overview::widget::container::WidgetView;
 use tl_ui_perf::performance::DeviceKey;
 use tl_ui_perf::performance::cpu::CpuPage;
@@ -647,6 +648,120 @@ fn path_counts(
     })
 }
 
+/// The entity id of every view [`path_counts`] reads, each with its [`PATH_VIEWS`] index, in
+/// the same order. The header value has no view of its own and is left out.
+fn path_ids(
+    scene: &tl_ui::bench::scenes::SceneWindow,
+    cx: &mut VisualTestContext,
+) -> Vec<(usize, Option<EntityId>)> {
+    let view = scene.view.clone();
+    cx.update(|_, cx| {
+        let page_entity = view.read(cx).page().expect("the Performance tab").clone();
+        let page = page_entity.read(cx);
+        let sidebar = page.sidebar().read(cx);
+        let cpu_entity = page
+            .page(&DeviceKey(Arc::from(DeviceKey::CPU)))
+            .expect("CPU page built")
+            .clone()
+            .downcast::<CpuPage>()
+            .expect("a CpuPage");
+        let cpu = cpu_entity.read(cx);
+        let container = cpu.container().read(cx);
+        let mut ids = vec![
+            (0, Some(page_entity.entity_id())),
+            (1, Some(page.sidebar().entity_id())),
+        ];
+        for card in sidebar.cards() {
+            ids.push((2, Some(card.view.entity_id())));
+        }
+        for card in sidebar.cards() {
+            ids.push((3, Some(card.chart.entity_id())));
+        }
+        ids.push((4, Some(cpu_entity.entity_id())));
+        ids.push((5, cpu.header_view().map(Entity::entity_id)));
+        ids.push((7, Some(cpu.editor().entity_id())));
+        ids.push((8, Some(cpu.container().entity_id())));
+        for id in container.placed_ids() {
+            let entity = match container.view(id) {
+                Some(WidgetView::Metric(w)) => Some(w.entity_id()),
+                Some(WidgetView::Group(g)) => Some(g.entity_id()),
+                Some(WidgetView::Fixed(f)) => Some(f.entity_id()),
+                None => None,
+            };
+            ids.push((9, entity));
+        }
+        ids.push((10, Some(cpu.details_view().entity_id())));
+        ids.push((11, Some(cpu.grid_view().entity_id())));
+        ids.push((12, Some(cpu.grid().view.entity_id())));
+        ids.push((13, cpu.overall(cx).map(|c| c.entity_id())));
+        ids
+    })
+}
+
+/// The first view in `now` whose entity is not the one in `then`, by name, or the list length
+/// when a view came or went.
+fn replaced_view(then: &[(usize, Option<EntityId>)], now: &[(usize, Option<EntityId>)]) -> String {
+    match then.iter().zip(now).find(|(a, b)| a != b) {
+        Some(((i, a), (j, b))) => {
+            format!("{} {a:?} is now {} {b:?}", PATH_VIEWS[*i], PATH_VIEWS[*j])
+        }
+        None => format!("{} views are now {}", then.len(), now.len()),
+    }
+}
+
+/// Runs the app until the hub holds the bench engine's first 1 Hz SYSTEM publish. Snapshot 1
+/// has no SYSTEM data, so this publish makes the CPU page place its widgets again: the
+/// secondary charts it can show change (`SecondaryAvail`). The publisher sends it on a real
+/// clock, so it is waited for in real time, at most 30 s.
+fn wait_for_first_system(cx: &mut VisualTestContext) {
+    let start = Instant::now();
+    loop {
+        cx.run_until_parked();
+        let version = cx.update(|_, cx| {
+            HostContext::local_hub(cx)
+                .expect("the local hub")
+                .read(cx)
+                .current()
+                .system
+                .header
+                .version
+        });
+        if version >= 1 {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "no SYSTEM publish within 30 s"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Draws frames until every path view's entity stays the same for 3 frames in a row, at most
+/// 200 frames. Returns the settled ids.
+fn settle_path_views(
+    scene: &tl_ui::bench::scenes::SceneWindow,
+    cx: &mut VisualTestContext,
+) -> Vec<(usize, Option<EntityId>)> {
+    let mut ids = path_ids(scene, cx);
+    let mut same = 0;
+    for _ in 0..200 {
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let now = path_ids(scene, cx);
+        if now == ids {
+            same += 1;
+            if same == 3 {
+                return ids;
+            }
+        } else {
+            same = 0;
+            ids = now;
+        }
+    }
+    panic!("the CPU page path views did not settle in 200 frames: {ids:?}");
+}
+
 /// The view renders of one perf-cpu animation frame on the CPU page path (tasklens-wlf.40),
 /// pinned: the median over 40 frames of each view's renders in a frame, so a frame that also
 /// took a 10 Hz publish does not move it.
@@ -658,6 +773,10 @@ fn path_counts(
 /// The widget editor is a cached view above the moving charts. A cached view that renders
 /// again renders every cached view under it again (`window.refreshing`), so the container,
 /// every widget and the Details view still render on every frame.
+///
+/// The frames are counted from the steady state (tasklens-ff0y5): after the first 1 Hz SYSTEM
+/// publish, which places the CPU page's widgets again, and once no path view is replaced for 3
+/// frames. A view replaced during the counted frames fails the test by name.
 #[gpui_kit::test]
 fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
@@ -667,10 +786,12 @@ fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
         .expect("the scene window opens");
     let mut vcx = VisualTestContext::from_window(scene.handle, cx);
     draw(&mut vcx);
+    wait_for_first_system(&mut vcx);
+    let settled = settle_path_views(&scene, &mut vcx);
     let frames = 40usize;
     let mut per_frame: Vec<[u32; PATH_VIEWS.len()]> = Vec::with_capacity(frames);
     let mut before = path_counts(&scene, &mut vcx);
-    for _ in 0..frames {
+    for frame in 0..frames {
         // The test platform draws a dirty window once the update's effects are flushed, as a
         // real platform draws on the next frame. A forced `draw` would render the root and its
         // plain children a second time.
@@ -678,10 +799,21 @@ fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
             window.simulate_next_frame(cx);
         });
         vcx.run_until_parked();
+        let ids = path_ids(&scene, &mut vcx);
+        assert!(
+            ids == settled,
+            "a CPU page path view was replaced in counted frame {frame}: {}",
+            replaced_view(&settled, &ids)
+        );
         let after = path_counts(&scene, &mut vcx);
         let mut delta = [0u32; PATH_VIEWS.len()];
         for (i, d) in delta.iter_mut().enumerate() {
-            *d = after[i] - before[i];
+            *d = after[i].checked_sub(before[i]).unwrap_or_else(|| {
+                panic!(
+                    "{} render count went down in counted frame {frame}: {} to {}",
+                    PATH_VIEWS[i], before[i], after[i]
+                )
+            });
         }
         per_frame.push(delta);
         before = after;
