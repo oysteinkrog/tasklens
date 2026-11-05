@@ -6,6 +6,7 @@
 //! the engine down after it (ADR-010). `main.rs` sets up logging, the panic hook and the
 //! arguments before calling [`run`].
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -48,7 +49,12 @@ pub fn run(args: BenchArgs) -> i32 {
     };
     info!(target: "tasklens::perf", refresh_hz = budget.refresh_hz, period_ns = budget.period_ns, "bench frame budget");
 
-    if let Some(text) = lock_refusal(session_locked()) {
+    let nested = nested_session(std::env::var_os(NESTED_ENV).as_deref());
+    if nested {
+        info!(target: "tasklens::perf", "TL_BENCH_NESTED=1: nested session, the session lock check is skipped");
+    }
+
+    if let Some(text) = lock_refusal(checked_lock(nested, session_locked)) {
         eprintln!("bench failed: {text}");
         return 1;
     }
@@ -82,7 +88,7 @@ pub fn run(args: BenchArgs) -> i32 {
         // A lock during the run stops frame callbacks, so the report is not a measurement. A
         // lock that also ended before this check is not caught here; the 0-frame rule in tl-ui
         // catches a run that drew nothing.
-        Ok(_) if session_locked() == Some(true) => {
+        Ok(_) if checked_lock(nested, session_locked) == Some(true) => {
             eprintln!("bench failed: {}", locked_mid_run());
             1
         }
@@ -106,6 +112,20 @@ fn parse_scene(name: &str) -> Result<BenchScene, String> {
     BenchScene::from_arg(name).ok_or_else(|| {
         format!("unknown bench scene \"{name}\"; expected perf-cpu, table-2000, bridge or static")
     })
+}
+
+/// Set to 1 by the tl-smoke harness for a hidden nested KWin. It keeps drawing while the real
+/// screen is locked, so the session lock check does not apply (owner decision 2026-11-04).
+const NESTED_ENV: &str = "TL_BENCH_NESTED";
+
+/// True only when the value is exactly `1`.
+fn nested_session(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
+}
+
+/// The lock state, or `None` without asking logind in a nested session.
+fn checked_lock(nested: bool, ask: impl FnOnce() -> Option<bool>) -> Option<bool> {
+    if nested { None } else { ask() }
 }
 
 /// Why a run must not start: a locked session gets no frame callbacks from the compositor, so
@@ -240,6 +260,33 @@ mod tests {
             locked_mid_run(),
             "the session locked during the run; the report is not valid"
         );
+    }
+
+    #[test]
+    fn nested_env_value() {
+        assert!(nested_session(Some(OsStr::new("1"))));
+        assert!(!nested_session(None));
+        for v in ["0", "", "true"] {
+            assert!(!nested_session(Some(OsStr::new(v))), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn nested_skips_lock_check() {
+        let state = checked_lock(true, || panic!("logind asked"));
+        assert_eq!(state, None);
+        assert_eq!(lock_refusal(state), None);
+    }
+
+    #[test]
+    fn unnested_keeps_lock_check() {
+        let state = checked_lock(false, || Some(true));
+        assert_eq!(state, Some(true));
+        assert_eq!(
+            lock_refusal(state),
+            Some("session is locked; frames will not be delivered")
+        );
+        assert_eq!(checked_lock(false, || None), None);
     }
 
     #[test]
