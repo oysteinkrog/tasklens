@@ -5,3 +5,5 @@ crates/tl-ui/tests/golden/*.tsv -whitespace
 crates/tl-ui/tests/golden/*.txt -whitespace
 crates/tl-ui-procs/tests/golden/*.tsv -whitespace
 crates/tl-ui-procs/tests/golden/*.txt -whitespace
+# Vendored upstream crate (D-043), kept byte-identical; src/_accessibility.rs ends lines in spaces.
+third_party/gpui-pre/** -whitespace
