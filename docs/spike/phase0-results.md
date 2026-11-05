@@ -1354,6 +1354,106 @@ By kind (exclusive): GPUI elements 44.6%, GPU submit 17.5%, taffy 15.3%, text 10
 and scrubber paths, taffy layout, `BoundsTree::insert`, and row re-sorting. The fix belongs in
 `crates/tl-ui-procs/src/pages/processes/history/`, not in the bench scene (tasklens-8fx.47).
 
+### History scrub gate rerun after rsf.32 (tasklens-8fx.47, 2026-11-05)
+
+Result: FAIL. Median `scrub_frame_ms.p99` is 4.05 ms (hidden nested KWin, 60 Hz), gate 4.0 ms.
+It was 6.59 ms at the 8fx.41 gate and 5.73 ms after the first 8fx.47 fix (48ab469d1). The
+numbers are close to, not exactly, the 144 Hz screen.
+
+#### Setup
+
+- Session: hidden nested KWin `8fx47r2` from the 8fx.41 harness (`kwin_wayland --virtual`,
+  1920 x 1200, `--scale 1.1`, one 60 Hz output), app on the nested Wayland socket,
+  `TL_BENCH_REFRESH_HZ=60`, `TL_BENCH_NESTED=1`, a nonexistent system bus, private `XDG_*`
+  folders, bench slot lock.
+- Binary: HEAD e779a7029 (rsf.32 landed in e8415070e and earlier), built first with
+  `cargo build --profile perf -p tl-app --features bench` and copied out, so no build ran
+  during the runs. Each run is the xtask command line: `--bench history-scrub --duration 30
+  --warmup 5`. No Rust file changed in this pass.
+- Quiet-machine rule (leader-notes, 2026-11-05): a run counts when the 1- and 5-minute load
+  are both at most 8 at its start and the 1-minute load is at most 8 at its end.
+- Data: `/var/tmp/claude/8fx47/r2/` (`a1/`, `a2/`, `load5s.log`, `ab.sh`, `prof.sh`).
+
+#### Runs
+
+All values are hidden nested KWin, 60 Hz, local time 2026-11-05. Loads are 1 and 5 minutes.
+
+| Run | Start | Load at start | Load at end | Counts | scrub p50 | p95 | p99 | max | scrub_frames | missed | long missed |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| a1 run 1 | 11:09:46 | 7.16, 11.98 | 5.31 | no (5-min load 11.98) | 3.05 ms | 4.12 ms | 4.90 ms | 10.21 ms | 1799 | 0 | 0 |
+| a1 run 2 | 11:10:22 | 5.31, 10.99 | 7.77 | no (5-min load 10.99) | 3.36 ms | 5.83 ms | 8.98 ms | 12.97 ms | 1694 | 92 | 6 |
+| a1 run 3 | 11:10:58 | 7.77, 11.13 | 8.18 | no (5-min load 11.13) | 2.96 ms | 5.81 ms | 8.14 ms | 14.20 ms | 1716 | 76 | 3 |
+| a2 run 1 | 11:13:53 | 3.41, 7.95 | 2.97 | yes | 2.45 ms | 3.30 ms | 4.00 ms | 7.69 ms | 1799 | 0 | 0 |
+| a2 run 2 | 11:14:28 | 2.97, 7.32 | 3.27 | yes | 3.01 ms | 3.59 ms | 4.05 ms | 8.62 ms | 1799 | 0 | 0 |
+| a2 run 3 | 11:15:04 | 3.27, 6.92 | 3.80 | yes | 3.08 ms | 3.87 ms | 4.42 ms | 9.36 ms | 1799 | 0 | 0 |
+
+Attempt 1 waited only for the 1-minute load, as the 8fx.41 script did, so none of its runs
+count. Attempt 2 waited for both loads and is the counted set.
+
+#### Gate
+
+| Metric | Rule | Median of 3 | Every run | Result |
+|---|---|---|---|---|
+| `scrub_frame_ms.p99` (UI-PRC-032) | <= 4.0 ms | 4.05 ms (hidden nested KWin, 60 Hz) | 4.00, 4.05, 4.42 | FAIL |
+
+#### Profile
+
+Two profiled runs, `perf record -e cpu-clock:u -F 499 --call-graph dwarf,65528`, each started
+under the quiet-machine rule:
+
+- The perf binary above: scrub p99 3.85 ms, 2,797 main-thread samples. Its stacks did not
+  unwind (the mold layout issue in the wlf.41 section), so only self time is usable. 17.7% of
+  main-thread self time is in libc `__memcpy_avx_unaligned_erms`, and 7.4% is
+  `BoundsTree::insert`.
+- A profiling build relinked as in the wlf.41 section (`cargo rustc --locked --profile
+  profiling -p tl-app --bin tasklens --features bench -- -C
+  link-arg=-Wl,-z,separate-loadable-segments`): scrub p99 6.14 ms under perf (perf's stack
+  copies slow it down, so only its shares are used), 3,549 main-thread samples, stacks
+  unwind. Files: `prof3.data`, `prof3.txt`, `bucket.py`.
+
+Main-thread samples of the relinked run, each sample counted once, in this order of rules:
+
+| Owner | Share |
+|---|---|
+| GPU submit (gpui_wgpu, wgpu, NVIDIA driver) | 36.8% |
+| tl-ui-table: rows, header, row layout and paint | 25.1% |
+| Other frame work: window layout, other views, scene build | 17.0% |
+| history/: table install and sort | 6.3% |
+| Minigraph panel | 5.1% |
+| history/: strip, scrubber, minimap | 4.5% |
+| Bench driver (`tl_ui::bench`, synthetic views) | 4.0% |
+| history/: page, header, hub handler | 1.1% |
+
+Inside GPU submit, inclusive shares of all main-thread samples:
+
+- `draw_paths_to_intermediate` 11.7%. Most of it (9.4%) is `Queue::write_buffer`, which
+  copies every path vertex into a staging buffer on every frame. This is the libc `memcpy`
+  in the first profile.
+- `CommandEncoder::finish` 5.6% and `Queue::submit` 3.1%.
+
+The paths in this scene come from the history strip and minimap: of the 40 samples in
+`Window::paint_path`, 32 come from `history::scrubber` and 8 from `history::minimap`. So the
+strip's vertex count, not its CPU code, drives most of the path upload (inferred from
+caller counts; GPUI has no per-path counter). The strip draws four nested stack layers from
+up to 1,024 buckets plus a min and max stroke per series, and GPUI uploads all of their
+vertices again every frame.
+
+History code costs (inclusive): `HistoryTableDelegate::install` 6.3%, of which `rebuild`
+5.4%, the row sort 1.5%, the ProcessKey index 1.3% and dropping the old rows 0.8%.
+`paint_strip` 3.1%. The strip rebuilt its geometry in 0.3% of samples, so the path cache
+from 48ab469d1 holds.
+
+#### Reading
+
+The gate misses by 0.05 ms, about 1.2% of the frame. The run-to-run spread in the counted
+set is 0.42 ms, so no single history/ change of that size could be shown to pass.
+
+Most of the frame is in GPUI (GPU submit, scene build, `BoundsTree`) and in tl-ui-table.
+Under the leader rule of 2026-11-05 this is recorded FAIL and goes to the owner in
+tasklens-wlf.2. One lever is left in history/: fewer strip vertices, for example fewer
+stack buckets or fewer stack layers. That changes how the strip looks, so it needs an owner
+decision. No history/ code changed in this pass.
+
 ### Bridge wake-to-render latency, nested rerun (tasklens-wlf.42, 2026-11-05)
 
 Information only (leader 2026-11-05, option C), not a gate result. The 20 ms bridge gate is judged on the 144 Hz screen in wlf.2.
