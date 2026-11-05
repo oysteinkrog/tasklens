@@ -865,6 +865,57 @@ MB as the bench counts them (kB x 1024 / 10^6), from the 30 s copy of `smaps` an
   gate. What remains is an owner decision: a GPUI change, a launcher variable, or a different
   gate measure. PSS was 156.08 MB in the warm run, against 238.00 MB RSS.
 
+### table-2000 gate after the row canvas (tasklens-pdu.69, 2026-11-05)
+
+Result: FAIL. UI thread p99 is 3.84 ms against the ADR-014 limit of 2.0 ms (hidden nested KWin, 60 Hz). Missed frames are 0 in the median run (pass). RSS is 233.34 MB against 150 MB (fail). The numbers are close to, not exactly, the 144 Hz screen.
+
+Setup: hidden nested KWin session `pdu69`, 60 Hz (`TL_BENCH_REFRESH_HZ=60`), scale 1.1, 1920 x 1200, HEAD e8415070e (`-dirty`: other lanes' uncommitted files, no code of this bead), `perf` profile built first with `cargo build --locked --profile perf -p tl-app --features bench`. Command: `cargo xtask bench --scene table-2000 --runs 3` under the bench slot lock, with `TL_BUILD_WRAP=1`. Each run is 30 s plus 5 s warmup. Raw files are in `/var/tmp/claude/pdu69/` (`a1/`, `a2/`).
+
+Attempt 1 did not count. xtask rebuilt inside the timed window (2 min 41 s), so run 1 started at load 11.41 and the machine was above load 8 until about 03:27:17. Runs 2 and 3 of attempt 1 met the load rule, but the plan reruns the whole script when any run fails. Attempt 2 had no rebuild. Every run stays in the table.
+
+Runs, frame CPU ms (hidden nested KWin, 60 Hz), local time 2026-11-05. Loads are 1 and 5 minute, read from `load.log` (run start is the report time minus 35 s):
+
+| Run | Start | Load at start | Load at end | Counts | p50 | p99 | max | Missed | Long missed | RSS MB | PSS MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| a1 run 1 | 03:26:42 | 11.41, 7.68 | 6.99 | no (1-min 11.41 at start) | 2.68 | 3.89 | 5.60 | 0 | 0 | 283.9 | 204.2 |
+| a1 run 2 | 03:27:17 | 6.99, 6.99 | 5.45 | yes, but attempt 1 is void | 2.68 | 3.91 | 5.33 | 0 | 0 | 228.6 | 155.5 |
+| a1 run 3 | 03:27:52 | 5.17, 6.55 | 3.41 | yes, but attempt 1 is void | 2.68 | 3.85 | 4.53 | 0 | 0 | 233.2 | 160.0 |
+| a2 run 1 | 03:28:48 | 3.08, 5.72 | 2.20 | yes | 2.69 | 3.80 | 5.89 | 0 | 0 | 232.5 | 159.3 |
+| a2 run 2 | 03:29:24 | 2.20, 5.16 | 1.91 | yes | 2.59 | 3.90 | 5.06 | 0 | 0 | 232.7 | 159.5 |
+| a2 run 3 | 03:29:59 | 1.91, 4.76 | 1.55 | yes | 2.67 | 3.84 | 4.98 | 0 | 0 | 233.3 | 160.1 |
+
+Load values at a start or end are the nearest 5 s sample. Values come from the run JSON files, not the xtask table.
+
+### Gates (hidden nested KWin, 60 Hz)
+
+Median is the middle of the three counted runs (attempt 2).
+
+| Gate | Pass rule | Median value | Every run | Result |
+|---|---|---|---|---|
+| UI thread CPU per frame, `table-2000`, p99 | <= 2.0 ms | 3.84 ms (hidden nested KWin, 60 Hz) | 3.80, 3.90, 3.84 | FAIL |
+| Missed frames, `table-2000` | median run 0, every run <= 2, long misses 0 | 0 missed, 0 long (hidden nested KWin, 60 Hz) | missed 0, 0, 0; long 0, 0, 0 | PASS |
+| RSS after `table-2000` | <= 150 MB | 233.34 MB (hidden nested KWin, 60 Hz) | 232.54, 232.74, 233.34 | FAIL |
+
+Comparison (hidden nested KWin, 60 Hz): wlf.18 had p99 6.25 ms and RSS 238.33 MB. The rsf.32 working runs (counted medians, profiling binaries outside xtask) had p99 4.09 ms and RSS 234.2 MB. This gate run has p99 3.84 ms and RSS 233.34 MB, so p99 is 39% lower than wlf.18 and still 1.84 ms over the limit.
+
+Profile: not retaken. The rsf.32 profile is the same row-canvas code (e8415070e changed only a test). One run, `perf record -F 499`, main thread only, after the row canvas: p50 2.75 ms, p99 3.88 ms, 2,930 main-thread samples. Data: `/var/tmp/claude/rsf32/after-prof.data` and `after-top.txt`. Top self time:
+
+ - 9.93% `BoundsTree::insert`
+ - 10.09% four libc addresses 0x1b1b24..0x1b1b33 (unresolved)
+ - 2.07% `Scene::finish` SubpixelSprite sort
+ - 1.93% taffy block `compute_inner`
+ - 1.83% atlas HashMap `rustc_entry`
+ - 1.66% taffy `compute_flexbox_layout`
+ - 1.39% `Window::paint_glyph`
+ - 1.36% `WindowTextSystem::shape_text` closure
+ - 1.32% `Scene::insert_primitive` SubpixelSprite
+
+Self-time samples by symbol family (after): taffy 322, element and style bookkeeping 300, text shaping and glyphs 263, scene build 509, GPU submit 208, table code 107, malloc and free 60.
+
+The rest of the cost is in GPUI, taffy and libc. Under leader rule 1 (leader-notes.md, 2026-11-05) the gate is recorded FAIL and goes to the owner in tasklens-wlf.2. No new fix bead.
+
+RSS: the RSS gate is not fixed here. It goes to the owner in tasklens-wlf.2 (see the wlf.41 section above).
+
 ### Static scene idle CPU (tasklens-wlf.27, 2026-11-04)
 
 Result: FAIL. The static scene used a median 13.27% process CPU of one core over 30 s
