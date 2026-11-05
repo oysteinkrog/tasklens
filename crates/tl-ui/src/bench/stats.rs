@@ -270,7 +270,7 @@ pub struct BenchReport {
     pub scene: &'static str,
     /// The output refresh rate the missed-frame counts were judged against.
     pub refresh_hz: u32,
-    /// Pixel pacing of the window's driver: `off`, `timer` or `skip` (wlf.31).
+    /// Pixel pacing of the window's driver: `off` or `timer` (wlf.31).
     pub pacing: &'static str,
     /// With pacing on, the driver's frames that notified a chart; the probe does not run then.
     pub frames: u64,

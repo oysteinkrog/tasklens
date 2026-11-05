@@ -536,7 +536,7 @@ mod element {
         let off = r.last_dx();
         assert!((off - off.round()).abs() > 0.05, "unsnapped: {off}");
 
-        r.set_pacing(Pacing::Skip);
+        r.set_pacing(Pacing::Timer);
         r.chart.update(r.vcx, |_, cx| cx.notify());
         r.draw();
         let on = r.last_dx();

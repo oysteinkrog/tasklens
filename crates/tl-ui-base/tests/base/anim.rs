@@ -395,10 +395,10 @@ fn run_vsync(
 fn pacing_parse() {
     use std::ffi::OsStr;
     assert_eq!(Pacing::parse(Some(OsStr::new("timer"))), Pacing::Timer);
-    assert_eq!(Pacing::parse(Some(OsStr::new("skip"))), Pacing::Skip);
+    assert_eq!(Pacing::parse(Some(OsStr::new("skip"))), Pacing::Off);
     assert_eq!(Pacing::parse(Some(OsStr::new("on"))), Pacing::Off);
     assert_eq!(Pacing::parse(None), Pacing::Off);
-    assert_eq!(Pacing::Skip.as_str(), "skip");
+    assert_eq!(Pacing::Timer.as_str(), "timer");
 }
 
 #[gpui_kit::test]
@@ -415,14 +415,14 @@ fn driver_pacing_off_request_paced_is_request(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn driver_paced_skip_notifies_once_per_step(cx: &mut TestAppContext) {
+fn driver_paced_timer_notifies_once_per_step(cx: &mut TestAppContext) {
     let (driver, vcx) = rig(cx);
-    set_pacing(&driver, vcx, Pacing::Skip);
+    set_pacing(&driver, vcx, Pacing::Timer);
     let mut paced = Paced::new(vcx, &[30]);
-    assert!(armed(&driver, vcx), "skip keeps one frame armed per vsync");
+    assert!(!armed(&driver, vcx), "no frame armed until the step");
     let frames = run_vsync(&driver, vcx, &mut paced, 7, 301);
-    // Due at 30 ms, notified by the first frame at or after 26 ms: every 4th frame, 28 ms.
-    assert_eq!(frames, 43, "a frame callback every vsync");
+    // Due at 30 ms, armed at 26 ms, drawn by the frame at 28 ms: every 4th vsync of 43.
+    assert_eq!(frames, 10, "no frame callback between steps");
     assert_eq!(paced.notified(), [10]);
     assert_eq!(notify_frames(&driver, vcx), 10);
     assert_eq!(

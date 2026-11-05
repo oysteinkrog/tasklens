@@ -1776,8 +1776,31 @@ pub struct AnimationDriver {
 
 - A `ChartView` calls `driver.request(entity_id)` during its render only if `smooth` is on, the window is visible, reduce-motion is off, and its newest sample is younger than `2 × period + range/width` (it is moving).
 - If not `armed`, the driver calls `window.on_next_frame(..)` once and sets `armed`. In the callback it takes the set, clears `armed`, and calls `cx.notify(id)` for each id. Charts re-request in their render, which re-arms.
-- No other code uses `request_animation_frame`, timers or `Animation` for continuous redraws. Kit `Spinner`, `Skeleton` and `Progress` are not used in table cells or charts.
+- No other code uses `request_animation_frame` or `Animation` for continuous redraws, and no timer draws a frame. The one timer is the pixel timer of pixel pacing (below), which only arms an `on_next_frame`. Kit `Spinner`, `Skeleton` and `Progress` are not used in table cells or charts.
 - When nothing requests, no frames are drawn. Static views redraw only on snapshot changes and input.
+
+**Pixel pacing** (amendment 2026-11-05, tasklens-wlf.31; a prototype behind `TL_PIXEL_PACING=timer`, off by default):
+
+- A moving chart calls `driver.request_paced(id, step_ns)` instead of `request`. `step_ns` is `range_ns` divided by the plot width in physical px: the time the plot takes to move one physical px. With pacing off, `request_paced` is `request`.
+- With pacing on, the driver keeps one due time per chart, `now + step_ns`, replaced each time the chart paints. One pixel timer waits until 4 ms (`PACE_SLACK`) before the earliest due time, then arms one `on_next_frame`. That frame notifies every chart due within 4 ms of it. Once one chart is due, charts due up to 2 ms (`PACE_MERGE`) later draw in the same frame, because charts that paint in one frame request a few hundred microseconds apart.
+- The timer only arms a frame; the frame still comes from the compositor callback. The stall clock (ADR-010) starts when the frame is armed, not when the timer starts. No pixel timer runs while the window is hidden.
+- With pacing on, the paint shift `dx` snaps to whole physical px (`ChartElement` and `ChartGridElement`). With pacing off it does not, so the default look is unchanged.
+- Requesters that are not charts (the process tint, the theme crossfade callbacks) keep `request` and `request_callback` and still draw every frame. Overview charts stay stepped (D-022).
+- The bench report adds `pacing`, `drawn_frames` (window paints) and `pixel_rate_hz` (one px step of the fastest paced chart, per second). With pacing on, `frames` counts the driver frames that notified a chart, the `FrameProbe` does not run, and missed frames are not judged.
+- No user setting until the owner has compared it side by side on a 144 Hz screen (`docs/research/tmog-inspiration.md`).
+
+Measured 2026-11-05 at 23be64f7d: `perf-cpu`, hidden nested KWin 6.8.2, one 60 Hz virtual output at scale 1.1, perf build, 30 s runs after a 5 s warm-up, median of 3 interleaved runs. The fastest paced chart in this scene is the 32-core grid: about 150 physical px per cell over 60 s, so one px every 400 ms (`pixel_rate_hz` 2.5). Its data and per-core labels change at 10 Hz, so most draws in the paced modes come from new data, not from sliding. KWin CPU is the nested KWin's user plus system time over each 35.6 s run, in 10 ms ticks.
+
+| Mode | `frames` | `drawn_frames` | Process CPU | Nested KWin CPU | Stalls, 60 s soak |
+|---|---|---|---|---|---|
+| off | 1,212 (probe) | 1,213 | 64.0% | 111 ticks | not run |
+| timer | 30 | 330 | 19.3% | 35 ticks | 0 |
+| skip | 30 | 330 | 20.0% | 39 ticks | 0 |
+
+- The wlf.31 target, `frames` at most the pixel rate plus 10% (2.5 × 30 s × 1.1 = 82.5), holds for both paced modes.
+- The 1-minute load rose from 7.6 to 23 during these runs (other agents' builds). Two earlier passes at load 3 to 6, before the 2 ms merge, gave the same picture: process CPU 61.2% and 63.8% off, 18.2% and 18.8% timer, 18.1% and 18.7% skip. In those passes timer drew 360 frames to skip's 330, because the frame armed for the first of the eight sidebar charts missed the others by under 1 ms. `PACE_MERGE` fixed that.
+- Skip was the other design: one `on_next_frame` every compositor frame while any chart moves, notifying only the charts that are due. Its CPU was within run-to-run noise of timer's (17.1% to 23.1% over all runs of both). Both drew the same frames, but skip still woke the UI thread and asked the compositor for a frame callback every vsync: 60 times a second here, 144 on the owner's screen. Timer wakes at the pixel steps only. This amendment keeps timer and removes skip.
+- The 144 Hz numbers wait for the owner's side-by-side check.
 
 **Process tree-table** (custom, on GPUI `uniform_list`):
 
@@ -1962,7 +1985,7 @@ After `tl_ui::run` returns `UiExit`, `main` calls `EngineHandle::shutdown(Durati
 ### Rejected alternatives
 
 - **Server-side decorations by default.** Not chosen because it loses the reference layout; it is the predetermined fallback.
-- **A 144 Hz app timer for redraws.** Rejected: frames come from compositor callbacks only.
+- **A 144 Hz app timer for redraws.** Rejected: frames come from compositor callbacks only. The pixel pacing timer (ADR-009) is not a redraw timer: it fires at the pixel-step rate and only arms a compositor frame callback.
 - **libappindicator or a GTK tray.** Rejected: C dependencies; ksni speaks StatusNotifierItem over zbus without Tokio.
 
 ### Verification
@@ -2232,7 +2255,7 @@ The FakeEngine row holds: those tests need no feature flag. Each tl-ui crate has
 - Filter debounce: 5 keystrokes within 100 ms send one `SetTableQuery`.
 - Demand: switching tabs changes `Demand`; visible-row keys update after a re-sort with an unchanged range; demand is not resent when equal.
 - Render counters (a test-only `Cell<u32>` in each view, behind the test-hook gate of ADR-020): a CPU-only snapshot change does not re-render `ProcessTable`; a series change re-renders only its `ChartView`.
-- Animation driver: no frame request when no chart is moving; exactly one pending request per window.
+- Animation driver: no frame request when no chart is moving; exactly one pending request per window. With pixel pacing on: no frame is armed before a chart's pixel step, the fastest chart sets the rate, charts that paint together draw together, and `dx` is whole physical px.
 
 **Headless screenshot tests.**
 - Use `HeadlessAppContext::with_platform(Arc::new(CosmicTextSystem::new(..)), assets, || gpui_platform::current_headless_renderer())` and `capture_screenshot(window)`. This path exists in source but gpui-kit does not exercise it [inferred]; U-4 is verified on lavapipe, so there is no `painted_quads()` fallback. Captures are at device scale 2.0; the scales below are `ui_scale` (R-291).

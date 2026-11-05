@@ -13,8 +13,9 @@
 //!
 //! Pixel pacing (wlf.31 prototype, off by default): with [`PACING_ENV`] set, a moving chart asks
 //! through [`AnimationDriver::request_paced`] for its next frame only when its plot has moved one
-//! physical pixel. `timer` waits for that step on a timer and then arms one `on_next_frame`;
-//! `skip` keeps one `on_next_frame` per compositor frame and notifies only the charts that are due.
+//! physical pixel: a pixel timer waits for that step and then arms one `on_next_frame`. The frame
+//! itself still comes from the compositor. ADR-009 "Pixel pacing" has the measurements and why
+//! the other design (one `on_next_frame` every frame, notifying only charts that are due) lost.
 
 use std::ffi::OsStr;
 use std::mem;
@@ -27,8 +28,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub const STALL_AFTER: Duration = Duration::from_millis(250);
 /// Capacity of `FrameStats.samples` and `PaintLog.records`. Neither grows past it.
 pub const SAMPLE_CAPACITY: usize = 65_536;
-/// Environment variable that turns pixel pacing on: `timer` or `skip`. Anything else, or unset,
-/// is off. Read once per driver. No user setting until the owner has compared it (wlf.31).
+/// Environment variable that turns pixel pacing on: `timer`. Anything else, or unset, is off. Read once per driver. No user setting until the owner has compared it (wlf.31).
 pub const PACING_ENV: &str = "TL_PIXEL_PACING";
 /// A paced chart is notified by a frame that comes at most this long before its pixel step: about
 /// half a frame at 120 Hz to 144 Hz, so the frame nearest the step draws it.
@@ -46,16 +46,13 @@ pub enum Pacing {
     Off,
     /// A timer waits for the next pixel step, then one `on_next_frame` is armed.
     Timer,
-    /// One `on_next_frame` per compositor frame; a chart is notified only when it is due.
-    Skip,
 }
 
 impl Pacing {
-    /// `timer` or `skip`; anything else, or `None`, is `Off`.
+    /// `timer`; anything else, or `None`, is `Off`.
     pub fn parse(value: Option<&OsStr>) -> Self {
         match value.and_then(OsStr::to_str) {
             Some("timer") => Self::Timer,
-            Some("skip") => Self::Skip,
             _ => Self::Off,
         }
     }
@@ -70,7 +67,6 @@ impl Pacing {
         match self {
             Self::Off => "off",
             Self::Timer => "timer",
-            Self::Skip => "skip",
         }
     }
 }
@@ -341,13 +337,10 @@ impl AnimationDriver {
         self.start_stall_timer(cx);
     }
 
-    /// Paced requests wait for their step: skip pacing arms the next frame, timer pacing a pixel
-    /// timer for the earliest due time.
+    /// Paced requests wait for their step on the pixel timer.
     fn schedule_paced(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.pacing {
-            Pacing::Off => {}
-            Pacing::Skip => self.arm(window, cx),
-            Pacing::Timer => self.start_pixel_timer(window, cx),
+        if self.pacing == Pacing::Timer {
+            self.start_pixel_timer(window, cx);
         }
     }
 
