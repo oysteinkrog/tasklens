@@ -1354,6 +1354,32 @@ By kind (exclusive): GPUI elements 44.6%, GPU submit 17.5%, taffy 15.3%, text 10
 and scrubber paths, taffy layout, `BoundsTree::insert`, and row re-sorting. The fix belongs in
 `crates/tl-ui-procs/src/pages/processes/history/`, not in the bench scene (tasklens-8fx.47).
 
+### Bridge wake-to-render latency, nested rerun (tasklens-wlf.42, 2026-11-05)
+
+Information only (leader 2026-11-05, option C), not a gate result. The 20 ms bridge gate is judged on the 144 Hz screen in wlf.2.
+
+Setup: HEAD 4489481b1 (dirty: `.beads/issues.jsonl` and untracked files of other lanes), perf profile with the `bench` feature, `cargo xtask bench --scene bridge --runs 3`, nested KWin `wlf42` (1920x1200, 60 Hz, Wayland, scale 1.1, hidden), `TL_BENCH_REFRESH_HZ=60`, `TL_BENCH_NESTED=1`. No code changed since the wlf.18 run apart from wlf.39 and wlf.40. Data: `/var/tmp/claude/wlf42/`.
+
+Attempt 1 run 1 did not count. xtask compiled tl-app just before it, so it started at 1-minute load 9.97, above the limit of 8. Per the quiet-machine rule the whole script was rerun. Attempt 2 is the counted set. Both are listed.
+
+| Attempt, run | Start | Load at start (1 min, 5 min) | Load at end (1 min) | Frames | frame_cpu p50 / p99 ms | Missed frames | Process CPU % | bridge p50 / p99 ms | Counts |
+|---|---|---|---|---|---|---|---|---|---|
+| 1, run 1 | 07:53:58 | 9.97, 6.79 | 6.55 | 1420 | 14.32 / 18.24 | 340 | 69.4 | 12.69 / 27.83 | no |
+| 1, run 2 | 07:54:34 | 6.55, 6.31 | 5.05 | 1219 | 14.69 / 20.86 | 577 | 60.6 | 18.23 / 35.24 | yes |
+| 1, run 3 | 07:55:09 | 5.05, 5.97 | 5.07 | 1267 | 14.41 / 19.41 | 528 | 62.8 | 9.94 / 26.30 | yes |
+| 2, run 1 | 07:56:01 | 4.6, 5.8 | 4.35 | 1239 | 14.90 / 19.46 | 554 | 62.9 | 8.40 / 25.08 | yes |
+| 2, run 2 | 07:56:37 | 4.3, 5.6 | 3.6 | 1498 | 11.91 / 18.92 | 299 | 66.2 | 9.77 / 27.16 | yes |
+| 2, run 3 | 07:57:12 | 3.6, 5.2 | 3.7 | 1321 | 14.40 / 19.43 | 468 | 63.6 | 10.27 / 27.46 | yes |
+
+All numbers are (hidden nested KWin, 60 Hz). Start times are file mtime minus 35 s.
+
+Counted attempt 2: median bridge p99 is 27.16 ms (hidden nested KWin, 60 Hz). Reference values:
+
+- 20 ms: the 144 Hz gate, judged in wlf.2. The nested value is above it.
+- 29.7 ms: the gate scaled by one 60 Hz frame (13.06 + 16.67). The nested value is below it.
+
+wlf.18 had median p99 30.20 ms and p50 13.46, 5.94 and 13.71 ms. Median p99 is now 3.04 ms lower, and p50 is now 8.40, 9.77 and 10.27 ms. Frame CPU p50 is still 11.9 to 14.9 ms, so frames still take most of a 16.7 ms interval and the bridge latency still includes waiting for the next frame callback.
+
 ## First frame, minimized CPU and RSS
 
 ### Gate runs (tasklens-wlf.19, 2026-11-04)
