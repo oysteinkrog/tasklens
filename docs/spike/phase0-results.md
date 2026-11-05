@@ -1454,6 +1454,96 @@ root on btrfs, so they are close to, but not equal to, a sweep of the live `/pro
   about 42 to 47 ms at 2,000 processes, scaled from 997). U-10 is settled by R-286, and the
   binding product gate stays ADR-014's 3.5% of one core.
 
+### Sweep gate after the pid reuse fix (tasklens-yms.26, 2026-11-05)
+
+Result: PASS. With the fix at `bea6514e0`, the median steady sweep was 18.68, 18.68 and
+18.81 ms in the three runs that count. The gate is at most 20 ms (R-286). A side-by-side
+comparison found no measurable cost from the fix. All numbers are from the hidden nested KWin
+session `yms26b` and a fixture root on btrfs, so they are close to, but not equal to, a sweep
+of the live `/proc`.
+
+#### What changed
+
+A review found that the sweep opens each file as `<pid>/<file>`, so a pid freed and reused
+between two opens could put another process's memory, status or metadata under the old key.
+`c81fd8702` and `bea6514e0` fix it in `crates/tl-collect/src/proc/sweep.rs`:
+
+- The sweep opens an anchor file before `stat` and reads it after every other file of the
+  process. The anchor is `statm`, or `status` in memory-only mode. A `/proc` fd stays bound to
+  its process and its read fails once that process is gone, so a good anchor read proves that
+  one process held the pid for every open in between. Both files were already read every
+  sweep, so this adds no read.
+- The `/proc/<pid>` directory for a metadata read or an fd count is opened inside the same
+  window (`PerPid::wants_dir`, `MetaCache::needs_read`).
+- The P2 extras of detail keys are read by pid after the window. For those, the sampler reads
+  the kept `stat` fd again and drops the process when its start time no longer matches.
+
+The first version (`c81fd8702`) re-read `stat` after each metadata refresh, about 200 reads
+per sweep. In 5 pairs it read a median 0.41 ms slower than the code before the fix, always
+running second, so part of that is the order effect described below. `bea6514e0` removed that
+read.
+
+#### Setup
+
+- Office PC, AMD Ryzen 9 5950X, 32 threads, btrfs.
+- Hidden nested KWin from `/var/tmp/claude/tl-smoke/harness.sh start yms26b`, with its env
+  and its own `XDG_CACHE_HOME`. The sweep opens no window.
+- Release build of `fixture_process` at `bea6514e0`. Gate runs called the built test binary
+  directly in `builds.slice` (CPUQuota 200%), with `sweep_2000_under_gate --ignored`, because
+  heavy-build refuses a third run of a command that failed twice. Criterion ran through
+  `heavy-build cargo bench -p tl-collect --bench sweep`.
+- A run counts only when the 1-minute and 5-minute load averages are both at most 8 at its
+  start and the 1-minute load is still at most 8 at its end.
+
+#### Gate runs
+
+| Run | Start (local) | Load at start (1, 5, 15 min) | Gate test | Median (nested KWin, fixture root on btrfs) | Min | Max | Counts |
+|---|---|---|---|---|---|---|---|
+| 1 | 00:47:19 | 6.06, 7.95, 12.13 | ok | 18.68 ms | 17.53 ms | 20.56 ms | yes |
+| 2 | 00:47:41 | 6.37, 7.89, 12.02 | failed | 20.12 ms | 18.90 ms | 29.46 ms | no: 1-minute load 10.98 at the end |
+| 3 | 01:06:03 | 3.40, 7.82, 12.33 | ok | 18.68 ms | 18.14 ms | 19.81 ms | yes |
+| 4 | 01:07:07 | 4.90, 7.46, 11.92 | ok | 18.81 ms | 16.59 ms | 21.67 ms | yes |
+
+Earlier the same night, at 1-minute load 6 to 7 but 5-minute load 10 to 14, three runs read
+19.74, 20.35 and 20.76 ms (1 of 3 under the gate). The code from before the fix read 19.6 to
+20.9 ms under similar load, so that night's load explains the failures, not the fix.
+
+#### Criterion
+
+Started 01:06:25 at load 3.88, 7.64, 12.18.
+
+| Bench | Mean [95% interval] (nested KWin, fixture root on btrfs) | Gated |
+|---|---|---|
+| `sweep/2000_steady` | 19.18 ms [18.94, 19.42] | no, reported |
+| `sweep/2000_with_fd_count` | 25.26 ms [25.12, 25.41] | no, reported |
+
+On 2026-11-04 at load 4.5 the same benches read 18.78 ms and 25.04 ms.
+
+#### Comparison with the code before the fix
+
+The binary from `9f251635b` and the binary from `bea6514e0` were both built in one worktree,
+so both build their scaled root in the same folder. Medians in ms, 1-minute load 2.6 to 3.7:
+
+| Pair | Order | Before the fix | With the fix |
+|---|---|---|---|
+| 1 | with the fix first | 18.11 | 17.25 |
+| 2 | before the fix first | 15.63 | 18.38 |
+| 3 | with the fix first | 17.71 | 16.51 |
+
+In each pair the binary that ran second read slower, so run order moves the median by 1 to
+3 ms. Neither binary is faster across the pairs. Five earlier pairs that always ran the fixed
+binary second read it 0.15 to 2.06 ms slower, which fits that order effect (a sixth pair hit a
+load spike and is left out). By the code, the
+steady sweep makes the same syscalls as before plus one hash lookup per pid in
+`MetaCache::needs_read`.
+
+#### Reading
+
+- The margin is about 1.2 ms under the gate at quiet load. A 5-minute load above 8 is enough
+  to push the median over 20 ms with or without the fix.
+- The fixture still has no cgroup tree, so these runs make no `cpu.stat` reads. This
+  understates the live cost.
+
 ## Decision
 
 Not run yet.
