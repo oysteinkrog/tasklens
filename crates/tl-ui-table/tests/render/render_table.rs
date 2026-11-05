@@ -767,14 +767,15 @@ impl TreeTableDelegate for ParityDelegate {
     }
     /// Row 2 is a STALE row, row 4 a NEW row, row 5 an EXITED row.
     fn row_flags(&self, ix: usize) -> RowFlags {
-        let mut flags = RowFlags::default();
-        flags.bits = match ix {
-            2 => RowFlags::STALE,
-            4 => RowFlags::NEW,
-            5 => RowFlags::EXITED,
-            _ => 0,
-        };
-        flags
+        RowFlags {
+            bits: match ix {
+                2 => RowFlags::STALE,
+                4 => RowFlags::NEW,
+                5 => RowFlags::EXITED,
+                _ => 0,
+            },
+            ..RowFlags::default()
+        }
     }
     fn table_version(&self) -> u64 {
         1
