@@ -679,7 +679,11 @@ _launch=Meta+Esc\nfoo=bar\n\n[b]\n_launch=keep\n";
         *kga.sm.borrow_mut() = vec![custom.clone()];
         kga.fail_tasklens.set(true);
         assert!(set_on(&kga, true, &rc).is_err());
-        assert_eq!(*kga.sm.borrow(), [custom], "the custom key, not the default");
+        assert_eq!(
+            *kga.sm.borrow(),
+            [custom],
+            "the custom key, not the default"
+        );
         assert!(kga.tl.borrow().is_empty());
     }
 }
