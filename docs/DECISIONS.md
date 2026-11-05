@@ -2,6 +2,13 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-11-05
+
+### D-043 GPUI may be patched (ADR-014)
+
+- **Decision** (owner, 2026-11-05, wlf.2): lanes may patch GPUI to cut the costs the Phase-0 profiles found (wlf.45 path vertex copies, wlf.46 row layout and text in UniformList). This widens ADR-014 step 2 and ARCHITECTURE.md line 343, which allowed only the zed#64499 patch.
+- **Setup** (wlf.44): gpui-pre 0.3.7 is vendored unchanged in `third_party/gpui-pre` and replaces the crates.io crate through `[patch.crates-io]` in the workspace Cargo.toml. `third_party` is excluded from the workspace, so tests, fmt and clippy do not run on it. Every local change is listed in `third_party/gpui-pre/PATCHES.md` with its bead id. Each patch bead reruns its gates.
+
 ## 2026-11-03
 
 ### D-042 CPU by app as a stacked chart
