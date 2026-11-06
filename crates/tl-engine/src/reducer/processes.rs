@@ -726,12 +726,11 @@ fn set_fields(validity: &mut FieldValidity, fields: &[ProcessField], v: Validity
 mod tests {
     use super::*;
 
-    use tl_model::actions::{CgroupRef, SchedPolicy};
+    use tl_model::actions::CgroupRef;
     use tl_model::devices::DeviceCatalog;
     use tl_model::ids::{GroupKey, SeriesId};
     use tl_model::process::{ProcState, ProcessMeta};
     use tl_model::series::Sample;
-    use tl_model::system::CpuSet;
     use tl_model::time::BootId;
 
     const MS: u64 = 1_000_000;

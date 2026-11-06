@@ -201,11 +201,10 @@ pub(crate) fn refresh(
 mod tests {
     use super::*;
 
-    use tl_model::actions::{CgroupRef, SchedPolicy};
+    use tl_model::actions::CgroupRef;
     use tl_model::ids::ProcessKey;
     use tl_model::process::{GroupKind, ProcState, ProcessExtras, ProcessMeta};
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
-    use tl_model::system::CpuSet;
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;
 

@@ -2333,10 +2333,8 @@ pub fn totals(
 mod tests {
     use super::*;
 
-    use tl_model::actions::SchedPolicy;
     use tl_model::ids::{GroupKey, ProcessKey};
     use tl_model::process::{ProcState, ProcessMeta};
-    use tl_model::system::CpuSet;
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;
 
