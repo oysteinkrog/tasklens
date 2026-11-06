@@ -31,7 +31,7 @@ use tl_engine::update::{
     ProcessSweep, SourceUpdate,
 };
 use tl_engine::workers::WorkerSpec;
-use tl_model::actions::{ActionId, ActionKind, ActionRequest, SchedPolicy, Signal};
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, Signal};
 use tl_model::command::Command;
 use tl_model::demand::Demand;
 use tl_model::details::{ScanId, StringScanOpts};

@@ -740,7 +740,7 @@ mod engine {
     use tl_engine::update::{EngineMsg, ProcessSweep, SourceUpdate};
     use tl_history::format::boot_dir_name;
     use tl_history::segment::SegmentReader;
-    use tl_model::actions::{ActionId, ActionKind, ActionRequest, SchedPolicy, Signal};
+    use tl_model::actions::{ActionId, ActionKind, ActionRequest, Signal};
     use tl_model::command::{Command, HistoryWhat};
     use tl_model::demand::Demand;
     use tl_model::health::SourceId;
@@ -751,7 +751,6 @@ mod engine {
     };
     use tl_model::settings::EngineSettings;
     use tl_model::snapshot::Snapshot;
-    use tl_model::system::CpuSet;
     use tl_model::validity::{FieldValidity, Validity};
 
     use super::TempRoot;

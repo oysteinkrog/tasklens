@@ -25,7 +25,7 @@ use tl_engine::source::WorkerControl;
 use tl_engine::update::{
     CgroupStats, EngineMsg, ProcessSweep, ServicesUpdate, SourceUpdate, ZramStat,
 };
-use tl_model::actions::{CgroupRef, SchedPolicy};
+use tl_model::actions::CgroupRef;
 use tl_model::command::Command;
 use tl_model::devices::DeviceCatalog;
 use tl_model::health::ManagerState;
@@ -37,7 +37,6 @@ use tl_model::process::{
 use tl_model::snapshot::{
     ServiceBackend, ServiceStatus, Snapshot, StartupType, SystemSnapshot, UnitRecord,
 };
-use tl_model::system::CpuSet;
 use tl_model::table::TableSettings;
 use tl_model::table::{
     Manager, ProcessTableView, SortSpec, TableMode, TableQuery, Total, UnitRef, UnitType,
