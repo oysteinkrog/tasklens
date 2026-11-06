@@ -693,7 +693,7 @@ fn columns_disabled_on_performance(cx: &mut TestAppContext) {
     keys(r.cx, "alt-v");
     assert_eq!(open_menu(r.cx), Some(MenuId::View));
     let drawn = entries(r.cx);
-    assert_eq!(drawn.len(), 7);
+    assert_eq!(drawn.len(), VIEW_ROOT.len());
     assert_eq!(drawn[0].label(), Some("Columns"));
     assert_ne!(
         drawn[0].selected(),
