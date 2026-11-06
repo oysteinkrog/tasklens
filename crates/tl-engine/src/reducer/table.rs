@@ -1225,6 +1225,8 @@ pub fn aggregate(
         page_faults: 0,
         page_faults_delta: 0,
         major_faults: 0,
+        counters: tl_model::process::ProcCounters::default(),
+        cgroup_io: None,
         handles: None,
         desktop_path: if unit.is_none() {
             first.and_then(|r| r.meta.desktop_path.clone())
@@ -1578,6 +1580,8 @@ fn pseudo_base(kind: PseudoKind, name: &str) -> GroupRow {
         page_faults: 0,
         page_faults_delta: 0,
         major_faults: 0,
+        counters: tl_model::process::ProcCounters::default(),
+        cgroup_io: None,
         handles: None,
         desktop_path: None,
         description: None,

@@ -610,6 +610,8 @@ fn group_row(node: NodeId, key: GroupKey, name: Arc<str>, members: &[ProcessReco
         page_faults: 0,
         page_faults_delta: 0,
         major_faults: 0,
+        counters: tl_model::process::ProcCounters::default(),
+        cgroup_io: None,
         handles: None,
         desktop_path: None,
         description: None,

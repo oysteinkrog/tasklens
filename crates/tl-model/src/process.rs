@@ -278,6 +278,10 @@ pub struct GroupRow {
     pub page_faults: u64,
     pub page_faults_delta: u64,
     pub major_faults: u64,
+    /// Sums of the members' `ProcessExtras.counters` (PROC-030, PROC-031).
+    pub counters: ProcCounters,
+    /// App rows with a cgroup sample: `io.stat` values of the app's cgroup. `None` for other rows.
+    pub cgroup_io: Option<CgroupIo>,
     /// `None` when any member's fd count was not read (Restricted).
     pub handles: Option<u32>,
     /// App rows: path of the matched desktop file, from the first member's `ProcessMeta`.
@@ -339,6 +343,8 @@ impl GroupRow {
             page_faults: 0,
             page_faults_delta: 0,
             major_faults: 0,
+            counters: ProcCounters::default(),
+            cgroup_io: None,
             handles: None,
             desktop_path: None,
             description: None,
@@ -407,6 +413,24 @@ pub struct ProcessExtras {
     pub wine: Option<Arc<WineProcess>>,
     /// Phase-2 memory and I/O counters (PROC-030, PROC-031).
     pub counters: ProcCounters,
+}
+
+/// `io.stat` of one cgroup, summed over its devices (PROC-031). Bytes and operation counts are
+/// totals since the cgroup started. The `_delta` fields are the change since the last sample.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CgroupIo {
+    /// Bytes read (`rbytes`).
+    pub rbytes: u64,
+    /// Bytes written (`wbytes`).
+    pub wbytes: u64,
+    /// Read operations (`rios`).
+    pub rios: u64,
+    /// Write operations (`wios`).
+    pub wios: u64,
+    /// Read operations since the last sample.
+    pub rios_delta: u64,
+    /// Write operations since the last sample.
+    pub wios_delta: u64,
 }
 
 /// Per-process counters behind the phase-2 memory and I/O columns (PROC-030, PROC-031).
@@ -818,6 +842,8 @@ mod tests {
         assert_eq!(&*row.name, "n");
         assert_eq!(row.members, 0);
         assert_eq!(row.handles, None);
+        assert_eq!(row.counters, ProcCounters::default());
+        assert_eq!(row.cgroup_io, None);
         let cg = CgroupRef {
             rel_path: Arc::from("a/b"),
             cgroup_id: 5,
