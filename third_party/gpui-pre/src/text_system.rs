@@ -755,6 +755,9 @@ impl WindowTextSystem {
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
+        // tasklens patch (wlf.46): a line holds at most one decoration run per text run, so
+        // size each line's list to that, up to the 32 runs upstream always reserved.
+        let decoration_capacity = runs.len().min(32);
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
 
@@ -765,7 +768,7 @@ impl WindowTextSystem {
         let mut process_line = |line_text: SharedString, line_start, line_end| {
             font_runs.clear();
 
-            let mut decoration_runs = <Vec<DecorationRun>>::with_capacity(32);
+            let mut decoration_runs = <Vec<DecorationRun>>::with_capacity(decoration_capacity);
             let mut run_start = line_start;
             while run_start < line_end {
                 let Some(run) = runs.peek_mut() else {

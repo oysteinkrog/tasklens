@@ -626,8 +626,31 @@ struct TextLayoutInner {
     line_height: Pixels,
     wrap_width: Option<Pixels>,
     truncate_width: Option<Pixels>,
+    /// The lines hold the whole text, not a truncated copy (tasklens patch, wlf.46).
+    whole: bool,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEXT_MEASURE_SHAPES: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn count_text_measure_shape() {
+    TEXT_MEASURE_SHAPES.with(|shapes| shapes.set(shapes.get() + 1));
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn count_text_measure_shape() {}
+
+/// `shape_text` calls the text measure function has made on this thread so far (tasklens
+/// patch, wlf.46). A test reads it before and after a frame to pin how often a frame shapes
+/// the text of its text elements during layout.
+#[cfg(any(test, feature = "test-support"))]
+pub fn text_measure_shapes() -> usize {
+    TEXT_MEASURE_SHAPES.with(|shapes| shapes.get())
 }
 
 impl TextLayout {
@@ -691,35 +714,72 @@ impl TextLayout {
                 // 4. the cached layout was not truncated (a truncated layout answers an
                 //    unconstrained probe with the truncated size, which poisons intrinsic
                 //    sizing with whatever width some earlier measure pass happened to use)
-                if let Some(text_layout) = element_state.0.borrow().as_ref()
+                if let Some(text_layout) = element_state.0.borrow_mut().as_mut()
                     && let Some(size) = text_layout.size
-                    && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
-                    && truncate_width.is_none()
-                    && text_layout.truncate_width.is_none()
                 {
-                    return size;
+                    if (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
+                        && truncate_width.is_none()
+                        && text_layout.truncate_width.is_none()
+                    {
+                        return size;
+                    }
+                    // tasklens patch (wlf.46): every other input of this function is fixed
+                    // when the element is built, so the same wrap and truncate widths give the
+                    // same layout.
+                    if wrap_width == text_layout.wrap_width
+                        && truncate_width == text_layout.truncate_width
+                    {
+                        return size;
+                    }
+                    // tasklens patch (wlf.46): an unwrapped layout of the whole text is what
+                    // the code below makes for an unwrapped call when no truncation cuts the
+                    // text. That is a call without a truncate width, or, with no line clamp, a
+                    // call whose truncate width the whole text fits: the code below shapes the
+                    // same text with the same arguments, finds that it fits and keeps it. Reuse
+                    // the layout instead of shaping the text again.
+                    if wrap_width.is_none()
+                        && text_layout.wrap_width.is_none()
+                        && text_layout.whole
+                        && truncate_width.is_none_or(|truncate_width| {
+                            text_style.line_clamp.is_none()
+                                && text_layout
+                                    .lines
+                                    .iter()
+                                    .all(|line| line.size(line_height).width <= truncate_width)
+                        })
+                    {
+                        text_layout.truncate_width = truncate_width;
+                        return size;
+                    }
                 }
 
-                let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+                let full_text = &text;
+                // tasklens patch (wlf.46): the fitting untruncated lines, when they are also
+                // the final lines (no wrap width, no line clamp), so they are not shaped again.
+                let mut unclipped_lines = None;
                 let (text, runs) = if let Some(truncate_width) = truncate_width {
                     if let Some(max_lines) = text_style.line_clamp
                         && let Some(wrap_width) = wrap_width
                     {
-                        line_wrapper.truncate_wrapped_line(
-                            text.clone(),
-                            wrap_width,
-                            max_lines,
-                            &truncation_affix,
-                            &runs,
-                            truncate_from,
-                        )
-                    } else if let Some(unclipped) = window
-                        .text_system()
-                        .shape_text(text.clone(), font_size, &runs, None, None)
-                        .log_err()
-                        && unclipped
-                            .iter()
-                            .all(|line| line.size(line_height).width <= truncate_width)
+                        cx.text_system()
+                            .line_wrapper(text_style.font(), font_size)
+                            .truncate_wrapped_line(
+                                text.clone(),
+                                wrap_width,
+                                max_lines,
+                                &truncation_affix,
+                                &runs,
+                                truncate_from,
+                            )
+                    } else if let Some(unclipped) = {
+                        count_text_measure_shape();
+                        window
+                            .text_system()
+                            .shape_text(text.clone(), font_size, &runs, None, None)
+                            .log_err()
+                    } && unclipped
+                        .iter()
+                        .all(|line| line.size(line_height).width <= truncate_width)
                     {
                         // The truncation decision below sums per-character advances,
                         // which overestimates the shaped width (no kerning), truncating
@@ -727,38 +787,51 @@ impl TextLayout {
                         // whenever the honestly-shaped text fits; the shaping result
                         // comes from the line layout cache when the same text was
                         // already measured untruncated this frame.
+                        if wrap_width.is_none() && text_style.line_clamp.is_none() {
+                            unclipped_lines = Some(unclipped);
+                        }
                         (text.clone(), Cow::Borrowed(&*runs))
                     } else {
-                        line_wrapper.truncate_line(
-                            text.clone(),
-                            truncate_width,
-                            &truncation_affix,
-                            &runs,
-                            truncate_from,
-                        )
+                        cx.text_system()
+                            .line_wrapper(text_style.font(), font_size)
+                            .truncate_line(
+                                text.clone(),
+                                truncate_width,
+                                &truncation_affix,
+                                &runs,
+                                truncate_from,
+                            )
                     }
                 } else {
                     (text.clone(), Cow::Borrowed(&*runs))
                 };
                 let len = text.len();
+                let whole = truncate_width.is_none() || text == *full_text;
 
-                let Some(lines) = window
-                    .text_system()
-                    .shape_text(
-                        text,
-                        font_size,
-                        &runs,
-                        wrap_width,            // Wrap if we know the width.
-                        text_style.line_clamp, // Limit the number of lines if line_clamp is set.
-                    )
-                    .log_err()
-                else {
+                let lines = match unclipped_lines {
+                    Some(lines) => Some(lines),
+                    None => {
+                        count_text_measure_shape();
+                        window
+                            .text_system()
+                            .shape_text(
+                                text,
+                                font_size,
+                                &runs,
+                                wrap_width, // Wrap if we know the width.
+                                text_style.line_clamp, // Limit the number of lines if line_clamp is set.
+                            )
+                            .log_err()
+                    }
+                };
+                let Some(lines) = lines else {
                     element_state.0.borrow_mut().replace(TextLayoutInner {
                         lines: Default::default(),
                         len: 0,
                         line_height,
                         wrap_width,
                         truncate_width,
+                        whole,
                         size: Some(Size::default()),
                         bounds: None,
                     });
@@ -778,6 +851,7 @@ impl TextLayout {
                     line_height,
                     wrap_width,
                     truncate_width,
+                    whole,
                     size: Some(size),
                     bounds: None,
                 });
