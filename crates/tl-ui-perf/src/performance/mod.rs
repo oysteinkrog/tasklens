@@ -410,15 +410,23 @@ impl PerformancePage {
         cx.notify();
     }
 
-    /// UI-SHL-121 initial focus: the sidebar list.
+    /// UI-SHL-121 initial focus: the sidebar list. While the sidebar is hidden, the tab
+    /// itself, so F9 and the other tab keys still reach this page.
     pub fn primary_focus(&self) -> FocusHandle {
-        self.sidebar_focus.clone()
+        if self.sidebar_visible {
+            self.sidebar_focus.clone()
+        } else {
+            self.focus.clone()
+        }
     }
 
-    /// The sidebar, then the shown page's header toggles and block controls (UI-SHL-121).
+    /// The sidebar while it shows, then the shown page's header toggles and block controls
+    /// (UI-SHL-121).
     pub fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
         let mut order = SmallVec::new();
-        order.push(self.sidebar_focus.clone());
+        if self.sidebar_visible {
+            order.push(self.sidebar_focus.clone());
+        }
         order.extend(self.page_focus.iter().cloned());
         order
     }
