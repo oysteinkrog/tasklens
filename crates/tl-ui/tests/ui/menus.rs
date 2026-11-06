@@ -1557,9 +1557,9 @@ fn set_gpus(r: &mut Rig<'_>, gpus: usize) {
     r.cx.run_until_parked();
 }
 
-/// Opens View > Graphs from the keyboard (the last root item).
+/// Opens View > Graphs from the keyboard (the root item above "Show sidebar").
 fn open_graphs(cx: &mut VisualTestContext) {
-    keys(cx, "alt-v end right");
+    keys(cx, "alt-v end up right");
     assert_eq!(open_menu(cx), Some(MenuId::View));
 }
 
@@ -2067,7 +2067,7 @@ fn builtin_names(cx: &mut VisualTestContext) -> Vec<String> {
 
 /// Opens View > Theme from the keyboard (the item above Graphs).
 fn open_theme(cx: &mut VisualTestContext) {
-    keys(cx, "alt-v end up right");
+    keys(cx, "alt-v end up up right");
     assert_eq!(open_menu(cx), Some(MenuId::View));
 }
 
