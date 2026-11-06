@@ -13,6 +13,7 @@ use fluent_bundle::FluentValue;
 use gpui_kit::{App, Hsla, SharedString};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use tl_model::actions::{IoPriority, SchedPolicy};
+use tl_model::details::Elevated;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, PseudoKind};
 use tl_model::process::{
     GroupKind, GroupRow, GroupRowKind, PackageStatus, ProcFlags, ProcState, ProcessExtras,
@@ -318,7 +319,7 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::Ppid, "processes-column-ppid", Group::Identity, Kind::IntegerId, Heat::None, 1),
     col(Id::Session, "processes-column-session", Group::Identity, Kind::Text, Heat::None, 2),
     col(Id::SecurityLabel, "processes-column-security-label", Group::Security, Kind::Text, Heat::None, 2),
-    col(Id::Elevation, "processes-column-elevation", Group::Security, Kind::Text, Heat::None, NO_SOURCE),
+    col(Id::Elevation, "processes-column-elevation", Group::Security, Kind::Text, Heat::None, 2),
     col(Id::Sandbox, "processes-column-sandbox", Group::Security, Kind::Text, Heat::None, 2),
     col(Id::Priority, "processes-column-priority", Group::Scheduling, Kind::Text, Heat::None, 1),
     col(Id::Affinity, "processes-column-affinity", Group::Scheduling, Kind::Text, Heat::None, 1),
@@ -452,6 +453,8 @@ pub struct CellWords {
     /// "best-effort N" and "realtime N", indexed by level 0 to 7.
     pub io_priority_best_effort: [Arc<str>; 8],
     pub io_priority_realtime: [Arc<str>; 8],
+    /// Elevated words (PROC-028), in `Elevated` declaration order: Root, Capabilities, Setuid, No.
+    pub elevation: [Arc<str>; 4],
     /// Power usage classes (PROC-034), lowest first.
     pub power: [Arc<str>; 5],
     /// Package status words (PROC-027), in `PackageStatus` declaration order.
@@ -522,6 +525,12 @@ impl CellWords {
             io_priority_realtime: std::array::from_fn(|n| {
                 leveled("processes-io-priority-realtime", n as u8)
             }),
+            elevation: [
+                text("processes-elevation-root"),
+                text("processes-elevation-capabilities"),
+                text("processes-elevation-setuid"),
+                text("processes-elevation-no"),
+            ],
             power: [
                 text("processes-power-very-low"),
                 text("processes-power-low"),
@@ -710,6 +719,7 @@ enum Value<'a> {
     /// Estimated watts, shown as a class.
     Power(f32),
     IoPriority(IoPriority),
+    Elevation(Elevated),
 }
 
 /// Fills `out` for one cell. Sets `bits` and `validity` always; writes `text` only when
@@ -863,6 +873,7 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
             Validity::Valid,
         ),
         Value::Power(w) => (u64::from(w.to_bits()), Validity::Valid),
+        Value::Elevation(e) => (elevation_index(*e) as u64, Validity::Valid),
         Value::IoPriority(p) => (
             match p {
                 IoPriority::None => 0,
@@ -928,6 +939,7 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
         Value::Packager(a) => s.push_str(a.split(" <").next().unwrap_or(a).trim_end()),
         Value::Architecture(class, machine) => write_architecture(s, class, machine),
         Value::Power(w) => s.push_str(&ctx.words.power[power_class(w)]),
+        Value::Elevation(e) => s.push_str(&ctx.words.elevation[elevation_index(e)]),
         Value::IoPriority(p) => {
             let w = ctx.words;
             let level = |n: u8| usize::from(n).min(7);
@@ -938,6 +950,16 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
                 IoPriority::Realtime(n) => &w.io_priority_realtime[level(n)],
             });
         }
+    }
+}
+
+/// Index into `CellWords::elevation`.
+fn elevation_index(e: Elevated) -> usize {
+    match e {
+        Elevated::Root => 0,
+        Elevated::Capabilities => 1,
+        Elevated::Setuid => 2,
+        Elevated::No => 3,
     }
 }
 
@@ -1229,6 +1251,7 @@ fn record_value<'a>(
             })
         }),
         C::SecurityLabel => p2(&|x| x.security_label.as_ref().map(Value::Arc)),
+        C::Elevation => p2(&|x| x.elevation.map(Value::Elevation)),
         C::Sandbox => p2(&|x| x.sandbox.as_ref().map(Value::Arc)),
         C::SchedPolicy => p2(&|x| x.sched_policy_text.as_ref().map(Value::Arc)),
         C::IoPriority => p2(&|x| x.io_priority.map(Value::IoPriority)),
