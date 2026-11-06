@@ -20,7 +20,6 @@ use tl_engine::client_session::{
 use tl_engine::reducer::{Publisher, Reducer};
 use tl_engine::source::WorkerControl;
 use tl_engine::update::{EngineMsg, ProcessSweep, ServicesUpdate, SourceUpdate};
-use tl_model::actions::SchedPolicy;
 use tl_model::command::Command;
 use tl_model::demand::{
     ColumnSet, CpuDemand, Demand, DetailDemand, DeviceHistoryRequest, DeviceRange, TrayDemand,
@@ -33,7 +32,6 @@ use tl_model::remote_proto::HostSettings;
 use tl_model::snapshot::{
     InventorySnapshot, ServiceBackend, ServiceStatus, Snapshot, StartupType, UnitRecord,
 };
-use tl_model::system::CpuSet;
 use tl_model::table::{
     Manager, SortSpec, SysColumnId, SysNodeId, SysSortSpec, SysTable, SysTableQuery, TableMode,
     TableQuery, Total, UnitRef, UnitType,
@@ -256,37 +254,10 @@ fn proc_record(pid: u32) -> ProcessRecord {
 
 fn proc_extras() -> ProcessExtras {
     ProcessExtras {
-        cpu_kernel_pct: 0.0,
-        cpu_user_pct: 0.0,
-        cpu_relative_pct: 0.0,
-        utime_ticks: 0,
-        stime_ticks: 0,
-        start_boot_ns: 0,
-        rss_peak_bytes: 0,
-        rss_shared_bytes: 0,
-        commit_bytes: 0,
-        vsize_bytes: 0,
-        vsize_peak_bytes: 0,
-        page_faults: 0,
-        page_faults_delta: 0,
-        major_faults: 0,
-        policy: SchedPolicy::Other,
-        rt_prio: 0,
-        affinity: CpuSet::empty(),
-        handles: None,
         exe_name: "x".into(),
         exe_path: "/usr/bin/x".into(),
-        exe_deleted: false,
-        unit: None,
         state_letter: b'S',
-        frozen: false,
-        disk_read_bps: 0.0,
-        disk_write_raw_bps: 0.0,
-        flag_since_ns: 0,
-        pgrp: 0,
-        sid: 0,
-        last_cpu: 0,
-        wine: None,
+        ..ProcessExtras::default()
     }
 }
 
