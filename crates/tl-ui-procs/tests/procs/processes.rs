@@ -1032,6 +1032,7 @@ mod delegate {
             ColumnId::Architecture,
             ColumnId::Session,
             ColumnId::SecurityLabel,
+            ColumnId::Elevation,
             ColumnId::Sandbox,
             ColumnId::CtxSwitches,
             ColumnId::CtxSwitchesDelta,
@@ -1068,7 +1069,6 @@ mod delegate {
     fn no_source_columns_not_offered(cx: &mut TestAppContext) {
         setup(cx);
         let parked = [
-            ColumnId::Elevation,
             ColumnId::CommitPeak,
             ColumnId::CommitDelta,
             ColumnId::PageTables,
