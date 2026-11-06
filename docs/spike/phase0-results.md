@@ -1111,6 +1111,81 @@ Redraw counters after the rerun (`bench_scenes::redraw_work_static`, test platfo
 1.2, builds 1.2, paths 3.6, CPU grid renders 1.2, builds 1.2, paths 3.6, text shapes 34.8.
 These match the first run; wlf.39 made each grid build cheaper, not less frequent.
 
+#### Rerun after wlf.45 (2026-11-06)
+
+Result: FAIL. With the wlf.45 GPUI path patch (`ee146c4e1`), the static scene used a
+median 16.03% of one core over 30 s (hidden nested KWin, 60 Hz), against the 2% gate. That
+is about 16.0 ms of CPU per paint at 10 Hz. The same code without the patch, run in the
+same session and interleaved, used a median 17.15%. So the patch saves about 1.1 ms per
+paint, about 7%.
+
+Setup:
+
+- Two binaries, both `cargo build --locked --profile perf -p tl-app --features bench`, made
+  by the first wlf.45 lane on 2026-11-05. The only code between them is the patch:
+  `git diff 82d463ef8 22395d383` touches `third_party/gpui-pre/src/scene.rs`,
+  `third_party/gpui-pre/src/window.rs`, `PATCHES.md` and one test.
+  - Without patch: `/var/tmp/claude/wlf45/tasklens-before2`, code at `82d463ef8` with the
+    vendored gpui-pre 0.3.7 unchanged. It has no `Path::into_scaled` symbol.
+  - With patch: `/var/tmp/claude/wlf45/tasklens-after`, code at `22395d383`. It has the
+    `Path::into_scaled` symbol.
+  - Both report version `1.5.2 82d463e`, because the build script did not rerun for the
+    patch commits.
+- Hidden nested KWin `harness.sh start wlf45` (1920x1200, 60 Hz output, app on the nested
+  Xwayland). Wrappers set `TL_BENCH_NESTED=1` and `TL_BENCH_REFRESH_HZ=60`, so every report
+  has `refresh_hz` 60. The earlier wlf.45 runs of 2026-11-05 did not set
+  `TL_BENCH_REFRESH_HZ` and were judged against 144 Hz. They are not counted here.
+- The real desktop (session 2) was locked when checked after the runs.
+- Quiet-machine rule: a run counts when the 1-minute and 5-minute load are both at most 8
+  at the start, and the 1-minute load is at most 8 at the end. Before and after runs
+  alternate. Each run holds the bench slot lock. All 6 static runs counted.
+- Command per run: `tasklens --bench static --duration 30 --warmup 5 --json <file>`.
+  Scripts, reports and profiles: `/var/tmp/claude/wlf45/r60/` (`drive.sh`, `drive.log`).
+
+| Run | Binary | Start (local) | Load at start (1, 5, 15 min) | Load at end (1 min) | Frames | Process CPU (hidden nested KWin, 60 Hz) | RSS |
+|---|---|---|---|---|---|---|---|
+| before 1 | without patch | 03:06:55 | 2.70, 5.26, 9.18 | 3.06 | 300 | 17.18% | 317 MB |
+| after 1 | with patch | 03:07:31 | 3.06, 5.05, 8.96 | 3.38 | 300 | 16.20% | 288 MB |
+| before 2 | without patch | 03:08:07 | 3.38, 4.88, 8.74 | 3.08 | 300 | 17.01% | 320 MB |
+| after 2 | with patch | 03:08:43 | 3.08, 4.66, 8.52 | 2.80 | 300 | 14.60% | 296 MB |
+| before 3 | without patch | 03:09:19 | 2.80, 4.41, 8.30 | 3.32 | 300 | 17.15% | 311 MB |
+| after 3 | with patch | 03:09:55 | 3.32, 4.35, 8.13 | 3.32 | 300 | 16.03% | 293 MB |
+| Median before | | | | | 300 | 17.15% | |
+| Median after | | | | | 300 | 16.03% | |
+
+`window_active` was true and `stalls` was 0 in every run. The bench requested no frames.
+
+Profile of the patched binary: one more 30 s run under `perf record -e cpu-clock:u -F 499
+--call-graph dwarf,16384 --user-callchains` (03:10:31, load 3.32, end load 2.65): 15.71%
+process CPU (hidden nested KWin, 60 Hz), 300 frames. 98.68% of the user-space samples
+(2460) are on the UI main thread. Phases by `split2.py` from wlf.28, with `into_scaled`
+added to the scale copy row. The ms column is the share times 15.50 ms (15.71 ms per paint
+times the 98.68% main-thread share).
+
+| Phase | Samples | Share | ms per paint (hidden nested KWin, 60 Hz) |
+|---|---|---|---|
+| memcpy (libc `__memcpy_avx_unaligned_erms`) | 1,191 | 48.43% | 7.51 |
+| GPU submit (`render_frame`, wgpu, NVIDIA driver) | 297 | 12.08% | 1.87 |
+| Our chart paint (`tl_ui_chart`) | 234 | 9.52% | 1.47 |
+| Other GPUI (element tree, styles, hashing, entities) | 219 | 8.91% | 1.38 |
+| Scene build (`BoundsTree::insert`, `Scene::insert_primitive`) | 146 | 5.94% | 0.92 |
+| Layout (taffy) | 122 | 4.96% | 0.77 |
+| malloc, free, other libc | 75 | 3.05% | 0.47 |
+| Text (shaping, glyphs, atlas) | 60 | 2.44% | 0.38 |
+| Rest | 42 | 1.71% | 0.26 |
+| GPUI `Path::into_scaled` copy | 40 | 1.63% | 0.25 |
+| Our other UI code (`tl_ui*`, `tl_model`) | 33 | 1.34% | 0.21 |
+| Total main-thread CPU | 2,459 | 100.00% | 15.50 |
+
+Compared with the profile of the wlf.39 rerun above (another build and session, so only a
+rough comparison): `Scene::insert_primitive::<Path>` fell from 2.30% to 0.04% of
+main-thread samples, scene build from 1.37 ms to 0.92 ms per paint, and the scale copy
+from 0.42 ms to 0.25 ms. memcpy still leads at 7.51 ms per paint (8.01 ms before). 1,147
+of the 1,256 libc samples on the main thread have no caller frame, so the memcpy callers
+are still not measured. The scene copies are gone, so the likely callers left are the
+`gpui-pre-wgpu` raster vertex `Vec` and `write_buffer` (see the perf-cpu rerun below).
+That crate is not vendored, so cutting those copies needs a new bead.
+
 ### Perf-cpu frame cost and pacing (tasklens-wlf.28, 2026-11-04)
 
 Result: FAIL. perf-cpu used a median 12.21 ms of main-thread CPU per frame at p50 and
@@ -1282,6 +1357,81 @@ that. The rest is GPUI work that grows with what we submit, so wlf.39 and wlf.40
 first steps and need no GPUI change. I do not know whether they can reach 1.0 ms on their
 own. The per-vertex copies listed in Reading would need a GPUI change, which is the owner's
 decision (bead AC, ADR-014 rule 3). Re-measure after wlf.39 and wlf.40 before deciding.
+
+#### Rerun after wlf.45 (2026-11-06)
+
+Result: FAIL. With the wlf.45 GPUI path patch, perf-cpu used a median 10.79 ms of
+main-thread CPU per frame at p50, 15.71 ms at p99, and 66.99% process CPU (hidden nested
+KWin, 60 Hz). The gates are 1.0 ms, 2.0 ms and 30%. Missed frames also fail: median 23,
+long misses 0, 1 and 1, against a median of 0 and every run at most 2.
+
+The patch helps. Against the same code without it, run in the same session and interleaved,
+p50 fell from 12.18 ms to 10.79 ms, p99 from 18.85 ms to 15.71 ms, and missed frames from
+119 to 23 (medians, hidden nested KWin, 60 Hz). Process CPU per frame fell from 12.91 ms to
+11.34 ms (process CPU times 30 s, divided by frames). Process CPU in percent fell less,
+from 72.17% to 66.99%, because the faster frames let the window draw 1772 frames
+instead of 1677.
+
+Setup: as in the static rerun after wlf.45 above (same session `wlf45`, same two binaries,
+same quiet-machine rule, `TL_BENCH_REFRESH_HZ=60`). Command per run:
+`tasklens --bench perf-cpu --duration 30 --warmup 5 --json <file>`. All reports have
+`refresh_hz` 60, `pacing` off, `window_active` true and 0 stalls.
+
+| Run | Binary | Start (local) | Load at start (1, 5, 15 min) | Load at end (1 min) | Counts | Frames | Frame CPU p50 | Frame CPU p99 | Process CPU | Missed, long missed | RSS |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| before 1 | without patch | 03:11:09 | 2.65, 3.94, 7.69 | 3.10 | yes | 1677 | 12.16 ms | 18.60 ms | 72.17% | 119, 0 | 299 MB |
+| after 1 | with patch | 03:11:45 | 3.10, 3.91, 7.54 | 2.74 | yes | 1776 | 10.41 ms | 15.50 ms | 63.92% | 20, 0 | 292 MB |
+| before 2 | without patch | 03:12:21 | 2.74, 3.73, 7.33 | 10.08 | no (end load) | 1612 | 12.93 ms | 19.53 ms | 72.67% | 182, 2 | 311 MB |
+| after 2 | with patch | 03:13:17 | 7.98, 5.20, 7.63 | 5.99 | yes | 1772 | 10.79 ms | 15.71 ms | 66.99% | 23, 1 | 295 MB |
+| before 3 | without patch | 03:13:53 | 5.99, 5.00, 7.47 | 4.73 | yes | 1685 | 12.18 ms | 18.85 ms | 72.78% | 111, 0 | 307 MB |
+| after 3 | with patch | 03:14:29 | 4.73, 4.79, 7.31 | 4.24 | yes | 1766 | 10.88 ms | 16.49 ms | 67.11% | 29, 1 | 296 MB |
+| before 4 | without patch | 03:15:05 | 4.24, 4.67, 7.18 | 3.83 | yes | 1642 | 12.35 ms | 19.22 ms | 71.97% | 154, 0 | 306 MB |
+| Median before (runs 1, 3, 4) | | | | | | 1677 | 12.18 ms | 18.85 ms | 72.17% | 119, 0 | |
+| Median after | | | | | | 1772 | 10.79 ms | 15.71 ms | 66.99% | 23, 1 | |
+| Gate | | | | | | | 1.0 ms | 2.0 ms | 30% | median 0, each at most 2, long 0 | |
+
+Before 2 does not count: the 1-minute load was 10.08 at its end. The driver ran before 4 in
+its place.
+
+| Gate (hidden nested KWin, 60 Hz) | Limit | After wlf.45 | Runs | Result |
+|---|---|---|---|---|
+| UI thread CPU per frame, `perf-cpu`, p50 | <= 1.0 ms | 10.79 ms | 10.41, 10.79, 10.88 | FAIL |
+| UI thread CPU per frame, `perf-cpu`, p99 | <= 2.0 ms | 15.71 ms | 15.50, 15.71, 16.49 | FAIL |
+| Missed frames, `perf-cpu` | median 0, every run <= 2, long 0 | 23 missed, 1 long | missed 20, 23, 29; long 0, 1, 1 | FAIL |
+| Process CPU, `perf-cpu` | <= 30% | 66.99% | 63.92, 66.99, 67.11 | FAIL |
+
+Profile of the patched binary: one more 30 s run under `perf record -e cpu-clock:u -F 499
+--call-graph dwarf,16384 --user-callchains` (03:15:42, load 3.83, end load 4.75): 1738
+frames, p50 11.06 ms, 69.07% process CPU (hidden nested KWin, 60 Hz), 11,036 user-space
+samples. 99.49% of them (10,980) are on the UI main thread. Phases by `split2.py` from
+wlf.28, with `into_scaled` added to the scale copy row. The ms column is the share times
+11.28 ms: the median after run's 11.34 ms of process CPU per frame times the 99.49%
+main-thread share.
+
+| Phase | Samples | Share | ms per frame (hidden nested KWin, 60 Hz) |
+|---|---|---|---|
+| memcpy (libc `__memcpy_avx_unaligned_erms`) | 4,563 | 41.57% | 4.69 |
+| GPU submit (`render_frame`, wgpu, NVIDIA driver) | 1,531 | 13.95% | 1.57 |
+| Other GPUI (element tree, styles, hashing, entities) | 1,222 | 11.13% | 1.26 |
+| Our chart paint (`tl_ui_chart`) | 911 | 8.30% | 0.94 |
+| Layout (taffy) | 813 | 7.41% | 0.84 |
+| Scene build (`BoundsTree::insert`, `Scene::insert_primitive`) | 772 | 7.03% | 0.79 |
+| malloc, free, other libc | 396 | 3.61% | 0.41 |
+| Text (shaping, glyphs, atlas) | 318 | 2.90% | 0.33 |
+| GPUI `Path::into_scaled` copy | 189 | 1.72% | 0.19 |
+| Rest | 134 | 1.22% | 0.14 |
+| Our other UI code (`tl_ui*`, `tl_model`) | 128 | 1.17% | 0.13 |
+| Total main-thread CPU | 10,977 | 100.00% | 11.28 |
+
+Compared with the wlf.28 profile (an older build in another session, so only a rough
+comparison): `Scene::insert_primitive::<Path>` fell from 3.28% to 0.22% of main-thread
+samples, scene build from 1.16 ms to 0.79 ms per frame, and the GPUI scale copy from
+0.45 ms to 0.19 ms. memcpy is still the largest phase at 4.69 ms per frame (4.93 ms in
+wlf.28). The stacks still do not unwind out of libc, so its callers are not measured. The
+patch removed the scene copies listed in Reading. The two copies left there are in
+`gpui-pre-wgpu`, which is not vendored: the 104-byte `PathRasterizationVertex` built per
+vertex in `render_frame` (`wgpu_renderer.rs:1842`) and `queue.write_buffer`. They are the
+likely source of most of the remaining memcpy (inferred from the code, not measured).
 
 ### History scrub gate (tasklens-8fx.41, 2026-11-05)
 
