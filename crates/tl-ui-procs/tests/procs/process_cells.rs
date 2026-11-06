@@ -1302,7 +1302,7 @@ mod values {
             ..ProcCounters::default()
         };
         let cell = |g: &GroupRow, id| shown(&f.group_cell(g, RowKind::Process, id));
-        assert_eq!(cell(&g, ColumnId::DiskReads), "1,500");
+        assert_eq!(cell(&g, ColumnId::DiskReads), "1\u{2009}500");
         assert_eq!(cell(&g, ColumnId::DiskWrites), "20");
         assert_eq!(cell(&g, ColumnId::DiskReadsDelta), "30");
         assert_eq!(cell(&g, ColumnId::DiskWritesDelta), "4");

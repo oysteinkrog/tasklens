@@ -974,8 +974,8 @@ mod delegate {
         assert_eq!(SHIPPED_PHASE, 4);
         assert_eq!(process_column(ColumnId::Version).phase, 2);
         assert!(offered.contains(&ColumnId::Version));
-        assert!(!offered.contains(&ColumnId::DiskReadBytes));
-        assert!(!d.columns().order.contains(&ColumnId::DiskReadBytes));
+        assert!(!offered.contains(&ColumnId::Cycles));
+        assert!(!d.columns().order.contains(&ColumnId::Cycles));
         assert!(offered.contains(&ColumnId::Cpu));
 
         // No GPU: no slot.
@@ -1030,6 +1030,16 @@ mod delegate {
             ColumnId::IoWriteRate,
             ColumnId::IoReadOps,
             ColumnId::IoWriteOps,
+            ColumnId::DiskReadBytes,
+            ColumnId::DiskWriteBytes,
+            ColumnId::DiskTotalBytes,
+            ColumnId::DiskReadDelta,
+            ColumnId::DiskWriteDelta,
+            ColumnId::DiskTotalDelta,
+            ColumnId::DiskReads,
+            ColumnId::DiskWrites,
+            ColumnId::DiskReadsDelta,
+            ColumnId::DiskWritesDelta,
         ];
         for id in listed {
             assert!(offered.contains(&id), "{id:?} not offered");
@@ -1050,16 +1060,6 @@ mod delegate {
     fn no_source_columns_not_offered(cx: &mut TestAppContext) {
         setup(cx);
         let parked = [
-            ColumnId::DiskReadBytes,
-            ColumnId::DiskWriteBytes,
-            ColumnId::DiskTotalBytes,
-            ColumnId::DiskReadDelta,
-            ColumnId::DiskWriteDelta,
-            ColumnId::DiskTotalDelta,
-            ColumnId::DiskReads,
-            ColumnId::DiskWrites,
-            ColumnId::DiskReadsDelta,
-            ColumnId::DiskWritesDelta,
             ColumnId::GpuMemShared,
             ColumnId::GpuEngine,
             ColumnId::GpuEncode,
