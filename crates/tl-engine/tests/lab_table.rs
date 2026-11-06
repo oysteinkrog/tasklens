@@ -170,37 +170,11 @@ fn unit_of(r: &ProcessRecord) -> Option<UnitRef> {
 
 fn extras(r: &ProcessRecord) -> ProcessExtras {
     ProcessExtras {
-        cpu_kernel_pct: 0.0,
-        cpu_user_pct: 0.0,
-        cpu_relative_pct: 0.0,
-        utime_ticks: 0,
-        stime_ticks: 0,
-        start_boot_ns: 0,
-        rss_peak_bytes: 0,
-        rss_shared_bytes: 0,
-        commit_bytes: 0,
-        vsize_bytes: 0,
-        vsize_peak_bytes: 0,
-        page_faults: 0,
-        page_faults_delta: 0,
-        major_faults: 0,
-        policy: SchedPolicy::Other,
-        rt_prio: 0,
-        affinity: CpuSet::empty(),
-        handles: None,
         exe_name: r.meta.comm.clone(),
         exe_path: format!("/usr/bin/{}", r.meta.comm).into(),
-        exe_deleted: false,
         unit: unit_of(r),
         state_letter: b'S',
-        frozen: false,
-        disk_read_bps: 0.0,
-        disk_write_raw_bps: 0.0,
-        flag_since_ns: 0,
-        pgrp: 0,
-        sid: 0,
-        last_cpu: 0,
-        wine: None,
+        ..ProcessExtras::default()
     }
 }
 
@@ -720,20 +694,16 @@ fn app_memory_from_cgroup_anon() {
     assert_eq!(view.groups[0].memory_bytes, GIB + GIB / 2);
 
     let stats = [AppCgroupSample {
-        group: app_key("firefox"),
         anon_bytes: GIB,
-        swap_bytes: 0,
-        io_read_bps: 0.0,
-        io_write_bps: 0.0,
-        rios: 0,
-        wios: 0,
         pids: 2,
-        frozen: false,
-        cgroup: CgroupRef {
-            rel_path: format!("{USER_MANAGER}/app.slice/app-firefox.scope").into(),
-            cgroup_id: 1,
-        },
-        validity: FieldValidity::all(Validity::Valid),
+        ..AppCgroupSample::empty(
+            app_key("firefox"),
+            CgroupRef {
+                rel_path: format!("{USER_MANAGER}/app.slice/app-firefox.scope").into(),
+                cgroup_id: 1,
+            },
+            FieldValidity::all(Validity::Valid),
+        )
     }];
     let view = build_with(&records, &stats, &q, &settings());
     assert_eq!(view.groups[0].memory_bytes, GIB);
@@ -757,20 +727,16 @@ fn app_row_frozen_from_cgroup_events() {
     assert!(!frozen_of(&view, "firefox"), "no cgroup sample, not frozen");
 
     let sample = |app: &str, id: u64, frozen: bool| AppCgroupSample {
-        group: app_key(app),
-        anon_bytes: 0,
-        swap_bytes: 0,
-        io_read_bps: 0.0,
-        io_write_bps: 0.0,
-        rios: 0,
-        wios: 0,
         pids: 1,
         frozen,
-        cgroup: CgroupRef {
-            rel_path: format!("{USER_MANAGER}/app.slice/app-{app}.scope").into(),
-            cgroup_id: id,
-        },
-        validity: FieldValidity::all(Validity::Valid),
+        ..AppCgroupSample::empty(
+            app_key(app),
+            CgroupRef {
+                rel_path: format!("{USER_MANAGER}/app.slice/app-{app}.scope").into(),
+                cgroup_id: id,
+            },
+            FieldValidity::all(Validity::Valid),
+        )
     };
     let stats = [sample("firefox", 1, true), sample("tool", 2, false)];
     let view = build_with(&records, &stats, &q, &settings());
