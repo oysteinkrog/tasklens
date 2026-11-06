@@ -1179,11 +1179,7 @@ mod tests {
     }
 
     fn drm(pdev: &str, pid: u32, vram_bytes: u64) -> DrmProcessVram {
-        DrmProcessVram {
-            pdev: Arc::from(pdev),
-            pid,
-            vram_bytes,
-        }
+        DrmProcessVram::new(Arc::from(pdev), pid, vram_bytes)
     }
 
     #[test]

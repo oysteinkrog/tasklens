@@ -3833,11 +3833,7 @@ fn gpu_rows_msg(
         s.processes = nvidia;
         s.drm_processes = drm.map(|rows| {
             rows.iter()
-                .map(|&(pid, vram_bytes)| DrmProcessVram {
-                    pdev: Arc::clone(&pdev),
-                    pid,
-                    vram_bytes,
-                })
+                .map(|&(pid, vram_bytes)| DrmProcessVram::new(Arc::clone(&pdev), pid, vram_bytes))
                 .collect()
         });
     }

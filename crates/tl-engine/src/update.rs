@@ -314,6 +314,16 @@ pub struct DrmProcessVram {
     pub vram_bytes: u64,
 }
 
+impl DrmProcessVram {
+    pub fn new(pdev: Arc<str>, pid: u32, vram_bytes: u64) -> Self {
+        Self {
+            pdev,
+            pid,
+            vram_bytes,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GpuInfoUpdate {
     pub devices: Vec<GpuStaticInfo>,
