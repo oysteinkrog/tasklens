@@ -5541,3 +5541,68 @@ fn sweep_io_counters_deltas_and_rates() {
     );
     assert_eq!((p.rchar_bps, p.wchar_bps), (0.0, 0.0));
 }
+
+sweep_clock!(io_pushed_clock);
+
+/// PROC-031: the `ProcessExtras.counters` that the sampler pushes, for Valid and Restricted io.
+#[test]
+fn sweep_io_counters_pushed_to_extras() {
+    let cache = tempfile::tempdir().expect("tempdir");
+    let (_tmp, root) = merged_root();
+    let write_io = |root: &SysRoot| {
+        fs::write(
+            root.proc_path("1/io"),
+            "rchar: 1000\nwchar: 2000\nsyscr: 10\nsyscw: 20\nread_bytes: 4096\nwrite_bytes: 8192\ncancelled_write_bytes: 0\n",
+        )
+        .expect("write io");
+    };
+    write_io(&root);
+    let mut s = sampler(root.clone(), cache.path()).with_clock(io_pushed_clock::now);
+    let out = sweep_n(&mut s, io_pushed_clock::set, 1);
+    let c = &out.extras[index_of(&out, 1)].counters;
+    assert!(c.io_read);
+    assert_eq!(
+        (
+            c.rchar,
+            c.wchar,
+            c.syscr,
+            c.syscw,
+            c.read_bytes,
+            c.write_bytes
+        ),
+        (1000, 2000, 10, 20, 4096, 8192)
+    );
+
+    if rustix::process::geteuid().is_root() {
+        eprintln!("restricted half skipped: running as root");
+        return;
+    }
+    let (_tmp, root) = merged_root();
+    write_io(&root);
+    fs::set_permissions(root.proc_path("1/io"), fs::Permissions::from_mode(0o000)).expect("chmod");
+    let mut s = sampler(root, cache.path()).with_clock(io_pushed_clock::now);
+    let out = sweep_n(&mut s, io_pushed_clock::set, 2);
+    let c = &out.extras[index_of(&out, 1)].counters;
+    assert!(!c.io_read);
+    assert_eq!(
+        (
+            c.rchar,
+            c.wchar,
+            c.syscr,
+            c.syscw,
+            c.read_bytes,
+            c.write_bytes
+        ),
+        (0, 0, 0, 0, 0, 0)
+    );
+    assert_eq!(
+        (
+            c.rchar_delta,
+            c.wchar_delta,
+            c.read_bytes_delta,
+            c.write_bytes_delta
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!((c.rchar_bps, c.wchar_bps), (0.0, 0.0));
+}
