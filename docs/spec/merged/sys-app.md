@@ -1248,6 +1248,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   heat_coloring = true
   heat_intensity_pct = 50        # 0..=100
   shadow_intensity_pct = 100     # 0..=100
+  color_charts_by_value = true   # value ramp on CPU, GPU, disk, memory and power charts (tasklens-j477q)
 
   [motion]
   animations = true              # tab, theme, toast motion; ANDed with system reduce-motion

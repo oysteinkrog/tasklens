@@ -354,7 +354,7 @@ macro_rules! setting_keys {
 
         impl SettingKey {
             /// Every key in table (a) order.
-            pub const ALL: [SettingKey; 94] = [$(SettingKey::$key,)*];
+            pub const ALL: [SettingKey; 95] = [$(SettingKey::$key,)*];
 
             /// The dotted name, for example `"motion.animations"`. `Fans` is `"fans"`.
             pub fn as_str(self) -> &'static str {
@@ -392,6 +392,7 @@ setting_keys! {
     AppearanceHeatColoring => "appearance.heat_coloring", Appearance, Bool;
     AppearanceHeatIntensityPct => "appearance.heat_intensity_pct", Appearance, Int;
     AppearanceShadowIntensityPct => "appearance.shadow_intensity_pct", Appearance, Int;
+    AppearanceColorChartsByValue => "appearance.color_charts_by_value", Appearance, Bool;
     MotionAnimations => "motion.animations", Motion, Bool;
     MotionSmoothGraphs => "motion.smooth_graphs", Motion, Bool;
     MotionSmoothScroll => "motion.smooth_scroll", Motion, Bool;
@@ -483,6 +484,7 @@ fn bool_mut(s: &mut Settings, key: SettingKey) -> Option<&mut bool> {
         K::ThemeFollowSystem => &mut s.theme.follow_system,
         K::AppearanceRoundedCorners => &mut s.appearance.rounded_corners,
         K::AppearanceHeatColoring => &mut s.appearance.heat_coloring,
+        K::AppearanceColorChartsByValue => &mut s.appearance.color_charts_by_value,
         K::MotionAnimations => &mut s.motion.animations,
         K::MotionSmoothGraphs => &mut s.motion.smooth_graphs,
         K::MotionSmoothScroll => &mut s.motion.smooth_scroll,

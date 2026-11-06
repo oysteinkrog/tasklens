@@ -916,6 +916,7 @@ x=0, bottom=0
 | Look | Value Color Coding | switch | `appearance.heat_coloring` | | P2 |
 | Look | Value Color Coding Intensity | slider | `appearance.heat_intensity_pct` | 0..=100 step 5 | P2 |
 | Look | Drop Shadow Intensity | slider | `appearance.shadow_intensity_pct` | 0..=100 step 5 | P2 |
+| Look | Color charts by value | switch | `appearance.color_charts_by_value` | on by default; CPU, GPU, disk active, memory in use and power draw charts fill with a calm-to-hot value ramp; off draws the flat device colours (tasklens-j477q) | P2 |
 | Window | Use system title bar | switch (on = `server`) | `appearance.decorations` | client, server; "Takes effect after restart" | P2 |
 
 ### UI-SHL-063 Settings page: Motion

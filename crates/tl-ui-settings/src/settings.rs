@@ -385,6 +385,10 @@ pub struct AppearanceSettings {
     pub heat_intensity_pct: u8,
     /// 0..=100.
     pub shadow_intensity_pct: u8,
+    /// One-series charts on a fixed scale (CPU, GPU, disk active, memory in use) and power
+    /// draw charts fill and draw with a value ramp from calm to hot (tasklens-j477q). `false`
+    /// draws them in their flat device colours.
+    pub color_charts_by_value: bool,
 }
 
 impl Default for AppearanceSettings {
@@ -397,6 +401,7 @@ impl Default for AppearanceSettings {
             heat_coloring: true,
             heat_intensity_pct: 50,
             shadow_intensity_pct: 100,
+            color_charts_by_value: true,
         }
     }
 }
@@ -2403,6 +2408,7 @@ mod tests {
         assert!(s.appearance.heat_coloring);
         assert_eq!(s.appearance.heat_intensity_pct, 50);
         assert_eq!(s.appearance.shadow_intensity_pct, 100);
+        assert!(s.appearance.color_charts_by_value);
 
         assert!(s.motion.animations);
         assert!(s.motion.smooth_graphs);
