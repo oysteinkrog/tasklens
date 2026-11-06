@@ -1305,9 +1305,9 @@ mod tests {
 
         let r = live_record(&state, a);
         assert_eq!(r.gpu_mem_bytes, 6 * GIB);
-        // DRM cards have no per-process utilization, but the memory is known.
+        // The rows have no engine values, so utilization is a valid 0.
         assert_eq!(r.gpu_util_pct, 0.0);
-        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
+        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
         assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
         assert_eq!(live_record(&state, b).gpu_mem_bytes, GIB);
         let (va, vb) = published_vram(&mut state, a, b);
@@ -1355,7 +1355,7 @@ mod tests {
             let r = live_record(&state, k);
             assert_eq!(r.gpu_mem_bytes, 0);
             assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
-            assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
+            assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
         }
 
         state.apply_drm_vram(&[drm(AMD, 100, GIB)], &amd_only);
@@ -1368,7 +1368,7 @@ mod tests {
         apply(&mut state, &[a, b, c], 2_000 * MS);
         let r = live_record(&state, c);
         assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
-        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
+        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
     }
 
     /// `gpu_vram_bytes` of keys `a` and `b` in the next published snapshot.
