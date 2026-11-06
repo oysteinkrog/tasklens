@@ -67,6 +67,10 @@ struct GpuValue {
     /// Encode and decode use and the busiest engine, from devices that support process
     /// utilization; `None` when no such device has a sample.
     nvml: Option<NvmlUse>,
+    /// Σ of the pid's DRM `shared_bytes`; `None` without a DRM row.
+    shared_bytes: Option<u64>,
+    /// DRM encode, decode and busiest engine, kept apart from `nvml` so the NVML rule stays as is.
+    drm: Option<NvmlUse>,
 }
 
 #[derive(Clone)]
@@ -346,8 +350,9 @@ impl ProcessState {
     /// Replaces the DRM rows (AMD and Intel) and applies them with the NVIDIA rows of the last
     /// `apply_gpu_processes`. Each row adds its memory to `gpu_mem_bytes` and to its card's
     /// column, with memory validity `Valid`; a live key without a row then gets a valid 0 memory.
-    /// Utilization and its validity come from the NVIDIA rows only, as DRM cards have no
-    /// per-process utilization. Returns the number of keys matched.
+    /// Shared memory, encode, decode and the busiest engine come from the DRM rows too, and
+    /// utilization is the busiest engine of the rows (PROC-033, leader decision 2026-11-06).
+    /// Returns the number of keys matched.
     pub fn apply_drm_vram(
         &mut self,
         rows: &[DrmProcessVram],
@@ -369,8 +374,8 @@ impl ProcessState {
                 Validity::Unsupported
             }
         };
-        let util_default = valid_if(any_supported);
         let mem_default = valid_if(any_supported || self.drm_sampled);
+        let util_default = valid_if(any_supported || self.drm_sampled);
 
         self.gpu.clear();
         self.gpu_by_dev.clear();
@@ -438,12 +443,44 @@ impl ProcessState {
                 .or_insert_with(|| GpuValue::none(util_default, mem_default));
             entry.mem_bytes = entry.mem_bytes.saturating_add(r.vram_bytes);
             entry.mem_validity = Validity::Valid;
+            entry.util_validity = Validity::Valid;
             // DRM cards have no UUID (R-166).
             let slot = self
                 .gpu_slots
                 .iter()
                 .position(|(u, pci)| *u == [0; 16] && *pci == r.pdev);
             add_vram(entry, slot, r.vram_bytes);
+            entry.shared_bytes = Some(
+                entry
+                    .shared_bytes
+                    .unwrap_or(0)
+                    .saturating_add(r.shared_bytes),
+            );
+            // PROC-033: utilization is the busiest engine; never divided among processes.
+            let busiest = r.engines.iter().map(|(_, p)| *p).fold(0.0_f32, f32::max);
+            entry.util_pct = entry.util_pct.max(busiest);
+            // No engine in the row (the first scan): no encode, decode or engine value.
+            if r.engines.is_empty() && r.encode_pct.is_none() && r.decode_pct.is_none() {
+                continue;
+            }
+            let drm = entry.drm.get_or_insert(NvmlUse {
+                encode: 0.0,
+                decode: 0.0,
+                engine: None,
+            });
+            drm.encode = drm.encode.max(r.encode_pct.unwrap_or(0.0));
+            drm.decode = drm.decode.max(r.decode_pct.unwrap_or(0.0));
+            if let Some(gpu) = slot.and_then(|i| u8::try_from(i).ok()) {
+                for (name, pct) in &r.engines {
+                    if drm.engine.as_ref().is_none_or(|e| *pct > e.pct) {
+                        drm.engine = Some(GpuEngineUse {
+                            gpu,
+                            engine: GpuEngineKind::Drm(Arc::clone(name)),
+                            pct: *pct,
+                        });
+                    }
+                }
+            }
         }
 
         let none = GpuValue::none(util_default, mem_default);
@@ -630,11 +667,31 @@ impl ProcessState {
                 let mut p2 = self.extras_p2.get(&r.key).cloned().unwrap_or_default();
                 if let Some(g) = self.gpu.get(&r.key) {
                     p2.gpu_vram_bytes.clone_from(&g.vram);
-                    if let Some(n) = &g.nvml {
-                        p2.gpu_encode_pct = Some(n.encode);
-                        p2.gpu_decode_pct = Some(n.decode);
-                        p2.gpu_engine.clone_from(&n.engine);
+                    p2.gpu_mem_shared_bytes = g.shared_bytes;
+                    let enc = [g.nvml.as_ref(), g.drm.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .map(|n| n.encode)
+                        .reduce(f32::max);
+                    let dec = [g.nvml.as_ref(), g.drm.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .map(|n| n.decode)
+                        .reduce(f32::max);
+                    p2.gpu_encode_pct = enc;
+                    p2.gpu_decode_pct = dec;
+                    // The NVML engine is first, so a tie keeps it.
+                    let mut best: Option<&GpuEngineUse> = None;
+                    for e in [g.nvml.as_ref(), g.drm.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|n| n.engine.as_ref())
+                    {
+                        if best.is_none_or(|b| e.pct > b.pct) {
+                            best = Some(e);
+                        }
                     }
+                    p2.gpu_engine = best.cloned();
                 }
                 p2
             })
@@ -708,6 +765,8 @@ impl GpuValue {
             util_validity,
             mem_validity,
             nvml: None,
+            shared_bytes: None,
+            drm: None,
         }
     }
 }

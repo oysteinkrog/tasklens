@@ -3951,8 +3951,8 @@ fn drm_vram_valid_on_amd_only() {
     assert_eq!(busy.validity.get(ProcessField::GpuMem), Validity::Valid);
     assert_eq!(
         busy.validity.get(ProcessField::GpuUtil),
-        Validity::Unsupported,
-        "DRM gives no per-process utilization"
+        Validity::Valid,
+        "DRM rows give the utilization (tasklens-pdu.84)"
     );
     assert_eq!(vram_of(&snap, 2), [4096], "the AMD card is GPU 0");
     let idle = record_of(&snap, proc_key(1));
@@ -3962,10 +3962,7 @@ fn drm_vram_valid_on_amd_only() {
         Validity::Valid,
         "a process without a DRM row uses no VRAM"
     );
-    assert_eq!(
-        idle.validity.get(ProcessField::GpuUtil),
-        Validity::Unsupported
-    );
+    assert_eq!(idle.validity.get(ProcessField::GpuUtil), Validity::Valid);
     assert!(vram_of(&snap, 1).iter().all(|&b| b == 0));
     rig.passed();
 }
@@ -4110,6 +4107,163 @@ fn nvidia_encode_decode_and_engine_fields() {
     assert_eq!(unsupported.gpu_encode_pct, None);
     assert_eq!(unsupported.gpu_decode_pct, None);
     assert_eq!(unsupported.gpu_engine, None);
+    rig.passed();
+}
+
+/// A DRM row with these values for `pid` on `card`.
+fn drm_full_row(
+    card: &DeviceIdentity,
+    pid: u32,
+    shared: u64,
+    engines: &[(&str, f32)],
+    encode: Option<f32>,
+    decode: Option<f32>,
+) -> DrmProcessVram {
+    let DeviceIdentity::Gpu { pci_bus_id, .. } = card else {
+        unreachable!("a GPU identity")
+    };
+    let mut row = DrmProcessVram::new(Arc::clone(pci_bus_id), pid, 0);
+    row.shared_bytes = shared;
+    row.engines = engines.iter().map(|&(n, p)| (Arc::from(n), p)).collect();
+    row.encode_pct = encode;
+    row.decode_pct = decode;
+    row
+}
+
+/// tasklens-pdu.84: a DRM row gives shared bytes, encode, decode, the engine label and the
+/// GPU utilization; rows of one pid add their shared bytes.
+#[test]
+fn drm_rows_fill_the_phase_two_gpu_columns() {
+    use tl_model::process::{GpuEngineKind, GpuEngineUse};
+    let mut rig = Rig::new();
+    let amd = gpu_id([0; 16], "0000:03:00.0");
+    rig.run(vec![
+        drm_list(&[&amd]),
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![gpu_static(&amd, false)],
+        })),
+        sweep_without_pss(now_boot_ns(), &[1, 2]),
+        gpu_sample(&[(&amd, 10.0)]),
+    ])
+    .expect("no invariant violation");
+    let mut msg = gpu_sample(&[(&amd, 10.0)]);
+    if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut msg {
+        s.drm_processes = Some(vec![
+            drm_full_row(
+                &amd,
+                1,
+                1000,
+                &[("gfx", 12.0), ("video", 40.0)],
+                Some(40.0),
+                None,
+            ),
+            drm_full_row(&amd, 1, 500, &[("gfx", 30.0)], None, Some(7.0)),
+            drm_full_row(&amd, 2, 0, &[], None, None),
+        ]);
+    }
+    rig.run(vec![msg]).expect("no invariant violation");
+    let snap = rig.latest();
+    let p2 = |pid| {
+        let i = snap
+            .processes
+            .records
+            .iter()
+            .position(|r| r.key == proc_key(pid))
+            .expect("the record is published");
+        snap.processes.extras_p2[i].clone()
+    };
+    let one = p2(1);
+    assert_eq!(one.gpu_mem_shared_bytes, Some(1500));
+    assert_eq!(one.gpu_encode_pct, Some(40.0));
+    assert_eq!(one.gpu_decode_pct, Some(7.0));
+    assert_eq!(
+        one.gpu_engine,
+        Some(GpuEngineUse {
+            gpu: 0,
+            engine: GpuEngineKind::Drm(Arc::from("video")),
+            pct: 40.0
+        })
+    );
+    let r = record_of(&snap, proc_key(1));
+    assert!((r.gpu_util_pct - 40.0).abs() < f32::EPSILON);
+    // A row without engines (first scan): shared bytes only.
+    let two = p2(2);
+    assert_eq!(two.gpu_mem_shared_bytes, Some(0));
+    assert_eq!(two.gpu_encode_pct, None);
+    assert_eq!(two.gpu_engine, None);
+    rig.passed();
+}
+
+/// tasklens-pdu.84: NVIDIA and DRM rows for one pid give the busier engine and the larger
+/// encode.
+#[test]
+fn nvidia_and_drm_rows_give_the_busier_engine() {
+    use tl_model::process::{GpuEngineKind, GpuEngineUse};
+    let mut rig = Rig::new();
+    let nvidia = gpu_id([9; 16], "00000000:01:00.0");
+    let amd = gpu_id([0; 16], "0000:03:00.0");
+    rig.run(vec![
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![gpu_static(&nvidia, true)],
+        })),
+        drm_list(&[&amd]),
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![gpu_static(&amd, false)],
+        })),
+        sweep_without_pss(now_boot_ns(), &[1, 2]),
+        gpu_sample(&[(&nvidia, 10.0)]),
+        gpu_sample(&[(&amd, 10.0)]),
+    ])
+    .expect("no invariant violation");
+    let nv = |pid, sm, enc| GpuProcessSample {
+        uuid: [9; 16],
+        pid,
+        sm_pct: Reading::Ok(sm),
+        mem_pct: Reading::Ok(0),
+        enc_pct: Reading::Ok(enc),
+        dec_pct: Reading::Ok(0),
+        mem_used: Reading::Ok(1),
+    };
+    let mut a = gpu_sample(&[(&nvidia, 10.0)]);
+    if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut a {
+        s.processes = Some(vec![nv(1, 20, 10), nv(2, 90, 0)]);
+    }
+    let mut b = gpu_sample(&[(&amd, 10.0)]);
+    if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut b {
+        s.drm_processes = Some(vec![
+            drm_full_row(&amd, 1, 0, &[("gfx", 50.0)], Some(25.0), None),
+            drm_full_row(&amd, 2, 0, &[("gfx", 30.0)], None, None),
+        ]);
+    }
+    rig.run(vec![a, b]).expect("no invariant violation");
+    let snap = rig.latest();
+    let p2 = |pid| {
+        let i = snap
+            .processes
+            .records
+            .iter()
+            .position(|r| r.key == proc_key(pid))
+            .expect("the record is published");
+        snap.processes.extras_p2[i].clone()
+    };
+    let one = p2(1);
+    assert_eq!(
+        one.gpu_engine,
+        Some(GpuEngineUse {
+            gpu: 1,
+            engine: GpuEngineKind::Drm(Arc::from("gfx")),
+            pct: 50.0
+        })
+    );
+    assert_eq!(one.gpu_encode_pct, Some(25.0));
+    assert_eq!(
+        p2(2).gpu_engine,
+        Some(GpuEngineUse {
+            gpu: 0,
+            engine: GpuEngineKind::Compute3d,
+            pct: 90.0
+        })
+    );
     rig.passed();
 }
 
