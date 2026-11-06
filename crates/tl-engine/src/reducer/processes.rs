@@ -24,8 +24,8 @@ use tl_model::gpu_proto::{GpuProcessSample, Reading};
 use tl_model::history::RecordSink;
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{
-    AppCgroupSample, Coverage, GpuVram, LowMemoryInfo, ProcFlags, ProcessExtras, ProcessExtrasP2,
-    ProcessRecord, linger_ms,
+    AppCgroupSample, Coverage, GpuEngineKind, GpuEngineUse, GpuVram, LowMemoryInfo, ProcFlags,
+    ProcessExtras, ProcessExtrasP2, ProcessRecord, linger_ms,
 };
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
 use tl_model::time::TimeNs;
@@ -64,6 +64,16 @@ struct GpuValue {
     util_validity: Validity,
     /// Of `mem_bytes` and `vram`.
     mem_validity: Validity,
+    /// Encode and decode use and the busiest engine, from devices that support process
+    /// utilization; `None` when no such device has a sample.
+    nvml: Option<NvmlUse>,
+}
+
+#[derive(Clone)]
+struct NvmlUse {
+    encode: f32,
+    decode: f32,
+    engine: Option<GpuEngineUse>,
 }
 
 /// Per-process PSS values of the last `apply_pss` (or of a sweep that read them).
@@ -393,6 +403,29 @@ impl ProcessState {
             if supported {
                 entry.util_validity = Validity::Valid;
                 entry.mem_validity = Validity::Valid;
+                let nvml = entry.nvml.get_or_insert(NvmlUse {
+                    encode: 0.0,
+                    decode: 0.0,
+                    engine: None,
+                });
+                let enc = s.enc_pct.ok().unwrap_or(0) as f32;
+                let dec = s.dec_pct.ok().unwrap_or(0) as f32;
+                nvml.encode = nvml.encode.max(enc);
+                nvml.decode = nvml.decode.max(dec);
+                if let Some(gpu) = slot.and_then(|i| u8::try_from(i).ok()) {
+                    let sm = s.sm_pct.ok().unwrap_or(0) as f32;
+                    // Strictly greater wins, so a tie keeps 3D/Compute, then Encode, then Decode,
+                    // and the earlier device.
+                    for (engine, pct) in [
+                        (GpuEngineKind::Compute3d, sm),
+                        (GpuEngineKind::Encode, enc),
+                        (GpuEngineKind::Decode, dec),
+                    ] {
+                        if nvml.engine.as_ref().is_none_or(|e| pct > e.pct) {
+                            nvml.engine = Some(GpuEngineUse { gpu, engine, pct });
+                        }
+                    }
+                }
             }
         }
         for r in &self.drm_rows {
@@ -597,6 +630,11 @@ impl ProcessState {
                 let mut p2 = self.extras_p2.get(&r.key).cloned().unwrap_or_default();
                 if let Some(g) = self.gpu.get(&r.key) {
                     p2.gpu_vram_bytes.clone_from(&g.vram);
+                    if let Some(n) = &g.nvml {
+                        p2.gpu_encode_pct = Some(n.encode);
+                        p2.gpu_decode_pct = Some(n.decode);
+                        p2.gpu_engine.clone_from(&n.engine);
+                    }
                 }
                 p2
             })
@@ -669,6 +707,7 @@ impl GpuValue {
             vram: GpuVram::new(),
             util_validity,
             mem_validity,
+            nvml: None,
         }
     }
 }

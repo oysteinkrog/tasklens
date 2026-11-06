@@ -544,10 +544,39 @@ pub struct ProcessExtrasP2 {
     /// from the per-process GPU samples. Empty for a process with no GPU memory; shorter than
     /// the GPU count when the last GPUs hold none of it.
     pub gpu_vram_bytes: GpuVram,
+    /// Shared (GTT) GPU memory: AMD `drm-memory-gtt`, Intel `drm-resident-system`. `None` for
+    /// NVIDIA, which has no per-process value. The DRM rows fill it.
+    pub gpu_mem_shared_bytes: Option<u64>,
+    /// NVML encoder utilization, the max over the process's devices. `None` when no device that
+    /// supports process utilization has a sample for it (PROC-033 `n/a`).
+    pub gpu_encode_pct: Option<f32>,
+    /// NVML decoder utilization, as `gpu_encode_pct`.
+    pub gpu_decode_pct: Option<f32>,
+    /// The busiest engine over all devices, as `gpu_encode_pct`.
+    pub gpu_engine: Option<GpuEngineUse>,
     /// I/O priority of the main thread as set, read by the engine with `ioprio_get` (R-144).
     /// `IoPriority::None` is a thread with no class set, which follows nice. `None` when the read
     /// failed or the value was not read.
     pub io_priority: Option<IoPriority>,
+}
+
+/// The busiest GPU engine of a process (PROC-033 GPU engine column).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GpuEngineUse {
+    /// The GPU N column slot (`gpu_0` is 0).
+    pub gpu: u8,
+    pub engine: GpuEngineKind,
+    pub pct: f32,
+}
+
+/// Engine of a `GpuEngineUse`. On a tie the order is `Compute3d`, `Encode`, `Decode`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GpuEngineKind {
+    Compute3d,
+    Encode,
+    Decode,
+    /// A DRM engine by name.
+    Drm(Arc<str>),
 }
 
 /// Owning package of an executable (R-163 item 1, PROC-027), from the E05-034 index.
@@ -789,6 +818,10 @@ mod tests {
         assert!(p2.ctx_switches_delta.is_none());
         assert!(p2.package.is_none());
         assert!(p2.package_status.is_none());
+        assert!(p2.gpu_mem_shared_bytes.is_none());
+        assert!(p2.gpu_encode_pct.is_none());
+        assert!(p2.gpu_decode_pct.is_none());
+        assert!(p2.gpu_engine.is_none());
     }
 
     #[test]

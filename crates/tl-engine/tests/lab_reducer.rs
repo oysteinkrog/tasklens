@@ -4028,6 +4028,82 @@ fn drm_vram_valid_with_nvidia_and_amd() {
     rig.passed();
 }
 
+/// tasklens-pdu.82: encode and decode are the max over devices, the engine is the busiest one
+/// with its GPU slot, and a process without a sample on a supporting device gets `None`.
+#[test]
+fn nvidia_encode_decode_and_engine_fields() {
+    use tl_model::process::{GpuEngineKind, GpuEngineUse};
+    let mut rig = Rig::new();
+    let a = gpu_id([8; 16], "00000000:01:00.0");
+    let b = gpu_id([9; 16], "00000000:02:00.0");
+    let row = |uuid, pid, sm, enc, dec| GpuProcessSample {
+        uuid,
+        pid,
+        sm_pct: Reading::Ok(sm),
+        mem_pct: Reading::Ok(0),
+        enc_pct: Reading::Ok(enc),
+        dec_pct: Reading::Ok(dec),
+        mem_used: Reading::Ok(1),
+    };
+    rig.run(vec![
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![gpu_static(&a, true), gpu_static(&b, true)],
+        })),
+        sweep_without_pss(now_boot_ns(), &[1, 2, 3]),
+        gpu_sample(&[(&a, 10.0), (&b, 10.0)]),
+    ])
+    .expect("no invariant violation");
+    rig.run(vec![
+        gpu_rows_msg(
+            &a,
+            Some(vec![
+                row([8; 16], 1, 10, 30, 5),
+                row([8; 16], 2, 20, 20, 20),
+            ]),
+            None,
+        ),
+        gpu_rows_msg(&b, Some(vec![row([9; 16], 1, 10, 20, 60)]), None),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let p2 = |pid| {
+        let i = snap
+            .processes
+            .records
+            .iter()
+            .position(|r| r.key == proc_key(pid))
+            .expect("the record is published");
+        snap.processes.extras_p2[i].clone()
+    };
+    let one = p2(1);
+    assert_eq!(one.gpu_encode_pct, Some(30.0));
+    assert_eq!(one.gpu_decode_pct, Some(60.0));
+    assert_eq!(
+        one.gpu_engine,
+        Some(GpuEngineUse {
+            gpu: 1,
+            engine: GpuEngineKind::Decode,
+            pct: 60.0
+        })
+    );
+    assert_eq!(one.gpu_mem_shared_bytes, None);
+    // A three-way tie goes to 3D/Compute.
+    assert_eq!(
+        p2(2).gpu_engine,
+        Some(GpuEngineUse {
+            gpu: 0,
+            engine: GpuEngineKind::Compute3d,
+            pct: 20.0
+        })
+    );
+    // No sample: all None.
+    let none = p2(3);
+    assert_eq!(none.gpu_encode_pct, None);
+    assert_eq!(none.gpu_decode_pct, None);
+    assert_eq!(none.gpu_engine, None);
+    rig.passed();
+}
+
 #[test]
 fn nvidia_and_amd_gpus_coexist() {
     let mut rig = Rig::new();
