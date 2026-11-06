@@ -264,56 +264,28 @@ mod tests {
 
     fn extras() -> ProcessExtras {
         ProcessExtras {
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
-            utime_ticks: 0,
-            stime_ticks: 0,
-            start_boot_ns: 0,
-            rss_peak_bytes: 0,
-            rss_shared_bytes: 0,
-            commit_bytes: 0,
-            vsize_bytes: 0,
-            vsize_peak_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            policy: SchedPolicy::Other,
-            rt_prio: 0,
-            affinity: CpuSet::empty(),
-            handles: None,
             exe_name: "firefox".into(),
             exe_path: "/usr/bin/firefox".into(),
-            exe_deleted: false,
-            unit: None,
             state_letter: b'S',
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
-            flag_since_ns: 0,
-            pgrp: 0,
-            sid: 0,
-            last_cpu: 0,
-            wine: None,
+            ..ProcessExtras::default()
         }
     }
 
     fn sample(anon: u64) -> AppCgroupSample {
         AppCgroupSample {
-            group: app_key(),
             anon_bytes: anon,
             swap_bytes: 4096,
             io_read_bps: 10.0,
             io_write_bps: 20.0,
-            rios: 0,
-            wios: 0,
             pids: 7,
-            frozen: false,
-            cgroup: CgroupRef {
-                rel_path: "user.slice/app.slice/app-firefox.scope".into(),
-                cgroup_id: 1,
-            },
-            validity: FieldValidity::all(Validity::Valid),
+            ..AppCgroupSample::empty(
+                app_key(),
+                CgroupRef {
+                    rel_path: "user.slice/app.slice/app-firefox.scope".into(),
+                    cgroup_id: 1,
+                },
+                FieldValidity::all(Validity::Valid),
+            )
         }
     }
 

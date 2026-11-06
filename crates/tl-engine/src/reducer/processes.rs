@@ -804,37 +804,11 @@ mod tests {
     /// `start_boot_ns` carries the key's `start_ticks` so tests can check index alignment.
     fn extras(key: ProcessKey) -> ProcessExtras {
         ProcessExtras {
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
-            utime_ticks: 0,
-            stime_ticks: 0,
             start_boot_ns: key.start_ticks,
-            rss_peak_bytes: 0,
-            rss_shared_bytes: 0,
-            commit_bytes: 0,
-            vsize_bytes: 0,
-            vsize_peak_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            policy: SchedPolicy::Other,
-            rt_prio: 0,
-            affinity: CpuSet::empty(),
-            handles: None,
             exe_name: "x".into(),
             exe_path: "/usr/bin/x".into(),
-            exe_deleted: false,
-            unit: None,
             state_letter: b'S',
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
-            flag_since_ns: 0,
-            pgrp: 0,
-            sid: 0,
-            last_cpu: 0,
-            wine: None,
+            ..ProcessExtras::default()
         }
     }
 
@@ -1038,20 +1012,15 @@ mod tests {
             ..ProcessExtrasP2::default()
         };
         let app = |g: u64| AppCgroupSample {
-            group: GroupKey(g),
-            anon_bytes: 0,
-            swap_bytes: 0,
-            io_read_bps: 0.0,
-            io_write_bps: 0.0,
-            rios: 0,
-            wios: 0,
             pids: 1,
-            frozen: false,
-            cgroup: CgroupRef {
-                rel_path: "app.slice".into(),
-                cgroup_id: g,
-            },
-            validity: FieldValidity::all(Validity::Valid),
+            ..AppCgroupSample::empty(
+                GroupKey(g),
+                CgroupRef {
+                    rel_path: "app.slice".into(),
+                    cgroup_id: g,
+                },
+                FieldValidity::all(Validity::Valid),
+            )
         };
         s.app_stats = vec![app(9), app(3), app(5)];
         s.low_memory = Some(Arc::new(LowMemoryInfo {
