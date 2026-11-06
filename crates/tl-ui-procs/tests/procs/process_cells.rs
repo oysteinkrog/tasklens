@@ -780,6 +780,52 @@ mod values {
     ];
 
     #[test]
+    fn io_priority_column_words_glyph_group_and_picker() {
+        use tl_model::actions::IoPriority;
+        use tl_ui_procs::pages::processes::cells::PROCESS_COLUMNS;
+        use tl_ui_procs::pages::processes::delegate::SHIPPED_PHASE;
+
+        let col = PROCESS_COLUMNS
+            .iter()
+            .find(|c| c.id == ColumnId::IoPriority)
+            .unwrap();
+        assert_eq!(col.phase, 2);
+        assert!(col.phase <= SHIPPED_PHASE);
+
+        let cases = [
+            (
+                Some(IoPriority::BestEffort(4)),
+                "processes-io-priority-best-effort 4",
+            ),
+            (Some(IoPriority::Idle), "processes-io-priority-idle"),
+            (
+                Some(IoPriority::Realtime(2)),
+                "processes-io-priority-realtime 2",
+            ),
+            (Some(IoPriority::None), "processes-io-priority-none"),
+        ];
+        for (prio, want) in cases {
+            let f = p2_fixture(ProcessExtrasP2 {
+                io_priority: prio,
+                ..ProcessExtrasP2::default()
+            });
+            assert_eq!(f.text(ColumnId::IoPriority), want);
+        }
+
+        // A value that was not read shows the Unsupported glyph.
+        let f = p2_fixture(ProcessExtrasP2::default());
+        let out = f.record_cell(&table_row(false, false, 0), ColumnId::IoPriority);
+        assert_eq!(out.validity, Validity::Unsupported);
+        assert!(out.text.is_empty() && out.arc.is_none());
+
+        // App and unit rows stay blank.
+        let g = group(GroupRowKind::App);
+        let out = f.group_cell(&g, RowKind::Process, ColumnId::IoPriority);
+        assert_eq!(out.validity, Validity::Valid);
+        assert!(out.text.is_empty() && out.arc.is_none());
+    }
+
+    #[test]
     fn phase_2_columns_format_or_glyph() {
         let a = |t: &str| Some(Arc::<str>::from(t));
         let mut f = p2_fixture(ProcessExtrasP2 {

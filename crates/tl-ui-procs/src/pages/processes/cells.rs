@@ -9,9 +9,10 @@ use std::fmt::Write;
 use std::hash::BuildHasher;
 use std::sync::{Arc, OnceLock};
 
+use fluent_bundle::FluentValue;
 use gpui_kit::{App, Hsla, SharedString};
 use rustc_hash::{FxBuildHasher, FxHashMap};
-use tl_model::actions::SchedPolicy;
+use tl_model::actions::{IoPriority, SchedPolicy};
 use tl_model::ids::{ColumnId, GroupKey, NodeId, PseudoKind};
 use tl_model::process::{
     GroupKind, GroupRow, GroupRowKind, PackageStatus, ProcFlags, ProcState, ProcessExtras,
@@ -25,7 +26,7 @@ use tl_model::units::{self, LocalDateTime, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
 use tl_ui_settings::settings::{NetworkUnit, Settings};
 
-use tl_ui_base::i18n::{tr, tr_en};
+use tl_ui_base::i18n::{tr, tr_args, tr_en};
 use tl_ui_base::template::Template;
 use tl_ui_base::theme::TlTheme;
 use tl_ui_kit::components::motion::{M_SLOW, ease_out_cubic};
@@ -405,7 +406,7 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::State, "processes-column-state", Group::Linux, Kind::Text, Heat::None, 1),
     col(Id::Nice, "processes-column-nice", Group::Linux, Kind::IntegerId, Heat::None, 1),
     col(Id::SchedPolicy, "processes-column-sched-policy", Group::Linux, Kind::Text, Heat::None, 2),
-    col(Id::IoPriority, "processes-column-io-priority", Group::Linux, Kind::Text, Heat::None, NO_SOURCE),
+    col(Id::IoPriority, "processes-column-io-priority", Group::Linux, Kind::Text, Heat::None, 2),
     col(Id::Unit, "processes-column-unit", Group::Linux, Kind::Text, Heat::None, 1),
     col(Id::Cgroup, "processes-column-cgroup", Group::Linux, Kind::Text, Heat::None, 2),
     col(Id::AppId, "processes-column-app-id", Group::Linux, Kind::Text, Heat::None, 2),
@@ -445,6 +446,12 @@ pub struct CellWords {
     pub priority_low: Arc<str>,
     pub priority_batch: Arc<str>,
     pub affinity_all: Arc<str>,
+    /// I/O priority words (PROC-036): "none (from nice)" and "idle".
+    pub io_priority_none: Arc<str>,
+    pub io_priority_idle: Arc<str>,
+    /// "best-effort N" and "realtime N", indexed by level 0 to 7.
+    pub io_priority_best_effort: [Arc<str>; 8],
+    pub io_priority_realtime: [Arc<str>; 8],
     /// Power usage classes (PROC-034), lowest first.
     pub power: [Arc<str>; 5],
     /// Package status words (PROC-027), in `PackageStatus` declaration order.
@@ -462,11 +469,25 @@ pub struct CellWords {
 impl CellWords {
     /// Every word through `tr`.
     pub fn new(cx: &App) -> Self {
-        Self::from_fn(|key| Arc::from(tr(cx, key).as_ref()))
+        Self::from_fns(
+            |key| Arc::from(tr(cx, key).as_ref()),
+            |key, level| {
+                let level = FluentValue::from(i64::from(level));
+                Arc::from(tr_args(cx, key, &[("level", level)]).as_ref())
+            },
+        )
     }
 
-    /// Every word from `text(fluent_key)`.
-    pub fn from_fn(mut text: impl FnMut(&'static str) -> Arc<str>) -> Self {
+    /// Every word from `text(fluent_key)`. A word with a level is the key and the level.
+    pub fn from_fn(text: impl FnMut(&'static str) -> Arc<str>) -> Self {
+        Self::from_fns(text, |key, level| Arc::from(format!("{key} {level}")))
+    }
+
+    /// Every word from `text(fluent_key)`, and the numbered ones from `leveled(fluent_key, level)`.
+    pub fn from_fns(
+        mut text: impl FnMut(&'static str) -> Arc<str>,
+        mut leveled: impl FnMut(&'static str, u8) -> Arc<str>,
+    ) -> Self {
         Self {
             type_app: text("processes-type-app"),
             type_unit: text("processes-type-unit"),
@@ -493,6 +514,14 @@ impl CellWords {
             priority_low: text("processes-priority-low"),
             priority_batch: text("processes-priority-batch"),
             affinity_all: text("processes-affinity-all"),
+            io_priority_none: text("processes-io-priority-none"),
+            io_priority_idle: text("processes-io-priority-idle"),
+            io_priority_best_effort: std::array::from_fn(|n| {
+                leveled("processes-io-priority-best-effort", n as u8)
+            }),
+            io_priority_realtime: std::array::from_fn(|n| {
+                leveled("processes-io-priority-realtime", n as u8)
+            }),
             power: [
                 text("processes-power-very-low"),
                 text("processes-power-low"),
@@ -680,6 +709,7 @@ enum Value<'a> {
     Architecture(u8, u16),
     /// Estimated watts, shown as a class.
     Power(f32),
+    IoPriority(IoPriority),
 }
 
 /// Fills `out` for one cell. Sets `bits` and `validity` always; writes `text` only when
@@ -833,6 +863,15 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
             Validity::Valid,
         ),
         Value::Power(w) => (u64::from(w.to_bits()), Validity::Valid),
+        Value::IoPriority(p) => (
+            match p {
+                IoPriority::None => 0,
+                IoPriority::Idle => 1,
+                IoPriority::BestEffort(n) => 2 << 8 | u64::from(*n),
+                IoPriority::Realtime(n) => 3 << 8 | u64::from(*n),
+            },
+            Validity::Valid,
+        ),
     };
     out.bits = bits;
     out.validity = validity;
@@ -889,6 +928,16 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
         Value::Packager(a) => s.push_str(a.split(" <").next().unwrap_or(a).trim_end()),
         Value::Architecture(class, machine) => write_architecture(s, class, machine),
         Value::Power(w) => s.push_str(&ctx.words.power[power_class(w)]),
+        Value::IoPriority(p) => {
+            let w = ctx.words;
+            let level = |n: u8| usize::from(n).min(7);
+            s.push_str(match p {
+                IoPriority::None => &w.io_priority_none,
+                IoPriority::Idle => &w.io_priority_idle,
+                IoPriority::BestEffort(n) => &w.io_priority_best_effort[level(n)],
+                IoPriority::Realtime(n) => &w.io_priority_realtime[level(n)],
+            });
+        }
     }
 }
 
@@ -1182,6 +1231,7 @@ fn record_value<'a>(
         C::SecurityLabel => p2(&|x| x.security_label.as_ref().map(Value::Arc)),
         C::Sandbox => p2(&|x| x.sandbox.as_ref().map(Value::Arc)),
         C::SchedPolicy => p2(&|x| x.sched_policy_text.as_ref().map(Value::Arc)),
+        C::IoPriority => p2(&|x| x.io_priority.map(Value::IoPriority)),
         C::OomScore => p2(&|x| x.oom_score.map(|n| Value::Id(n.into()))),
         C::OomScoreAdj => p2(&|x| x.oom_score_adj.map(|n| Value::Id(n.into()))),
         C::Tty => p2(&|x| x.tty.as_ref().map(Value::Arc)),
@@ -1312,6 +1362,8 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
             .map_or(Value::Blank, |x| {
                 Value::Time(start_unix_s(ctx, x.start_boot_ns))
             }),
+        // PROC-036 lists no app or unit value.
+        C::IoPriority => Value::Blank,
         C::Cpu => Value::Percent(g.cpu_pct, v(F::Cpu)),
         C::Memory => Value::Bytes(g.memory_bytes, v(F::RssAnon)),
         C::WsTotal => Value::Bytes(g.rss_bytes, v(F::Rss)),
