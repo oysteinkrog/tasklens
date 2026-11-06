@@ -241,7 +241,6 @@ mod values {
 
     use gpui_kit::TestAppContext;
     use proptest::prelude::*;
-    use tl_model::actions::SchedPolicy;
     use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey};
     use tl_model::process::{
         GroupKind, GroupRow, GroupRowKind, PackageInfo, PackageStatus, ProcFlags, ProcState,
@@ -327,83 +326,37 @@ mod values {
             cpu_relative_pct: 104.6,
             utime_ticks: 4_000,
             stime_ticks: 340_400,
-            start_boot_ns: 0,
-            rss_peak_bytes: 0,
-            rss_shared_bytes: 0,
-            commit_bytes: 0,
-            vsize_bytes: 0,
-            vsize_peak_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            policy: SchedPolicy::Other,
-            rt_prio: 0,
             affinity,
             handles: Some(1_234),
             exe_name: Arc::from("firefox"),
             exe_path: Arc::from("/usr/lib/firefox/firefox"),
-            exe_deleted: false,
-            unit: None,
             state_letter: b'S',
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
-            flag_since_ns: 0,
-            pgrp: 0,
-            sid: 0,
-            last_cpu: 0,
-            wine: None,
+            ..ProcessExtras::default()
         }
     }
 
     pub(super) fn group(kind: GroupRowKind) -> GroupRow {
         GroupRow {
-            node: NodeId::Group(GroupKey(7)),
-            key: GroupKind::App {
-                app_id: Arc::from("firefox"),
-            }
-            .key(),
-            kind,
-            class: GroupKind::App {
-                app_id: Arc::from("firefox"),
-            },
-            name: Arc::from("Firefox"),
-            icon: None,
             members: 3,
             pids: 3,
-            note: None,
             memory_bytes: 4096,
-            disk_bps: 0.0,
-            net_bps: 0.0,
-            gpu_pct: 0.0,
             cpu_pct: 12.5,
             rss_anon_bytes: 4096,
             rss_bytes: 8192,
-            pss_bytes: 0,
-            uss_bytes: 0,
-            swap_bytes: 0,
-            io_read_bps: 0.0,
-            io_write_bps: 0.0,
-            net_rx_bps: 0.0,
-            net_tx_bps: 0.0,
-            gpu_util_pct: 0.0,
-            gpu_mem_bytes: 0,
             threads: 40,
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
-            utime_ticks: 0,
-            stime_ticks: 0,
-            commit_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            handles: None,
-            desktop_path: None,
-            description: None,
-            user: None,
-            frozen: false,
-            validity: FieldValidity::all(Validity::Valid),
+            ..GroupRow::empty(
+                NodeId::Group(GroupKey(7)),
+                GroupKind::App {
+                    app_id: Arc::from("firefox"),
+                }
+                .key(),
+                kind,
+                GroupKind::App {
+                    app_id: Arc::from("firefox"),
+                },
+                Arc::from("Firefox"),
+                FieldValidity::all(Validity::Valid),
+            )
         }
     }
 
@@ -2735,7 +2688,6 @@ mod name_cell {
 mod group_fields {
     use std::sync::Arc;
 
-    use tl_model::actions::SchedPolicy;
     use tl_model::ids::{ColumnId, GroupKey, NodeId};
     use tl_model::process::{GroupKind, GroupRow, GroupRowKind, ProcessExtras};
     use tl_model::system::CpuSet;
@@ -2750,31 +2702,8 @@ mod group_fields {
 
     fn group(kind: GroupRowKind) -> GroupRow {
         GroupRow {
-            node: NodeId::Group(GroupKey(7)),
-            key: GroupKey(7),
-            kind,
-            class: GroupKind::Background,
-            name: Arc::from("row"),
-            icon: None,
             members: 2,
             pids: 2,
-            note: None,
-            memory_bytes: 0,
-            disk_bps: 0.0,
-            net_bps: 0.0,
-            gpu_pct: 0.0,
-            cpu_pct: 0.0,
-            rss_anon_bytes: 0,
-            rss_bytes: 0,
-            pss_bytes: 0,
-            uss_bytes: 0,
-            swap_bytes: 0,
-            io_read_bps: 0.0,
-            io_write_bps: 0.0,
-            net_rx_bps: 0.0,
-            net_tx_bps: 0.0,
-            gpu_util_pct: 0.0,
-            gpu_mem_bytes: 0,
             threads: 2,
             cpu_kernel_pct: 1.5,
             cpu_user_pct: 2.25,
@@ -2786,48 +2715,24 @@ mod group_fields {
             page_faults_delta: 56,
             major_faults: 7,
             handles: Some(42),
-            desktop_path: None,
-            description: None,
-            user: None,
-            frozen: false,
-            validity: FieldValidity::all(Validity::Valid),
+            ..GroupRow::empty(
+                NodeId::Group(GroupKey(7)),
+                GroupKey(7),
+                kind,
+                GroupKind::Background,
+                Arc::from("row"),
+                FieldValidity::all(Validity::Valid),
+            )
         }
     }
 
     /// One entry so `CellCtx.extras` is not empty; group rows never read it by index.
     fn extras() -> ProcessExtras {
         ProcessExtras {
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
-            utime_ticks: 0,
-            stime_ticks: 0,
-            start_boot_ns: 0,
-            rss_peak_bytes: 0,
-            rss_shared_bytes: 0,
-            commit_bytes: 0,
-            vsize_bytes: 0,
-            vsize_peak_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            policy: SchedPolicy::Other,
-            rt_prio: 0,
-            affinity: CpuSet::empty(),
-            handles: None,
             exe_name: Arc::from("x"),
             exe_path: Arc::from("/usr/bin/x"),
-            exe_deleted: false,
-            unit: None,
             state_letter: b'S',
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
-            flag_since_ns: 0,
-            pgrp: 0,
-            sid: 0,
-            last_cpu: 0,
-            wine: None,
+            ..ProcessExtras::default()
         }
     }
 
@@ -3202,13 +3107,11 @@ mod highlight {
         AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement,
         Render, Styled, TestAppContext, VisualTestContext, Window, div, px,
     };
-    use tl_model::actions::SchedPolicy;
     use tl_model::ids::{ColumnId, NodeId, ProcessKey};
     use tl_model::process::{
         GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord,
     };
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
-    use tl_model::system::CpuSet;
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::{BootId, TimeNs, now_boot_ns};
     use tl_model::validity::{FieldValidity, Validity};
@@ -3355,37 +3258,11 @@ mod highlight {
 
     fn extras(flag_since_ns: TimeNs) -> ProcessExtras {
         ProcessExtras {
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
-            utime_ticks: 0,
-            stime_ticks: 0,
-            start_boot_ns: 0,
-            rss_peak_bytes: 0,
-            rss_shared_bytes: 0,
-            commit_bytes: 0,
-            vsize_bytes: 0,
-            vsize_peak_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            policy: SchedPolicy::Other,
-            rt_prio: 0,
-            affinity: CpuSet::empty(),
-            handles: None,
             exe_name: Arc::from("bash"),
             exe_path: Arc::from("/usr/bin/bash"),
-            exe_deleted: false,
-            unit: None,
             state_letter: b'S',
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
             flag_since_ns,
-            pgrp: 0,
-            sid: 0,
-            last_cpu: 0,
-            wine: None,
+            ..ProcessExtras::default()
         }
     }
 
@@ -3777,7 +3654,6 @@ mod row_tooltip {
         AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement, Render,
         SharedString, Styled, TestAppContext, VisualTestContext, Window, div, px,
     };
-    use tl_model::actions::SchedPolicy;
     use tl_model::ids::{GroupKey, NodeId, ProcessKey, PseudoKind};
     use tl_model::process::{
         GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta,
@@ -3787,7 +3663,6 @@ mod row_tooltip {
         ComponentHeader, ProcessSnapshot, ServiceStatus, ServicesSnapshot, Snapshot, StartupType,
         UnitRecord,
     };
-    use tl_model::system::CpuSet;
     use tl_model::table::{Manager, ProcessTableView, TableRow, Total, UnitRef, UnitType};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, ProcessField, Validity};
@@ -3887,37 +3762,11 @@ mod row_tooltip {
 
     fn extras(unit: Option<UnitRef>) -> ProcessExtras {
         ProcessExtras {
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
-            utime_ticks: 0,
-            stime_ticks: 0,
-            start_boot_ns: 0,
-            rss_peak_bytes: 0,
-            rss_shared_bytes: 0,
-            commit_bytes: 0,
-            vsize_bytes: 0,
-            vsize_peak_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            policy: SchedPolicy::Other,
-            rt_prio: 0,
-            affinity: CpuSet::empty(),
-            handles: None,
             exe_name: a("firefox"),
             exe_path: a("/usr/lib/firefox/firefox"),
-            exe_deleted: false,
             unit,
             state_letter: b'S',
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
-            flag_since_ns: 0,
-            pgrp: 0,
-            sid: 0,
-            last_cpu: 0,
-            wine: None,
+            ..ProcessExtras::default()
         }
     }
 
@@ -3956,52 +3805,23 @@ mod row_tooltip {
 
     fn group(node: NodeId, kind: GroupRowKind) -> GroupRow {
         GroupRow {
-            node,
-            key: GroupKind::App {
-                app_id: a("firefox"),
-            }
-            .key(),
-            kind,
-            class: GroupKind::App {
-                app_id: a("firefox"),
-            },
-            name: a("Firefox"),
-            icon: None,
             members: 1,
             pids: 1,
-            note: None,
-            memory_bytes: 0,
-            disk_bps: 0.0,
-            net_bps: 0.0,
-            gpu_pct: 0.0,
-            cpu_pct: 0.0,
-            rss_anon_bytes: 0,
-            rss_bytes: 0,
-            pss_bytes: 0,
-            uss_bytes: 0,
-            swap_bytes: 0,
-            io_read_bps: 0.0,
-            io_write_bps: 0.0,
-            net_rx_bps: 0.0,
-            net_tx_bps: 0.0,
-            gpu_util_pct: 0.0,
-            gpu_mem_bytes: 0,
             threads: 1,
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
-            utime_ticks: 0,
-            stime_ticks: 0,
-            commit_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            handles: None,
             desktop_path: Some(a("/usr/share/applications/firefox.desktop")),
-            description: None,
-            user: None,
-            frozen: false,
-            validity: FieldValidity::all(Validity::Valid),
+            ..GroupRow::empty(
+                node,
+                GroupKind::App {
+                    app_id: a("firefox"),
+                }
+                .key(),
+                kind,
+                GroupKind::App {
+                    app_id: a("firefox"),
+                },
+                a("Firefox"),
+                FieldValidity::all(Validity::Valid),
+            )
         }
     }
 
