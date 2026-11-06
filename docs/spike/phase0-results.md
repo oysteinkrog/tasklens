@@ -2103,33 +2103,39 @@ The log has no `frame stall` line.
 
 ## zed#64499 patch (only if the soak failed)
 
-Not run yet.
+Not needed: the soak passed (U-9); wlf.21 and wlf.22 closed as not needed.
 
 ## Manual checklist
 
-Not run yet.
+Pending tasklens-wlf.23.
 
 ## polkit error names (U-39)
 
-Not run yet.
+Pending tasklens-wlf.24.
 
 ## Unverified items settled in phase 0
 
-- U-47 not settled: `perf-cpu` p99 is 21.94 ms (hidden nested KWin, 60 Hz), against a gate of
-  2.0 ms. FAIL, not isolated: the CPU page has no switch that holds the per-core labels static.
-  The wlf.28 profile puts the cost in chart paths and GPUI copies (wlf.39, wlf.40). The labels
-  stay at 10 Hz until this is measured again after those beads. R-126 moves them to 5 Hz only
-  when the labels are shown to cause the failure, and this run does not show that.
+- U-2: pending tasklens-wlf.23.
+- U-3: pending tasklens-wlf.23.
+- U-4: confirmed by tasklens-fut.8 and tasklens-ug9.3 (RECONCILIATION.md, U-4).
+- U-7: confirmed by tasklens-ug9.4 (RECONCILIATION.md, U-7).
 - U-9 not needed: the soak passed without the patch.
-
+- U-10: pending tasklens-wlf.26. The fixture part is settled by R-286 (18.68 ms against 20 ms).
+- U-36: pending tasklens-wlf.23.
+- U-39: pending tasklens-wlf.24.
+- U-47 not settled: `perf-cpu` p99 is 15.71 ms (hidden nested KWin, 60 Hz, wlf.45 rerun), against
+  a gate of 2.0 ms. FAIL, not isolated: the CPU page has no switch that holds the per-core labels
+  static. The wlf.28 profile puts the cost in chart paths and GPUI copies (wlf.45). The labels
+  stay at 10 Hz until this is measured again. R-126 moves them to 5 Hz only when the labels are
+  shown to cause the failure, and this run does not show that.
 
 ## GPU power baseline
 
-Not run yet.
+Pending tasklens-wlf.25.
 
 ## Collection cost
 
-The live collection cost measurement is not run yet. The fixture sweep gate is below.
+Live gates: pending tasklens-wlf.26. The fixture sweep gate is below.
 
 ### Sweep of 2,000 processes on the fixture root (tasklens-yms.26, 2026-11-04)
 
@@ -2274,4 +2280,34 @@ steady sweep makes the same syscalls as before plus one hash lookup per pid in
 
 ## Decision
 
-Not run yet.
+All values are from the hidden nested KWin session at 60 Hz, the real target (owner, 2026-11-05).
+The first-frame, minimized and memory values come from the wlf.19 run (2026-11-04) and the wlf.47
+rerun, the newest in this file. The relaxed limit is the latest value x 1.25, rounded up to 2
+significant figures (counts round up to whole frames).
+
+| Gate | Original limit | Latest value (source) | Result | Relaxed limit |
+|---|---|---|---|---|
+| UI thread CPU per frame, `perf-cpu`, p50 | 1.0 ms | 10.79 ms (wlf.45) | FAIL | 14 ms |
+| UI thread CPU per frame, `perf-cpu`, p99 | 2.0 ms | 15.71 ms (wlf.45) | FAIL | 20 ms |
+| UI thread CPU per frame, `table-2000`, p99 | 2.0 ms | 3.90 ms (wlf.46) | FAIL | 4.9 ms |
+| Missed frames, `perf-cpu` | median 0, every run <= 2, long 0 | median 23, max run 29, long 1 (wlf.45) | FAIL | median <= 29, every run <= 37, long <= 2 |
+| Missed frames, `table-2000` | median 0, every run <= 2, long 0 | 0, 0 (wlf.46) | PASS | none |
+| Process CPU, `perf-cpu` | 30% | 66.99% (wlf.45) | FAIL | 84% |
+| Process CPU, `static` | 2% | 16.03% (wlf.45) | FAIL | 21% |
+| Process CPU, minimized, recording off | 0.3% | 1.13% (wlf.19) | FAIL | 1.5% |
+| First frame, warm cache | 200 ms | 660 ms (wlf.19) | FAIL | 830 ms |
+| First frame, cold cache | 500 ms | 1240 ms (wlf.19) | FAIL | 1600 ms |
+| App memory after `table-2000` | 150 MB | 81.87 MB (wlf.47) | PASS | none |
+| `history-scrub` p99 (UI-PRC-032) | 4.0 ms | 4.31 ms (wlf.46) | FAIL | 5.4 ms |
+| zed#64499 soak | 0 stalls over 250 ms in 10 min | 0 (wlf.20) | PASS | none |
+| Bridge: 10 Hz samples arrive | every run | 3 of 3 counted runs (wlf.42) | PASS | none |
+| Bridge: wake-to-render latency p99 | 20 ms | 35 ms (wlf.42, upper end of 25 to 35 ms) | FAIL | 44 ms |
+| Manual checklist (Wayland behaviour) | not set | pending tasklens-wlf.23 | pending | none |
+
+Decision: pass with relaxed gates (owner, 2026-11-06). GPUI is confirmed; production beads proceed.
+
+The owner chose to keep GPUI and relax the failed gates. This replaces ADR-014 decision rule steps
+2 and 3 for phase 0: no further optimisation pass and no eframe fallback.
+
+Collection cost: live gates are pending tasklens-wlf.26. The fixture sweep passed at 18.68 ms
+against 20 ms (R-286). Collection cost never triggers the UI fallback (ADR-014 rule 4).

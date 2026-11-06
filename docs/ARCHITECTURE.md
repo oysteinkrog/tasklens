@@ -2410,6 +2410,10 @@ The collection-cost gates replace PLAN.md's single 2% target because of Astra's 
 - `docs/spike/phase0-results.md` with the JSON outputs and the checklist, committed before any P1 UI bead starts.
 - Each later phase re-runs `cargo xtask bench`; a regression of more than 20% on any gated metric blocks the phase.
 
+### Phase-0 outcome
+
+Owner chose to keep GPUI with relaxed gates on 2026-11-06 (overrides decision rule steps 2 and 3 for phase 0); see docs/spike/phase0-results.md, Decision.
+
 ---
 
 ## ADR-015: Logging, errors, crash handling and privacy
