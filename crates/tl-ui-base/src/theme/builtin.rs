@@ -8,7 +8,7 @@ use std::sync::Arc;
 use gpui_kit::{Hsla, rgb, rgba};
 use serde_json::Value;
 
-use super::palette::GROUP_COLORS;
+use super::palette::{GROUP_COLORS, VALUE_RAMP_KINDS, ValueRampKind};
 use super::{GraphPalette, StatusColors, ThemeDef, ThemeMode, ThemeSlot};
 
 const BUILTIN_JSON: &str = include_str!("../../../../assets/themes/builtin.json");
@@ -49,6 +49,27 @@ const GRAPH_KEYS: [&str; 13] = [
 
 /// The power draw ramp keys inside `graph` (tasklens-1vwxr).
 const POWER_KEYS: [&str; 3] = ["power_low", "power_mid", "power_high"];
+
+/// The value ramp keys inside `graph` (tasklens-j477q), in `ValueRampKind::ALL` order: the key
+/// names and the `graph.`-prefixed names the errors report.
+const VALUE_RAMP_KEYS: [([&str; 3], [&str; 3]); VALUE_RAMP_KINDS] = [
+    (
+        ["cpu_low", "cpu_mid", "cpu_high"],
+        ["graph.cpu_low", "graph.cpu_mid", "graph.cpu_high"],
+    ),
+    (
+        ["gpu_low", "gpu_mid", "gpu_high"],
+        ["graph.gpu_low", "graph.gpu_mid", "graph.gpu_high"],
+    ),
+    (
+        ["disk_low", "disk_mid", "disk_high"],
+        ["graph.disk_low", "graph.disk_mid", "graph.disk_high"],
+    ),
+    (
+        ["mem_low", "mem_mid", "mem_high"],
+        ["graph.mem_low", "graph.mem_mid", "graph.mem_high"],
+    ),
+];
 
 /// A colour string that is not `#RRGGBB` or `#RRGGBBAA`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,8 +254,8 @@ fn group_colors(
 }
 
 /// Parses one theme object. Reads `name`, optional `mode`, the 22 upper-case slots, `accent`,
-/// optional `status` (4 keys) and optional `graph` (13 keys plus the 12 `groups` and the 3 power
-/// ramp keys). Every other key goes into `extra`.
+/// optional `status` (4 keys) and optional `graph` (13 keys plus the 12 `groups`, the 3 power
+/// ramp keys and the 12 value ramp keys). Every other key goes into `extra`.
 ///
 /// A missing or bad slot or `accent` is always an error; the user store repairs those before it
 /// calls this (E17-008). With `strict = true` a broken `mode`, `status` or `graph` is also an
@@ -347,6 +368,7 @@ pub fn parse_theme_object(
             power_low: Hsla::default(),
             power_mid: Hsla::default(),
             power_high: Hsla::default(),
+            value_ramps: [[Hsla::default(); 3]; VALUE_RAMP_KINDS],
         },
     );
     // Required in the built-in themes; a user theme without them takes the fallback theme's.
@@ -358,12 +380,23 @@ pub fn parse_theme_object(
         &["graph.power_low", "graph.power_mid", "graph.power_high"],
         strict,
     )?;
+    // The same for each value ramp, one kind at a time (tasklens-j477q).
+    let mut ramps = [None; VALUE_RAMP_KINDS];
+    for (kind, (keys, full)) in ValueRampKind::ALL.iter().zip(&VALUE_RAMP_KEYS) {
+        debug_assert!(keys[0].starts_with(kind.json_prefix()));
+        ramps[*kind as usize] = nested_colors(obj, &name, "graph", keys, full, strict)?;
+    }
     let graph = match graph {
         Some(mut g) => {
             if let Some([low, mid, high]) = power {
                 g.power_low = low;
                 g.power_mid = mid;
                 g.power_high = high;
+            }
+            for (slot, ramp) in g.value_ramps.iter_mut().zip(ramps) {
+                if let Some(ramp) = ramp {
+                    *slot = ramp;
+                }
             }
             match group_colors(obj, &name, strict)? {
                 Some(groups) => g.groups = groups,
@@ -504,8 +537,12 @@ mod tests {
         let root: Value = serde_json::from_str(BUILTIN_JSON).unwrap();
         let mut colours = Vec::new();
         collect_colour_strings(&root, &mut colours);
-        // 2 themes x (22 slots + accent + 4 status + 13 graph + 12 group + 3 power colours).
-        assert_eq!(colours.len(), 2 * (23 + 4 + 13 + GROUP_COLORS + 3));
+        // 2 themes x (22 slots + accent + 4 status + 13 graph + 12 group + 3 power colours
+        // + 4 value ramps of 3).
+        assert_eq!(
+            colours.len(),
+            2 * (23 + 4 + 13 + GROUP_COLORS + 3 + 3 * VALUE_RAMP_KINDS)
+        );
         for c in &colours {
             assert_eq!(c.len(), 7, "{c} is not #RRGGBB");
             assert!(c[1..].bytes().all(|b| b.is_ascii_hexdigit()), "{c}");
@@ -784,5 +821,59 @@ mod tests {
         let graph = def.graph.expect("the other graph keys still parse");
         assert!(graph.power_unset());
         assert!(!graph.groups_unset());
+    }
+
+    /// Each built-in theme sets its own four value ramps (tasklens-j477q): every colour at least
+    /// 3:1 against `chart_bg`, the three of a ramp all different, each ramp starting near its
+    /// device's line hue and ending in a red.
+    #[test]
+    fn value_ramps_set_and_readable() {
+        let mut failures = Vec::new();
+        for def in load().iter() {
+            let graph = def.graph.expect("built-in themes have graph colours");
+            for kind in ValueRampKind::ALL {
+                assert!(
+                    !graph.value_ramp_unset(kind),
+                    "{} has no {kind:?} ramp",
+                    def.name
+                );
+                let ramp = graph.value_ramp(kind);
+                for (i, c) in ramp.iter().enumerate() {
+                    let ratio = contrast(*c, graph.chart_bg);
+                    if ratio < 3.0 {
+                        failures.push(format!("{}: {kind:?} {i} is {ratio:.2}", def.name));
+                    }
+                    if ramp[..i].contains(c) {
+                        failures.push(format!("{}: {kind:?} {i} repeats a colour", def.name));
+                    }
+                }
+                // Hot is a red: hue within 15 degrees of 0.
+                let hot = ramp[2].h * 360.0;
+                if hot > 15.0 && hot < 345.0 {
+                    failures.push(format!("{}: {kind:?} high hue is {hot:.0}", def.name));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// A user theme may leave out a value ramp; strict parsing names the missing key.
+    #[test]
+    fn value_ramps_are_optional_for_user_themes() {
+        let mut obj = dark_object();
+        let graph = obj.get_mut("graph").and_then(Value::as_object_mut).unwrap();
+        graph.remove("disk_high");
+        assert!(matches!(
+            parse_theme_object(&obj, true),
+            Err(ThemeParseError::MissingSlot {
+                key: "graph.disk_high",
+                ..
+            })
+        ));
+        let def = parse_theme_object(&obj, false).unwrap();
+        let graph = def.graph.expect("the other graph keys still parse");
+        assert!(graph.value_ramp_unset(ValueRampKind::Disk));
+        assert!(!graph.value_ramp_unset(ValueRampKind::Cpu));
+        assert!(!graph.power_unset());
     }
 }

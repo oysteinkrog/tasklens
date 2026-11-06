@@ -21,7 +21,7 @@ use tl_ui_settings::settings::AppearanceSettings;
 
 pub use derived::{Derived, rebuild_derived};
 pub use metrics::{UiMetrics, bump_style_version, metrics};
-pub use palette::{DeviceAccent, GraphPalette};
+pub use palette::{DeviceAccent, GraphPalette, ValueRampKind};
 pub use store::{ActivateSource, ActivateTheme, ThemeError, ThemeEvent, ThemeStore, current};
 
 /// Dark or light. A theme file stores it as `"dark"` or `"light"`.
@@ -304,6 +304,11 @@ impl TlTheme {
                         g.power_mid = fallback.graph.power_mid;
                         g.power_high = fallback.graph.power_high;
                     }
+                    for kind in ValueRampKind::ALL {
+                        if g.value_ramp_unset(kind) {
+                            g.value_ramps[kind as usize] = fallback.graph.value_ramp(kind);
+                        }
+                    }
                     g
                 }
                 None => fallback.graph,
@@ -379,6 +384,9 @@ pub mod tests {
                 power_low: hex(0x1E2E3E),
                 power_mid: hex(0x1F2F3F),
                 power_high: hex(0x203040),
+                value_ramps: std::array::from_fn(|k| {
+                    std::array::from_fn(|i| hex(0x213141 + 0x010101 * (3 * k + i) as u32))
+                }),
             },
             status: StatusColors {
                 success: hex(0x4CAF50),
@@ -540,5 +548,27 @@ pub mod tests {
         def.graph = Some(own);
         let t = TlTheme::from_def(&def, &fallback, &AppearanceSettings::default(), false, 1);
         assert_eq!(t.graph.power_mid, hex(0x778899), "a set ramp is kept");
+    }
+
+    /// A user theme that sets only some value ramps keeps those and takes the fallback theme's
+    /// other ramps (tasklens-j477q).
+    #[test]
+    fn from_def_fills_each_unset_value_ramp() {
+        let fallback = test_theme(ThemeMode::Dark);
+        let mut def = def_with_window_bg(0x191B1D);
+        let mut graph = fallback.graph;
+        graph.value_ramps = [[Hsla::default(); 3]; palette::VALUE_RAMP_KINDS];
+        graph.value_ramps[ValueRampKind::Disk as usize] =
+            [hex(0x112233), hex(0x445566), hex(0x778899)];
+        def.graph = Some(graph);
+        let t = TlTheme::from_def(&def, &fallback, &AppearanceSettings::default(), false, 1);
+        for kind in ValueRampKind::ALL {
+            let want = if kind == ValueRampKind::Disk {
+                [hex(0x112233), hex(0x445566), hex(0x778899)]
+            } else {
+                fallback.graph.value_ramp(kind)
+            };
+            assert_eq!(t.graph.value_ramp(kind), want, "{kind:?}");
+        }
     }
 }

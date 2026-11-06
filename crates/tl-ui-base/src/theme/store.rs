@@ -501,6 +501,9 @@ pub fn lerp_theme(a: &TlTheme, b: &TlTheme, t: f32) -> TlTheme {
         power_low: l(ga.power_low, gb.power_low),
         power_mid: l(ga.power_mid, gb.power_mid),
         power_high: l(ga.power_high, gb.power_high),
+        value_ramps: std::array::from_fn(|k| {
+            std::array::from_fn(|i| l(ga.value_ramps[k][i], gb.value_ramps[k][i]))
+        }),
     };
     let (da, db) = (&a.derived, &b.derived);
     out.derived = Derived {

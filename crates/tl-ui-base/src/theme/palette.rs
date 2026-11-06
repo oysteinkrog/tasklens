@@ -27,10 +27,46 @@ pub struct GraphPalette {
     pub power_low: Hsla,
     pub power_mid: Hsla,
     pub power_high: Hsla,
+    /// The value ramps of the single-series percent charts (tasklens-j477q), low to high, in
+    /// `ValueRampKind` order: CPU, GPU, disk, memory. Each keeps its device's hue at the bottom
+    /// and ends in red at the top. A ramp with all three transparent is "not set":
+    /// `TlTheme::from_def` then takes the fallback theme's.
+    pub value_ramps: [[Hsla; 3]; VALUE_RAMP_KINDS],
 }
 
 /// Colours in `GraphPalette.groups`.
 pub const GROUP_COLORS: usize = 12;
+
+/// Ramps in `GraphPalette.value_ramps`.
+pub const VALUE_RAMP_KINDS: usize = 4;
+
+/// The charts with a value ramp of their own (tasklens-j477q): one series on a fixed scale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ValueRampKind {
+    /// CPU usage, blue to red.
+    Cpu,
+    /// GPU utilisation and engines, green to red.
+    Gpu,
+    /// Disk active time, amber to red.
+    Disk,
+    /// Memory in use, purple to red.
+    Memory,
+}
+
+impl ValueRampKind {
+    /// Every kind, in `GraphPalette.value_ramps` order.
+    pub const ALL: [Self; VALUE_RAMP_KINDS] = [Self::Cpu, Self::Gpu, Self::Disk, Self::Memory];
+
+    /// The theme JSON prefix of the kind's keys inside `graph`: `<prefix>_low`, `_mid`, `_high`.
+    pub const fn json_prefix(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+            Self::Disk => "disk",
+            Self::Memory => "mem",
+        }
+    }
+}
 
 /// The five device colour families used by Performance surfaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +92,16 @@ impl GraphPalette {
     /// The power draw ramp, low to high.
     pub const fn power_ramp(&self) -> [Hsla; 3] {
         [self.power_low, self.power_mid, self.power_high]
+    }
+
+    /// The value ramp of `kind`, low to high.
+    pub const fn value_ramp(&self, kind: ValueRampKind) -> [Hsla; 3] {
+        self.value_ramps[kind as usize]
+    }
+
+    /// True when no colour of `kind`'s ramp is set (all three are transparent).
+    pub fn value_ramp_unset(&self, kind: ValueRampKind) -> bool {
+        self.value_ramp(kind).iter().all(|c| *c == Hsla::default())
     }
 
     /// The line colour is the device accent. Overview frames, charts, meters and sidebar cards
@@ -150,6 +196,12 @@ mod tests {
             power_low: color(15),
             power_mid: color(16),
             power_high: color(17),
+            value_ramps: [
+                [color(18), color(19), color(20)],
+                [color(21), color(22), color(23)],
+                [color(24), color(25), color(26)],
+                [color(27), color(28), color(29)],
+            ],
         };
         assert_eq!(p.device_accent(DeviceAccent::Cpu), p.cpu_line);
         assert_eq!(p.device_accent(DeviceAccent::Memory), p.mem_line);
@@ -158,5 +210,14 @@ mod tests {
         assert_eq!(p.device_accent(DeviceAccent::Net), p.net_line);
         assert_eq!(p.power_ramp(), [color(15), color(16), color(17)]);
         assert!(!p.power_unset());
+        assert_eq!(
+            p.value_ramp(ValueRampKind::Disk),
+            [color(24), color(25), color(26)]
+        );
+        assert_eq!(
+            p.value_ramp(ValueRampKind::Memory),
+            [color(27), color(28), color(29)]
+        );
+        assert!(!p.value_ramp_unset(ValueRampKind::Cpu));
     }
 }
