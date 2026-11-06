@@ -56,6 +56,7 @@ use tracing::{debug, error, info, warn};
 
 use super::filter::{FilterBox, ReturnFocus, shown_on};
 use super::host_tabs::{HostTabInfo, HostTabs, cpu_percent};
+use super::menubar::menu_bar_for;
 use super::settings;
 use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChip};
 use super::tabstrip::{TabStrip, tween_progress};
@@ -1348,6 +1349,9 @@ pub struct MainWindow {
     /// the Performance tab shows. Under client decorations the title bar stays without its
     /// menus; under server decorations the whole menu row goes.
     compact: bool,
+    /// A menu bar menu is open. Compact view then shows the menu row while it stays open, so
+    /// Alt+V and F10 still work there (tasklens-i5cj4).
+    menu_open: bool,
     /// The page container's opacity at the last render.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     page_opacity: f32,
@@ -1530,6 +1534,20 @@ impl MainWindow {
                 }
             }),
         );
+        // A menu opened from its keys (Alt+V, F10) while compact view hides the menu bar shows
+        // the menu row until it closes (tasklens-i5cj4).
+        if let Some(bar) = menu_bar_for(window.window_handle().window_id(), cx) {
+            subs.push(cx.observe(&bar, |this: &mut Self, bar, cx| {
+                let open = bar.read(cx).open_menu_id().is_some();
+                if open != this.menu_open {
+                    this.menu_open = open;
+                    this.titlebar.update(cx, |t, cx| t.set_menu_open(open, cx));
+                    if this.compact {
+                        cx.notify();
+                    }
+                }
+            }));
+        }
         // `[[hosts]]` changes add and remove host tabs (UI-SHL-008).
         subs.push(
             cx.observe_global_in::<TlSettings>(window, |this: &mut Self, window, cx| {
@@ -1596,6 +1614,7 @@ impl MainWindow {
             machine_status,
             status_placement: machine_status::placement(cx),
             compact,
+            menu_open: false,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             page_opacity: 1.0,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -3172,8 +3191,9 @@ impl Render for MainWindow {
         let bar = self.machine_status.clone().filter(|_| {
             shell && !compact && machine_status::shows_in(Slot::Main, self.status_placement, false)
         });
-        // Compact view under server decorations: KWin's title bar only, no menu row.
-        let titlebar = (client || !compact).then(|| {
+        // Compact view under server decorations: KWin's title bar only, no menu row. A menu
+        // opened from its keys brings the row back until the menu closes.
+        let titlebar = (client || !compact || self.menu_open).then(|| {
             AnyView::from(self.titlebar.clone()).cached(
                 StyleRefinement::default()
                     .w_full()

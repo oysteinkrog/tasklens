@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, FocusHandle, IntoElement, Modifiers, MouseButton,
-    MouseDownEvent, MouseExitEvent, MouseUpEvent, Render, TestAppContext, VisualTestContext,
-    Window, div, point, px, size,
+    AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement, Modifiers,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseUpEvent, Render, TestAppContext,
+    VisualTestContext, Window, div, point, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
@@ -467,14 +467,18 @@ fn status_line_exit_button_ends_compact_view(cx: &mut TestAppContext) {
     assert!(!drawn(&mut r, THIN_EXIT_ID));
 }
 
-/// View > "Show status line in compact view": a check from `performance.compact_status_line`
-/// that runs `ToggleSetting` for it. Compact view hides the menu bar, so the item is set from
-/// normal view. Off, the setting is saved and compact view draws no line (tasklens-i5cj4).
+/// View > "Show status line in compact view" in compact view: Alt+V shows the menu row with
+/// the View menu open under its button. The item is a check from
+/// `performance.compact_status_line` that runs `ToggleSetting` for it. Off, the line goes and
+/// the setting is saved; the row hides again when the menu closes (tasklens-i5cj4).
 #[gpui_kit::test]
 fn view_menu_status_line_toggle_is_saved(cx: &mut TestAppContext) {
     let mut r = open(cx, UiState::default(), true);
+    press(&mut r, "f11");
+    assert_compact(&mut r);
     let label = "Show status line in compact view";
     let item = view_item(&mut r, label).expect("in the View menu");
+    assert_view_menu_shown(&mut r);
     assert!(item.checked, "on by default");
     assert!(item.action.as_ref().is_some_and(|a| a.partial_eq(&ToggleSetting(
         SettingKey::PerformanceCompactStatusLine
@@ -487,11 +491,52 @@ fn view_menu_status_line_toggle_is_saved(cx: &mut TestAppContext) {
         Some(&false),
         "settings.toml written"
     );
-    let item = view_item(&mut r, label).expect("still listed");
-    assert!(!item.checked, "unchecked while off");
-    press(&mut r, "escape f11");
     assert_compact(&mut r);
     assert!(!drawn(&mut r, BAR_ID), "no line in compact view");
+    let item = view_item(&mut r, label).expect("still listed");
+    assert_view_menu_shown(&mut r);
+    assert!(!item.checked, "unchecked while off");
+    press(&mut r, "end up enter");
+    assert!(line_on(&mut r), "on again");
+    assert_compact(&mut r);
+}
+
+/// Compact view under server decorations has no menu row. Alt+V brings it back with the View
+/// menu open, and the row goes again when the menu closes (tasklens-i5cj4).
+#[gpui_kit::test]
+fn view_menu_opens_in_compact_view_under_server_decorations(cx: &mut TestAppContext) {
+    let mut r = open(cx, UiState::default(), false);
+    press(&mut r, "f11");
+    assert!(compact(&mut r));
+    assert!(!drawn(&mut r, "TitleBar"), "no menu row");
+    let item = view_item(&mut r, "Show status line in compact view").expect("listed");
+    assert!(item.checked);
+    assert_view_menu_shown(&mut r);
+    press(&mut r, "end up enter");
+    assert!(!line_on(&mut r), "off");
+    assert!(compact(&mut r));
+    assert!(!drawn(&mut r, "TitleBar"), "the row goes with the menu");
+    assert!(!drawn(&mut r, BAR_ID), "no line");
+    let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page panel");
+    assert_eq!(page.top(), px(0.));
+}
+
+/// The View menu is open and drawn: its menu button shows and its popup holds focus, which a
+/// popup that is not drawn loses.
+fn assert_view_menu_shown(r: &mut Rig) {
+    assert!(
+        drawn(r, "TlMenuBarButton-shell-menubar-view"),
+        "the menu row shows while the menu is open"
+    );
+    let bar = r
+        .vcx
+        .update(|window, cx| menu_bar_for(window.window_handle().window_id(), cx))
+        .expect("menu bar");
+    let focused = r.vcx.update(|window, cx| {
+        let popup = bar.read(cx).popup().expect("View open").clone();
+        popup.focus_handle(cx).is_focused(window)
+    });
+    assert!(focused, "the popup is drawn and focused");
 }
 
 /// The saved choice at start: compact view without its line comes back without it.

@@ -311,6 +311,9 @@ pub struct TitleBarView {
     /// Compact view hides the menus too (tasklens-qdn1r). Under server decorations the main
     /// window leaves the whole menu row out.
     compact: bool,
+    /// A menu is open. In compact view the menus then show until it closes, so a menu opened
+    /// with Alt+V or F10 is drawn under its button (tasklens-i5cj4).
+    menu_open: bool,
     /// The host tabs, just left of the pin; `None` with one host (UI-SHL-008).
     host_tabs: Option<AnyView>,
     model: ToolbarModel,
@@ -393,6 +396,7 @@ impl TitleBarView {
             menu_bar,
             menus_hidden: false,
             compact: false,
+            menu_open: false,
             host_tabs: None,
             model,
             content: Box::new(DefaultToolbar),
@@ -447,6 +451,16 @@ impl TitleBarView {
         if self.compact != compact {
             self.compact = compact;
             cx.notify();
+        }
+    }
+
+    /// A menu opened or closed. Notifies only when that changes what compact view draws.
+    pub fn set_menu_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.menu_open != open {
+            self.menu_open = open;
+            if self.compact {
+                cx.notify();
+            }
         }
     }
 
@@ -731,7 +745,7 @@ impl TitleBarView {
             .when_some(
                 self.menu_bar
                     .clone()
-                    .filter(|_| !self.menus_hidden && !self.compact),
+                    .filter(|_| !self.menus_hidden && (!self.compact || self.menu_open)),
                 |bar, menu| {
                     bar.child(no_drag(
                         div()

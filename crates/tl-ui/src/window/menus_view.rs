@@ -311,8 +311,8 @@ pub fn build(
             compact_view_mark(cx),
             Box::new(ToggleCompactView),
         )
-        // Compact view's thin status line on or off (tasklens-i5cj4). Listed in normal view
-        // too: compact view hides the menu bar, so its menus do not show there.
+        // Compact view's thin status line on or off (tasklens-i5cj4). Listed in both views:
+        // in compact view Alt+V shows the menu row with this menu open.
         .check_item(
             tr(cx, "shell-menu-view-compact-status-line"),
             compact_status_line_mark(cx),
