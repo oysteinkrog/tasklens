@@ -22,6 +22,7 @@ use tl_ui::bench::{BenchOptions, BenchScene};
 use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::demand::GlobalDemand;
 use tl_ui_base::host::HostContext;
+use tl_ui_base::settings_global::TlSettings;
 use tl_ui_overview::widget::container::WidgetView;
 use tl_ui_perf::performance::DeviceKey;
 use tl_ui_perf::performance::cpu::CpuPage;
@@ -788,14 +789,35 @@ fn hub_sequence(cx: &mut VisualTestContext) -> u64 {
 /// The frames are counted from the steady state (tasklens-ff0y5): after the first 1 Hz SYSTEM
 /// publish, which places the CPU page's widgets again, and once no path view is replaced for 3
 /// frames. A view replaced or a render count that goes down later fails the test by name.
+///
+/// This pins the unpaced path (every frame renders). Pixel pacing is on by default since
+/// tasklens-nosaa, so the test turns it off through the setting.
 #[gpui_kit::test]
 fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
+    let (median, report) = cpu_path_medians(cx, false);
+    // Before tasklens-wlf.40: 1, 1, 9, 9, 1, (no view), 1, 1, 1, 4, 1, 1, 1, 1.
+    let pinned = [1, 1, 9, 9, 1, 0, 0, 1, 1, 4, 1, 1, 1, 1];
+    assert_eq!(median, pinned, "{report:?}");
+}
+
+/// With pixel pacing on, a frame that is not a pixel step arms no frame, so no view on the CPU
+/// page path renders. The test clock never advances, so the pixel timer never fires.
+#[gpui_kit::test]
+fn perf_cpu_paced_frame_renders_nothing(cx: &mut TestAppContext) {
+    let (median, report) = cpu_path_medians(cx, true);
+    assert_eq!(median, vec![0u32; PATH_VIEWS.len()], "{report:?}");
+}
+
+fn cpu_path_medians(cx: &mut TestAppContext, paced: bool) -> (Vec<u32>, Vec<String>) {
     cx.executor().allow_parking();
     let engine = BenchEngine::start(BenchFeed::Synthetic, SEED, now_boot_ns());
     let scene = cx
         .update(|cx| open_scene(cx, BenchScene::PerfCpu, engine.clone()))
         .expect("the scene window opens");
     let mut vcx = VisualTestContext::from_window(scene.handle, cx);
+    vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| d.settings.performance.pixel_paced_scrolling = paced)
+    });
     draw(&mut vcx);
     wait_for_first_system(&mut vcx);
     let settled = settle_path_views(&scene, &mut vcx);
@@ -857,8 +879,10 @@ fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
         .zip(&median)
         .map(|(name, n)| format!("{name} {n}"))
         .collect();
-    eprintln!("perf-cpu renders per frame (median): {}", report.join(", "));
-    // Before tasklens-wlf.40: 1, 1, 9, 9, 1, (no view), 1, 1, 1, 4, 1, 1, 1, 1.
-    let pinned = [1, 1, 9, 9, 1, 0, 0, 1, 1, 4, 1, 1, 1, 1];
-    assert_eq!(median, pinned, "{report:?}");
+    let label = if paced { "paced" } else { "unpaced" };
+    eprintln!(
+        "perf-cpu renders per frame, {label} (median): {}",
+        report.join(", ")
+    );
+    (median, report)
 }
