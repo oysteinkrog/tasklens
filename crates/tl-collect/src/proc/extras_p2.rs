@@ -19,7 +19,7 @@ use rustix::fs::{AtFlags, Mode, OFlags, RawDir, StatxFlags};
 use rustix::io::Errno;
 use tl_model::details::Elevated;
 use tl_model::ids::ProcessKey;
-use tl_model::process::{PackageStatus, ProcessExtrasP2};
+use tl_model::process::{ContainerKind, PackageStatus, ProcessExtrasP2};
 
 use crate::pkg::PackageIndex;
 use crate::proc::cgroup::CgroupPath;
@@ -170,6 +170,7 @@ impl ExtrasP2Reader {
         out.security_label = self.read_label(root, dir, bufs);
         if let Some(s) = status {
             out.elevation = Some(elevation(s));
+            out.container = Some(container_kind(s, meta.cgroup.as_ref()));
         }
         out.sandbox = self.sandbox(dir, status, meta.cgroup.as_ref());
         out.sched_policy_text = self.labels.sched(stat.policy);
@@ -454,6 +455,32 @@ impl ExtrasP2Reader {
     }
 }
 
+/// PROC-036 container kind. `Host` when the process is in at most one PID namespace level
+/// (`NSpid:` has one value, or the line is missing). Otherwise the cgroup path names the runtime:
+/// a `libpod-<id>.scope` is Podman, `docker-<id>.scope` is Docker, anything else under
+/// `machine.slice` is systemd-nspawn, and the rest is `Other`.
+pub fn container_kind(s: &PidStatus, cgroup: Option<&CgroupPath>) -> ContainerKind {
+    if s.nspid_levels <= 1 {
+        return ContainerKind::Host;
+    }
+    let rel = cgroup.map_or("", |c| &*c.rel);
+    let mut machine = false;
+    for comp in rel.split('/') {
+        if comp.starts_with("libpod-") && comp.ends_with(".scope") {
+            return ContainerKind::Podman;
+        }
+        if comp.starts_with("docker-") && comp.ends_with(".scope") {
+            return ContainerKind::Docker;
+        }
+        machine |= comp == "machine.slice";
+    }
+    if machine {
+        ContainerKind::Nspawn
+    } else {
+        ContainerKind::Other
+    }
+}
+
 /// PROC-028 elevation, first match: euid 0 is `Root`; euid differs from ruid is `Setuid`;
 /// non-zero `CapEff` is `Capabilities`; else `No` (the column's "Default").
 pub fn elevation(s: &PidStatus) -> Elevated {
@@ -583,6 +610,28 @@ mod tests {
             Some(PROC_USER_INIT_INO)
         );
         assert_eq!(parse_ns_link(b"net:[4026531837]"), None);
+    }
+
+    #[test]
+    fn container_rule() {
+        use crate::proc::cgroup::parse_cgroup_file;
+        let cg = |p: &str| parse_cgroup_file(format!("0::{p}\n").as_bytes());
+        let mut s = PidStatus::default();
+        let podman = cg(
+            "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-abc123.scope/container",
+        );
+        assert_eq!(container_kind(&s, podman.as_ref()), ContainerKind::Host);
+        s.nspid_levels = 1;
+        assert_eq!(container_kind(&s, podman.as_ref()), ContainerKind::Host);
+        s.nspid_levels = 2;
+        assert_eq!(container_kind(&s, podman.as_ref()), ContainerKind::Podman);
+        let docker = cg("/system.slice/docker-abc123.scope");
+        assert_eq!(container_kind(&s, docker.as_ref()), ContainerKind::Docker);
+        let nspawn = cg("/machine.slice/machine-web.scope/payload");
+        assert_eq!(container_kind(&s, nspawn.as_ref()), ContainerKind::Nspawn);
+        let other = cg("/system.slice/foo.service");
+        assert_eq!(container_kind(&s, other.as_ref()), ContainerKind::Other);
+        assert_eq!(container_kind(&s, None), ContainerKind::Other);
     }
 
     #[test]

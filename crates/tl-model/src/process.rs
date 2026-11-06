@@ -677,6 +677,19 @@ pub struct ProcessExtrasP2 {
     /// `IoPriority::None` is a thread with no class set, which follows nice. `None` when the read
     /// failed or the value was not read.
     pub io_priority: Option<IoPriority>,
+    /// PROC-036 Container. `None` means not read.
+    pub container: Option<ContainerKind>,
+}
+
+/// PROC-036 container kind. `Host` is a process in the same PID namespace as tasklens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContainerKind {
+    Host,
+    Podman,
+    Docker,
+    Nspawn,
+    /// In a child PID namespace, with a cgroup path that names no known runtime.
+    Other,
 }
 
 /// The busiest GPU engine of a process (PROC-033 GPU engine column).
@@ -1006,6 +1019,7 @@ mod tests {
         assert!(p2.gpu_encode_pct.is_none());
         assert!(p2.gpu_decode_pct.is_none());
         assert!(p2.gpu_engine.is_none());
+        assert!(p2.container.is_none());
     }
 
     #[test]

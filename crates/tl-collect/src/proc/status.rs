@@ -78,6 +78,9 @@ pub struct PidStatus {
     pub voluntary_ctxt_switches: Option<u64>,
     /// `nonvoluntary_ctxt_switches:`
     pub nonvoluntary_ctxt_switches: Option<u64>,
+    /// `NSpid:` number of values, one per PID namespace level. 0 when the line is missing
+    /// (kernels before 4.1). More than 1 means a child PID namespace.
+    pub nspid_levels: u8,
 }
 
 impl PidStatus {
@@ -173,6 +176,9 @@ pub fn parse_status(buf: &[u8], out: &mut PidStatus) -> Result<(), CollectError>
             }
             b"voluntary_ctxt_switches" => out.voluntary_ctxt_switches = unsigned(value),
             b"nonvoluntary_ctxt_switches" => out.nonvoluntary_ctxt_switches = unsigned(value),
+            b"NSpid" => {
+                out.nspid_levels = u8::try_from(tokens(value).count()).unwrap_or(u8::MAX);
+            }
             _ => {}
         }
     }
@@ -261,6 +267,17 @@ fn parse_u64(digits: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nspid_levels_count_values() {
+        let mut out = PidStatus::default();
+        parse_status(b"Uid:\t1\t1\t1\t1\nNSpid:\t4242\n", &mut out).unwrap();
+        assert_eq!(out.nspid_levels, 1);
+        parse_status(b"Uid:\t1\t1\t1\t1\nNSpid:\t4242\t1\n", &mut out).unwrap();
+        assert_eq!(out.nspid_levels, 2);
+        parse_status(b"Uid:\t1\t1\t1\t1\n", &mut out).unwrap();
+        assert_eq!(out.nspid_levels, 0);
+    }
 
     #[test]
     fn value_helpers() {
