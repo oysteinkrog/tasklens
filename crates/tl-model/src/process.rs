@@ -292,6 +292,63 @@ pub struct GroupRow {
     pub validity: FieldValidity,
 }
 
+impl GroupRow {
+    /// A row with the given identity and every other field 0, `None` or `false`. For tests and
+    /// for builders that fill the rest. There is no `Default`: a made-up identity would be a bug.
+    pub fn empty(
+        node: NodeId,
+        key: GroupKey,
+        kind: GroupRowKind,
+        class: GroupKind,
+        name: Arc<str>,
+        validity: FieldValidity,
+    ) -> GroupRow {
+        GroupRow {
+            node,
+            key,
+            kind,
+            class,
+            name,
+            icon: None,
+            members: 0,
+            pids: 0,
+            note: None,
+            memory_bytes: 0,
+            disk_bps: 0.0,
+            net_bps: 0.0,
+            gpu_pct: 0.0,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            threads: 0,
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            commit_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            handles: None,
+            desktop_path: None,
+            description: None,
+            user: None,
+            frozen: false,
+            validity,
+        }
+    }
+}
+
 /// Which expensive fields cover which keys (ADR-008). Keys not listed show WarmingUp for PSS and USS.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct Coverage {
@@ -350,6 +407,45 @@ pub struct ProcessExtras {
     pub wine: Option<Arc<WineProcess>>,
 }
 
+/// The value for tests and for fields a sweep did not read. The sweep still writes every field.
+impl Default for ProcessExtras {
+    fn default() -> Self {
+        ProcessExtras {
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            start_boot_ns: 0,
+            rss_peak_bytes: 0,
+            rss_shared_bytes: 0,
+            commit_bytes: 0,
+            vsize_bytes: 0,
+            vsize_peak_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            policy: SchedPolicy::Other,
+            rt_prio: 0,
+            affinity: CpuSet::default(),
+            handles: None,
+            exe_name: Arc::from(""),
+            exe_path: Arc::from(""),
+            exe_deleted: false,
+            unit: None,
+            state_letter: 0,
+            frozen: false,
+            disk_read_bps: 0.0,
+            disk_write_raw_bps: 0.0,
+            flag_since_ns: 0,
+            pgrp: 0,
+            sid: 0,
+            last_cpu: 0,
+            wine: None,
+        }
+    }
+}
+
 /// What a Wine process runs (memory groups, D-036). Read with the process's metadata.
 ///
 /// Privacy: both paths are user data. Never log them above debug level (ADR-015).
@@ -378,6 +474,25 @@ pub struct AppCgroupSample {
     pub frozen: bool,
     pub cgroup: CgroupRef,
     pub validity: FieldValidity,
+}
+
+impl AppCgroupSample {
+    /// A sample with the given identity and every other field 0 or `false`.
+    pub fn empty(group: GroupKey, cgroup: CgroupRef, validity: FieldValidity) -> AppCgroupSample {
+        AppCgroupSample {
+            group,
+            anon_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            rios: 0,
+            wios: 0,
+            pids: 0,
+            frozen: false,
+            cgroup,
+            validity,
+        }
+    }
 }
 
 /// P2 per-process column values, filled only for `Demand.detail_keys` (ADR-008 visible-rows
@@ -508,6 +623,35 @@ mod tests {
         for (c, want) in cases {
             assert_eq!(ProcState::from_stat_char(c), want, "{}", c as char);
         }
+    }
+
+    #[test]
+    fn base_values_have_the_documented_defaults() {
+        let x = ProcessExtras::default();
+        assert_eq!(x.policy, SchedPolicy::Other);
+        assert_eq!(x.handles, None);
+        let key = GroupKey(7);
+        let row = GroupRow::empty(
+            NodeId::Group(key),
+            key,
+            GroupRowKind::App,
+            GroupKind::Background,
+            Arc::from("n"),
+            FieldValidity::default(),
+        );
+        assert_eq!(row.node, NodeId::Group(key));
+        assert_eq!(row.key, key);
+        assert_eq!(row.kind, GroupRowKind::App);
+        assert_eq!(&*row.name, "n");
+        assert_eq!(row.members, 0);
+        assert_eq!(row.handles, None);
+        let cg = CgroupRef {
+            rel_path: Arc::from("a/b"),
+            cgroup_id: 5,
+        };
+        let s = AppCgroupSample::empty(key, cg.clone(), FieldValidity::default());
+        assert_eq!(s.group, key);
+        assert_eq!(s.cgroup, cg);
     }
 
     #[test]
