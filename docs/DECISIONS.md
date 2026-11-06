@@ -185,8 +185,9 @@ the tasklens theme, laid out from data (UI-PRF-017). The leader recorded these d
   tick, a box that did not change builds no geometry, and the page render does fixed work with no
   text formatting.
 - **Demand.** `cpu_fast` is true while the page is active, so the CPU box updates at 10 Hz.
-- **Sidebar card.** It shows the CPU-total mini graph, a static line 1 "CPU, memory, GPU, disk,
-  network" and an empty line 2.
+- **Sidebar card.** It shows the Overview icon (a 2x2 grid), a static line 1 "CPU, memory, GPU, disk,
+  network" and an empty line 2. It shows no live value and reads no samples (owner request
+  2026-11-05).
 - **Order and keys.** Overview is the first card by default and moves with `device_order`. F1
   opens Overview and F2 opens CPU.
 - **Profiles.** New profiles keep `selected_device = "cpu"`.

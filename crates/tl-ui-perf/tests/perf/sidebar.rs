@@ -1104,10 +1104,10 @@ mod sidebar {
     }
 
     #[gpui_kit::test]
-    fn cpu_series_renders_and_paints_cpu_and_overview_cards(cx: &mut TestAppContext) {
+    fn cpu_series_renders_and_paints_only_cpu_card_with_overview(cx: &mut TestAppContext) {
         let deltas = cpu_series_card_deltas(cx, with_overview());
         for (key, renders, paints) in deltas {
-            let expected = u32::from(key == "cpu" || key == OVERVIEW);
+            let expected = u32::from(key == "cpu");
             assert_eq!(renders, expected, "{key} render delta");
             assert_eq!(paints, expected, "{key} paint delta");
         }
@@ -1254,9 +1254,49 @@ mod sidebar {
         draw(r.vcx);
 
         let overview = prepared(&mut r, OVERVIEW);
-        assert_eq!(&*overview.value.expect("value").text, "100.0%");
+        assert!(overview.value.is_none());
         assert_eq!(overview.clear, px(30.));
         assert_eq!(prepared(&mut r, "cpu").clear, px(0.));
+    }
+
+    /// tasklens-5ifda: the Overview card draws an icon in the graph slot, no chart and no value.
+    #[gpui_kit::test]
+    fn overview_card_draws_icon_no_chart_no_value(cx: &mut TestAppContext) {
+        let mut settings = with_overview();
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(900.)));
+        r.host_w.set(252.);
+        r.vcx.update(|window, _| window.refresh());
+        draw(r.vcx);
+        publish_cpu_value_at(&mut r, now_boot_ns(), 100.);
+        draw(r.vcx);
+        let icon = r
+            .vcx
+            .debug_bounds(sel(format!("perf-card-overview-icon:{OVERVIEW}")))
+            .expect("overview icon");
+        let slot = r
+            .vcx
+            .debug_bounds(sel(format!("perf-card-graph:{OVERVIEW}")))
+            .expect("graph slot");
+        assert!(slot.contains(&icon.origin) && slot.contains(&icon.bottom_right()));
+        let chart = chart_of(&mut r, OVERVIEW);
+        let (series, renders) = r
+            .vcx
+            .read_entity(&chart, |v, _| (v.spec.series.len(), v.render_count.get()));
+        assert_eq!((series, renders), (0, 0));
+        assert!(prepared(&mut r, OVERVIEW).value.is_none());
+        let l = lines(&mut r, OVERVIEW);
+        for text in [&l.heading, &l.line1, &l.line2] {
+            assert!(!text.contains('%') && !text.chars().any(|c| c.is_ascii_digit()));
+        }
+        assert!(
+            r.vcx
+                .debug_bounds(sel("perf-card-overview-icon:cpu".to_owned()))
+                .is_none()
+        );
+        let cpu = chart_of(&mut r, "cpu");
+        assert!(r.vcx.read_entity(&cpu, |v, _| v.render_count.get()) > 0);
     }
 
     /// tasklens-crw.101, leader decision: at every nav_width from 180 to 400 every card shows its

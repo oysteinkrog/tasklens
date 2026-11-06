@@ -50,13 +50,16 @@ use tl_ui_kit::components::validity::copy_text;
 
 /// Least card height, × ui_scale. A card grows when its wrapped text needs more.
 pub const CARD_H: f32 = 80.0;
-/// Mini graph width, × ui_scale. Every card draws its graph at this size (UI-PRF-059), unless
+/// Mini graph width, × ui_scale. Every card draws its graph at this size (UI-PRF-059), and the
+/// Overview card draws its icon in a slot of this size, unless
 /// the top card's title needs the room ([`card_graph_width`]).
 pub const CARD_GRAPH_W: f32 = 80.0;
 /// The narrowest a mini graph gets to make room for the top card's title, × ui_scale (crw.101).
 pub const CARD_GRAPH_MIN_W: f32 = 40.0;
 /// Mini graph height, × ui_scale.
 pub const CARD_GRAPH_H: f32 = 48.0;
+/// Overview card icon size, × ui_scale. It sits centred in the graph slot.
+const OVERVIEW_ICON: f32 = 32.0;
 /// Gap between the graph and the text column, × ui_scale (UI-PRF-059).
 const CARD_TEXT_GAP: f32 = 10.0;
 
@@ -1888,12 +1891,25 @@ impl RenderOnce for DeviceCard {
         }
 
         let graph_key = key.0.clone();
-        let graph = div()
+        let slot = div()
             .tl_selector(move || format!("perf-card-graph:{graph_key}"))
             .flex_none()
             .w(graph_w)
-            .h(px(CARD_GRAPH_H * s))
-            .child(self.chart.cached(StyleRefinement::default().size_full()));
+            .h(px(CARD_GRAPH_H * s));
+        let graph = if key.kind() == DeviceKind::Overview {
+            let icon_key = key.0.clone();
+            slot.flex().items_center().justify_center().child(
+                div()
+                    .tl_selector(move || format!("perf-card-overview-icon:{icon_key}"))
+                    .child(icon(
+                        TlIcon::LayoutGrid,
+                        px(OVERVIEW_ICON * s),
+                        theme.text_secondary,
+                    )),
+            )
+        } else {
+            slot.child(self.chart.cached(StyleRefinement::default().size_full()))
+        };
 
         let pressed = theme.row_selected.opacity(PRESSED_ALPHA);
         let hover = theme.row_hover;
@@ -2158,6 +2174,8 @@ mod tests {
                 ""
             )
         );
+        let (_, line1, line2) = strs(&l);
+        assert!(!line1.contains('%') && !line2.contains('%'));
     }
 
     /// UI-PRF-059: the Overview line 1 wraps at every " · " to as many rows as it needs, and is

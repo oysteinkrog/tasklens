@@ -388,12 +388,9 @@ fn card_spec(
         max: 100.0,
     };
     let (series, y, fmt): (SmallVec<[ChartSeries; 4]>, _, _) = match row.kind {
-        // The CPU total of the CPU package (`row.idx`), so no new history (D-022).
-        DeviceKind::Overview => (
-            smallvec![filled(MetricId::CPU_TOTAL, g.cpu_line, g.cpu_fill)],
-            percent,
-            ValueFormat::Percent,
-        ),
+        // No series: the card draws the Overview icon and reads no samples (D-022, amended
+        // 2026-11-05).
+        DeviceKind::Overview => (SmallVec::new(), percent, ValueFormat::Percent),
         DeviceKind::Cpu => {
             let mut series = smallvec![filled(MetricId::CPU_TOTAL, g.cpu_line, g.cpu_fill)];
             if s.cpu_kernel {
