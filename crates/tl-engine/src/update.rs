@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use tl_collect::proc::sweep::CpuWindow;
 use tl_model::actions::{ActionId, CgroupRef};
 use tl_model::command::{Command, SetupState};
@@ -304,22 +305,35 @@ pub struct GpuSample {
     pub drm_processes: Option<Vec<DrmProcessVram>>,
 }
 
-/// Dedicated GPU memory of one DRM client, from `/proc/<pid>/fdinfo`. A process with several
-/// clients has several rows; a client shared by several processes has one row.
+/// GPU memory and engine use of one DRM client, from `/proc/<pid>/fdinfo`. A process with
+/// several clients has several rows; a client shared by several processes has one row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrmProcessVram {
     /// The card's PCI slot in sysfs form, as in its `DeviceIdentity`.
     pub pdev: Arc<str>,
     pub pid: u32,
+    /// Dedicated memory; 0 when the client has none (an integrated card).
     pub vram_bytes: u64,
+    /// Shared (GTT) memory: amdgpu `drm-memory-gtt`, Intel `drm-resident-system` (xe) or
+    /// `drm-resident-system0` (i915) (PROC-033).
+    pub shared_bytes: u64,
+    /// Busy percent, 0 to 100, per fdinfo engine name since the previous scan: the delta of
+    /// `drm-engine-<name>` ns over the delta of the scan time. Empty on the first scan and for a
+    /// client that is new since then. The names are the plain fdinfo names. Encode and decode come
+    /// from `video*` (PROC-033) and, by leader decision 2026-11-06, from amdgpu `enc` and `dec`;
+    /// the processes reducer does that mapping.
+    pub engines: SmallVec<[(Arc<str>, f32); 4]>,
 }
 
 impl DrmProcessVram {
+    /// A row with dedicated memory only.
     pub fn new(pdev: Arc<str>, pid: u32, vram_bytes: u64) -> Self {
         Self {
             pdev,
             pid,
             vram_bytes,
+            shared_bytes: 0,
+            engines: SmallVec::new(),
         }
     }
 }

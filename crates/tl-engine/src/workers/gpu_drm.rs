@@ -77,38 +77,75 @@ pub fn wants_processes(d: &Demand) -> bool {
     (d.any_surface_visible && d.gpu_process) || d.recording
 }
 
-/// Dedicated memory of each client in `scan` on one of `cards`, one row per client. The scan is
-/// already de-duplicated by `drm-client-id`, so a client shared by several fds or processes
-/// counts once. A client without a VRAM key is skipped.
+/// Memory and engine use of each client in `scan` on one of `cards`, one row per client. The
+/// scan is already de-duplicated by `drm-client-id`, so a client shared by several fds or
+/// processes counts once. A client with no dedicated memory, no shared memory and no engine key
+/// is skipped. The reducer sums the rows of one pid (PROC-033).
 ///
-/// The value is `drm-memory-vram` (amdgpu before the common keys), else the resident size of
-/// the dedicated region (`vram`, `vram0` for xe, `local0` for i915), else its total size.
-pub fn process_vram(scan: &FdinfoScan, cards: &[DrmCard], out: &mut Vec<DrmProcessVram>) {
+/// Dedicated memory is `drm-memory-vram` (amdgpu before the common keys), else the resident size
+/// of the dedicated region (`vram`, `vram0` for xe, `local0` for i915), else its total size, else
+/// 0. Shared memory is `drm-memory-gtt` (amdgpu), else the resident size of `gtt`, `system` (xe)
+/// or `system0` (i915), else 0.
+///
+/// Engine busy percent comes from `prev`, the scan before `scan`: the delta of each
+/// `drm-engine-<name>` ns over the delta of the scan time, times 100, clamped to 0..=100. The
+/// previous ns are those of the client with the same pdev, client id and pid. Without `prev`, or
+/// for a client new since `prev`, the row has no engines. xe reports cycles, not ns, so xe rows
+/// have no engines here.
+pub fn process_vram(
+    scan: &FdinfoScan,
+    prev: Option<&FdinfoScan>,
+    cards: &[DrmCard],
+    out: &mut Vec<DrmProcessVram>,
+) {
     out.clear();
+    let dt = prev.map_or(0, |p| scan.t_ns.saturating_sub(p.t_ns));
     for c in &scan.clients {
         let Some(card) = cards.iter().find(|k| k.pci_slot == c.pdev) else {
             continue;
         };
-        let region = |list: &[(Arc<str>, u64)]| {
+        let region = |list: &[(Arc<str>, u64)], names: &[&str]| {
             list.iter()
-                .find(|(n, _)| VRAM_REGIONS.contains(&&**n))
+                .find(|(n, _)| names.contains(&&**n))
                 .map(|&(_, v)| v)
         };
-        let vram = region(&c.memory_bytes)
-            .or_else(|| region(&c.resident_bytes))
-            .or_else(|| region(&c.total_bytes));
-        if let Some(vram_bytes) = vram {
-            out.push(DrmProcessVram {
-                pdev: Arc::clone(&card.pci_slot),
-                pid: c.pid,
-                vram_bytes,
-            });
+        let vram = region(&c.memory_bytes, &VRAM_REGIONS)
+            .or_else(|| region(&c.resident_bytes, &VRAM_REGIONS))
+            .or_else(|| region(&c.total_bytes, &VRAM_REGIONS));
+        let shared = region(&c.memory_bytes, &SHARED_REGIONS)
+            .or_else(|| region(&c.resident_bytes, &SHARED_REGIONS));
+        if vram.is_none() && shared.is_none() && c.engine_ns.is_empty() {
+            continue;
         }
+        let mut row = DrmProcessVram::new(Arc::clone(&card.pci_slot), c.pid, vram.unwrap_or(0));
+        row.shared_bytes = shared.unwrap_or(0);
+        let before = prev.filter(|_| dt > 0).and_then(|p| {
+            p.clients
+                .iter()
+                .find(|p| p.client_id == c.client_id && p.pid == c.pid && p.pdev == c.pdev)
+        });
+        if let Some(before) = before {
+            for (name, now) in &c.engine_ns {
+                let then = before
+                    .engine_ns
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map_or(*now, |&(_, v)| v);
+                // A counter that went backwards adds nothing (ADR-008).
+                let pct = now.saturating_sub(then) as f64 / dt as f64 * 100.0;
+                row.engines
+                    .push((Arc::clone(name), (pct as f32).clamp(0.0, 100.0)));
+            }
+        }
+        out.push(row);
     }
 }
 
 /// Names of the dedicated memory region: amdgpu, xe, i915 (R-275).
 const VRAM_REGIONS: [&str; 3] = ["vram", "vram0", "local0"];
+
+/// Names of the shared memory region: amdgpu, xe, i915 (PROC-033).
+const SHARED_REGIONS: [&str; 3] = ["gtt", "system", "system0"];
 
 /// The reader state of one card, reused every sample.
 #[derive(Clone, Debug)]
@@ -230,7 +267,12 @@ impl GpuDrmSource {
         scan(&self.root, &mut self.cur_scan);
         let partial = self.cur_scan.partial;
         let drm_processes = processes.then(|| {
-            process_vram(&self.cur_scan, &self.cards, &mut self.vram);
+            process_vram(
+                &self.cur_scan,
+                self.prev_scan.as_ref(),
+                &self.cards,
+                &mut self.vram,
+            );
             self.vram.clone()
         });
 
@@ -918,7 +960,7 @@ mod tests {
         scan(&SysRoot::at(&dir), &mut fd_scan);
         assert!(!fd_scan.partial);
         let mut out = Vec::new();
-        process_vram(&fd_scan, cards, &mut out);
+        process_vram(&fd_scan, None, cards, &mut out);
         let mut rows: Vec<_> = out
             .into_iter()
             .map(|r| (r.pdev.to_string(), r.pid, r.vram_bytes))
@@ -947,14 +989,191 @@ mod tests {
     #[test]
     fn intel_fdinfo_vram() {
         let rows = fixture_vram(&[card("0000:00:02.0", "i915"), card("0000:04:00.0", "xe")]);
-        // i915 `local0` and xe `vram0`; the xe client with system memory only has no row.
+        // i915 `local0` and xe `vram0`; the xe client with system memory only has a row with no
+        // dedicated memory.
         assert_eq!(
             rows,
             [
                 ("0000:00:02.0".into(), 3002, 8 * MIB),
+                ("0000:04:00.0".into(), 3003, 0),
                 ("0000:04:00.0".into(), 3003, 20 * MIB),
             ]
         );
+    }
+
+    /// The `drm-vram` fixture scanned once, at `t_ns`.
+    fn fixture_scan(t_ns: TimeNs) -> FdinfoScan {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/drm-vram");
+        let mut fd_scan = FdinfoScan::default();
+        scan(&SysRoot::at(&dir), &mut fd_scan);
+        fd_scan.t_ns = t_ns;
+        fd_scan
+    }
+
+    #[test]
+    fn fdinfo_shared_bytes() {
+        let cards = [
+            card("0000:03:00.0", "amdgpu"),
+            card("0000:00:02.0", "i915"),
+            card("0000:04:00.0", "xe"),
+        ];
+        let mut cur = fixture_scan(2 * SEC);
+        // amdgpu `drm-memory-gtt` wins over `drm-resident-gtt`, as for VRAM.
+        let amd = cur
+            .clients
+            .iter_mut()
+            .find(|c| c.client_id == 41)
+            .expect("client 41");
+        amd.memory_bytes.push((Arc::from("gtt"), 6 * MIB));
+        let mut out = Vec::new();
+        process_vram(&cur, Some(&fixture_scan(SEC)), &cards, &mut out);
+        let mut rows: Vec<_> = out
+            .iter()
+            .map(|r| (r.pdev.to_string(), r.pid, r.vram_bytes, r.shared_bytes))
+            .collect();
+        rows.sort();
+        let amd_40 = ("0000:03:00.0".to_string(), 64 * MIB, 0);
+        assert!(
+            rows.iter()
+                .any(|r| (r.0.clone(), r.2, r.3) == amd_40 && (r.1 == 3000 || r.1 == 3001)),
+            "{rows:?}"
+        );
+        for row in [
+            // amdgpu client 41: `drm-memory-gtt` before `drm-resident-gtt` (4 MiB).
+            ("0000:03:00.0".to_string(), 3000, 16 * MIB, 6 * MIB),
+            // i915: `drm-resident-system0`.
+            ("0000:00:02.0".to_string(), 3002, 8 * MIB, MIB),
+            // xe: `drm-resident-system`; client 9 has only `drm-total-system`, which is not
+            // resident.
+            ("0000:04:00.0".to_string(), 3003, 0, 4 * MIB),
+            ("0000:04:00.0".to_string(), 3003, 20 * MIB, 0),
+        ] {
+            assert!(rows.contains(&row), "{row:?} in {rows:?}");
+        }
+        assert_eq!(rows.len(), 5, "{rows:?}");
+    }
+
+    #[test]
+    fn fdinfo_engine_percent_from_ns_step() {
+        let client = |pid: u32, id: u64, engines: &[(&str, u64)]| DrmClient {
+            pid,
+            driver: Arc::from("i915"),
+            pdev: Arc::from("0000:00:02.0"),
+            client_id: id,
+            engine_ns: engines
+                .iter()
+                .map(|&(n, ns)| (Arc::<str>::from(n), ns))
+                .collect(),
+            ..DrmClient::default()
+        };
+        let prev = FdinfoScan {
+            clients: vec![
+                client(10, 1, &[("render", 1_000), ("video", 5 * SEC)]),
+                // Client 2 moved from pid 11 to pid 12: no previous ns for pid 12.
+                client(11, 2, &[("render", 0)]),
+            ],
+            partial: false,
+            t_ns: SEC,
+        };
+        let cur = FdinfoScan {
+            clients: vec![
+                // 500 ms of render and 250 ms of video in 2 s; `copy` is new since `prev`.
+                client(
+                    10,
+                    1,
+                    &[
+                        ("render", 1_000 + SEC / 2),
+                        ("video", 5 * SEC + SEC / 4),
+                        ("copy", 7),
+                    ],
+                ),
+                client(12, 2, &[("render", SEC)]),
+                // New since `prev`.
+                client(10, 3, &[("render", SEC)]),
+            ],
+            partial: false,
+            t_ns: 3 * SEC,
+        };
+        let cards = [card("0000:00:02.0", "i915")];
+        let mut out = Vec::new();
+
+        // The first scan has nothing to compare with: rows, but no engines.
+        process_vram(&prev, None, &cards, &mut out);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| r.engines.is_empty()), "{out:?}");
+
+        process_vram(&cur, Some(&prev), &cards, &mut out);
+        let engines = |pid: u32, id_order: usize| {
+            out.iter()
+                .filter(|r| r.pid == pid)
+                .nth(id_order)
+                .map(|r| {
+                    r.engines
+                        .iter()
+                        .map(|(n, p)| (n.to_string(), *p))
+                        .collect::<Vec<_>>()
+                })
+                .expect("row")
+        };
+        assert_eq!(
+            engines(10, 0),
+            [
+                ("render".to_string(), 25.0),
+                ("video".to_string(), 12.5),
+                ("copy".to_string(), 0.0),
+            ]
+        );
+        assert!(engines(10, 1).is_empty());
+        assert!(engines(12, 0).is_empty());
+
+        // A step of the same counter at the same time gives no engines, and a counter that went
+        // backwards gives 0.
+        process_vram(&cur, Some(&cur), &cards, &mut out);
+        assert!(out.iter().all(|r| r.engines.is_empty()), "{out:?}");
+        process_vram(
+            &prev,
+            Some(&FdinfoScan {
+                t_ns: 0,
+                ..cur.clone()
+            }),
+            &cards,
+            &mut out,
+        );
+        assert!(
+            out.iter().flat_map(|r| &r.engines).all(|(_, p)| *p == 0.0),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn fdinfo_engine_client_on_two_fds_counts_once() {
+        // Client 40 is open on fds 3 and 4 of pid 3000 and fd 7 of pid 3001, each with
+        // `drm-engine-gfx: 1000 ns`. 250 ms of gfx in 1 s is 25 %, not 50 % or 75 %.
+        let prev = fixture_scan(SEC);
+        let mut cur = fixture_scan(2 * SEC);
+        for c in cur.clients.iter_mut().filter(|c| c.client_id == 40) {
+            for (_, ns) in c.engine_ns.iter_mut() {
+                *ns += SEC / 4;
+            }
+        }
+        let mut out = Vec::new();
+        process_vram(
+            &cur,
+            Some(&prev),
+            &[card("0000:03:00.0", "amdgpu")],
+            &mut out,
+        );
+        let gfx: Vec<_> = out
+            .iter()
+            .flat_map(|r| {
+                r.engines
+                    .iter()
+                    .map(move |(n, p)| (r.pid, n.to_string(), *p))
+            })
+            .collect();
+        assert_eq!(gfx.len(), 1, "{gfx:?}");
+        assert!(matches!(gfx[0].0, 3000 | 3001), "{gfx:?}");
+        assert_eq!((gfx[0].1.as_str(), gfx[0].2), ("gfx", 25.0));
     }
 
     #[test]
@@ -986,8 +1205,17 @@ mod tests {
             panic!("{up:?}");
         };
         let rows = g.drm_processes.expect("rows");
-        assert_eq!(rows.len(), 1);
-        assert_eq!((rows[0].pid, rows[0].vram_bytes), (3003, 20 * MIB));
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|r| (r.pid, r.vram_bytes, r.shared_bytes) == (3003, 20 * MIB, 0)),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| (r.pid, r.vram_bytes, r.shared_bytes) == (3003, 0, 4 * MIB)),
+            "{rows:?}"
+        );
 
         src.set_processes(false);
         let (_, up) = src.sample_at(clock(2 * SEC));
