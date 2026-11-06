@@ -1176,7 +1176,7 @@ mod values {
         assert_eq!(f.text(ColumnId::IoWriteDelta), "512 B");
         assert_eq!(f.text(ColumnId::IoReadRate), "2.0 MiB/s");
         assert_eq!(f.text(ColumnId::IoWriteRate), "0.5 MiB/s");
-        assert_eq!(f.text(ColumnId::IoReadOps), "1,234");
+        assert_eq!(f.text(ColumnId::IoReadOps), "1\u{2009}234");
         assert_eq!(f.text(ColumnId::IoWriteOps), "56");
 
         // A WarmingUp rate keeps the totals valid.

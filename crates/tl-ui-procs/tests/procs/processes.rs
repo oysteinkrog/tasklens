@@ -974,8 +974,8 @@ mod delegate {
         assert_eq!(SHIPPED_PHASE, 4);
         assert_eq!(process_column(ColumnId::Version).phase, 2);
         assert!(offered.contains(&ColumnId::Version));
-        assert!(!offered.contains(&ColumnId::IoReadBytes));
-        assert!(!d.columns().order.contains(&ColumnId::IoReadBytes));
+        assert!(!offered.contains(&ColumnId::DiskReadBytes));
+        assert!(!d.columns().order.contains(&ColumnId::DiskReadBytes));
         assert!(offered.contains(&ColumnId::Cpu));
 
         // No GPU: no slot.
