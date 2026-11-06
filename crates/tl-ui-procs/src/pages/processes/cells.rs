@@ -16,8 +16,8 @@ use tl_model::actions::{IoPriority, SchedPolicy};
 use tl_model::details::Elevated;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, PseudoKind};
 use tl_model::process::{
-    CgroupIo, GroupKind, GroupRow, GroupRowKind, PackageStatus, ProcCounters, ProcFlags, ProcState,
-    ProcessExtras, ProcessExtrasP2, ProcessRecord,
+    CgroupIo, GpuEngineKind, GpuEngineUse, GroupKind, GroupRow, GroupRowKind, PackageStatus,
+    ProcCounters, ProcFlags, ProcState, ProcessExtras, ProcessExtrasP2, ProcessRecord,
 };
 use tl_model::snapshot::{Snapshot, WindowsSnapshot};
 use tl_model::system::{CpuSet, Metric, ZramTotals};
@@ -380,10 +380,10 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::NetRecvRate, "processes-column-net-recv-rate", Group::Network, Kind::NetRate, Heat::Network, 1),
     col(Id::Gpu, "processes-column-gpu", Group::Gpu, Kind::Percent, Heat::GpuPercent, 1),
     col(Id::GpuMemDedicated, "processes-column-gpu-mem-dedicated", Group::Gpu, Kind::MemorySize, Heat::Vram, 1),
-    col(Id::GpuMemShared, "processes-column-gpu-mem-shared", Group::Gpu, Kind::MemorySize, Heat::Memory, NO_SOURCE),
-    col(Id::GpuEngine, "processes-column-gpu-engine", Group::Gpu, Kind::Text, Heat::None, NO_SOURCE),
-    col(Id::GpuEncode, "processes-column-gpu-encode", Group::Gpu, Kind::Percent, Heat::GpuPercent, NO_SOURCE),
-    col(Id::GpuDecode, "processes-column-gpu-decode", Group::Gpu, Kind::Percent, Heat::GpuPercent, NO_SOURCE),
+    col(Id::GpuMemShared, "processes-column-gpu-mem-shared", Group::Gpu, Kind::MemorySize, Heat::Memory, 2),
+    col(Id::GpuEngine, "processes-column-gpu-engine", Group::Gpu, Kind::Text, Heat::None, 2),
+    col(Id::GpuEncode, "processes-column-gpu-encode", Group::Gpu, Kind::Percent, Heat::GpuPercent, 2),
+    col(Id::GpuDecode, "processes-column-gpu-decode", Group::Gpu, Kind::Percent, Heat::GpuPercent, 2),
     col(Id::Gpu0, "processes-column-gpu-0", Group::Gpu, Kind::Percent, Heat::GpuPercent, 2),
     col(Id::Gpu1, "processes-column-gpu-1", Group::Gpu, Kind::Percent, Heat::GpuPercent, 2),
     col(Id::Gpu2, "processes-column-gpu-2", Group::Gpu, Kind::Percent, Heat::GpuPercent, 2),
@@ -461,6 +461,10 @@ pub struct CellWords {
     pub power: [Arc<str>; 5],
     /// Package status words (PROC-027), in `PackageStatus` declaration order.
     pub package_status: [Arc<str>; 8],
+    /// GPU engine words (PROC-033): 3D/Compute, Encode, Decode.
+    pub gpu_engine: [Arc<str>; 3],
+    /// "GPU {$n} - {$engine}".
+    pub gpu_engine_label: Template,
     /// Column labels, index aligned with [`PROCESS_COLUMNS`], for the copy commands.
     pub labels: Arc<[Arc<str>]>,
     /// Copy details labels that are not column labels: "Private bytes", "Working set".
@@ -480,18 +484,24 @@ impl CellWords {
                 let level = FluentValue::from(i64::from(level));
                 Arc::from(tr_args(cx, key, &[("level", level)]).as_ref())
             },
+            Template::new(cx, "processes-gpu-engine-label", &["n", "engine"]),
         )
     }
 
     /// Every word from `text(fluent_key)`. A word with a level is the key and the level.
     pub fn from_fn(text: impl FnMut(&'static str) -> Arc<str>) -> Self {
-        Self::from_fns(text, |key, level| Arc::from(format!("{key} {level}")))
+        Self::from_fns(
+            text,
+            |key, level| Arc::from(format!("{key} {level}")),
+            Template::en("processes-gpu-engine-label", &["n", "engine"]),
+        )
     }
 
     /// Every word from `text(fluent_key)`, and the numbered ones from `leveled(fluent_key, level)`.
     pub fn from_fns(
         mut text: impl FnMut(&'static str) -> Arc<str>,
         mut leveled: impl FnMut(&'static str, u8) -> Arc<str>,
+        gpu_engine_label: Template,
     ) -> Self {
         Self {
             type_app: text("processes-type-app"),
@@ -550,6 +560,12 @@ impl CellWords {
                 text("processes-package-status-appimage"),
                 text("processes-package-status-wine"),
             ],
+            gpu_engine: [
+                text("processes-gpu-engine-3d"),
+                text("processes-gpu-engine-encode"),
+                text("processes-gpu-engine-decode"),
+            ],
+            gpu_engine_label,
             labels: PROCESS_COLUMNS.iter().map(|c| text(c.label)).collect(),
             copy_private_bytes: text("processes-copy-private-bytes"),
             copy_working_set: text("processes-copy-working-set"),
@@ -724,6 +740,8 @@ enum Value<'a> {
     Power(f32),
     IoPriority(IoPriority),
     Elevation(Elevated),
+    /// The busiest GPU engine, "GPU 0 - Encode".
+    GpuEngine(&'a GpuEngineUse),
 }
 
 /// Fills `out` for one cell. Sets `bits` and `validity` always; writes `text` only when
@@ -879,6 +897,7 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
         ),
         Value::Power(w) => (u64::from(w.to_bits()), Validity::Valid),
         Value::Elevation(e) => (elevation_index(*e) as u64, Validity::Valid),
+        Value::GpuEngine(u) => (gpu_engine_bits(u), Validity::Valid),
         Value::IoPriority(p) => (
             match p {
                 IoPriority::None => 0,
@@ -951,6 +970,21 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
         Value::Architecture(class, machine) => write_architecture(s, class, machine),
         Value::Power(w) => s.push_str(&ctx.words.power[power_class(w)]),
         Value::Elevation(e) => s.push_str(&ctx.words.elevation[elevation_index(e)]),
+        Value::GpuEngine(u) => {
+            let w = ctx.words;
+            w.gpu_engine_label.write_each(s, |i, out| {
+                if i == 0 {
+                    let _ = write!(out, "{}", u.gpu);
+                } else {
+                    out.push_str(match &u.engine {
+                        GpuEngineKind::Compute3d => &w.gpu_engine[0],
+                        GpuEngineKind::Encode => &w.gpu_engine[1],
+                        GpuEngineKind::Decode => &w.gpu_engine[2],
+                        GpuEngineKind::Drm(name) => name,
+                    });
+                }
+            });
+        }
         Value::IoPriority(p) => {
             let w = ctx.words;
             let level = |n: u8| usize::from(n).min(7);
@@ -962,6 +996,17 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
             });
         }
     }
+}
+
+/// Cache bits of a GPU engine cell: the slot, the engine kind and, for a DRM engine, its name.
+fn gpu_engine_bits(u: &GpuEngineUse) -> u64 {
+    let (kind, name) = match &u.engine {
+        GpuEngineKind::Compute3d => (0, 0),
+        GpuEngineKind::Encode => (1, 0),
+        GpuEngineKind::Decode => (2, 0),
+        GpuEngineKind::Drm(n) => (3, arc_bits(n)),
+    };
+    (u64::from(u.gpu) << 2 | kind) ^ name.rotate_left(8)
 }
 
 /// Index into `CellWords::elevation`.
@@ -1313,6 +1358,23 @@ fn record_value<'a>(
         C::CtxSwitchesDelta => p2(&|x| {
             x.ctx_switches_delta
                 .map(|n| Value::Count(n, Validity::Valid))
+        }),
+        // PROC-033: NVIDIA shared memory has no per-process value, so `None` shows `n/a`.
+        C::GpuMemShared => p2(&|x| {
+            x.gpu_mem_shared_bytes
+                .map(|n| Value::Bytes(n, Validity::Valid))
+        }),
+        C::GpuEncode => p2(&|x| x.gpu_encode_pct.map(|p| Value::Percent(p, Validity::Valid))),
+        C::GpuDecode => p2(&|x| x.gpu_decode_pct.map(|p| Value::Percent(p, Validity::Valid))),
+        // An engine at 0% is blank.
+        C::GpuEngine => p2(&|x| {
+            x.gpu_engine.as_ref().map(|u| {
+                if u.pct > 0.0 {
+                    Value::GpuEngine(u)
+                } else {
+                    Value::Blank
+                }
+            })
         }),
         C::Power => p2(&|x| x.power_w.map(Value::Power)),
         C::PowerTrend => p2(&|x| x.power_trend_w.map(Value::Power)),

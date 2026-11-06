@@ -1040,6 +1040,10 @@ mod delegate {
             ColumnId::DiskWrites,
             ColumnId::DiskReadsDelta,
             ColumnId::DiskWritesDelta,
+            ColumnId::GpuMemShared,
+            ColumnId::GpuEngine,
+            ColumnId::GpuEncode,
+            ColumnId::GpuDecode,
         ];
         for id in listed {
             assert!(offered.contains(&id), "{id:?} not offered");
@@ -1060,10 +1064,6 @@ mod delegate {
     fn no_source_columns_not_offered(cx: &mut TestAppContext) {
         setup(cx);
         let parked = [
-            ColumnId::GpuMemShared,
-            ColumnId::GpuEngine,
-            ColumnId::GpuEncode,
-            ColumnId::GpuDecode,
             ColumnId::Cycles,
             ColumnId::CyclesDelta,
             ColumnId::X11Resources,

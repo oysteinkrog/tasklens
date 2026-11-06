@@ -555,7 +555,7 @@ mod values {
     }
 
     /// The columns the P2 sweep fills. Pss, Uss and Major faults read other sources.
-    const P2_COLUMNS: [ColumnId; 20] = [
+    const P2_COLUMNS: [ColumnId; 24] = [
         ColumnId::FileMtime,
         ColumnId::FileSize,
         ColumnId::Architecture,
@@ -576,6 +576,10 @@ mod values {
         ColumnId::Company,
         ColumnId::Signer,
         ColumnId::Signature,
+        ColumnId::GpuMemShared,
+        ColumnId::GpuEngine,
+        ColumnId::GpuEncode,
+        ColumnId::GpuDecode,
     ];
 
     #[test]
@@ -680,6 +684,61 @@ mod values {
         assert_eq!(glyph(&f, ColumnId::Signer), Validity::Unsupported);
         assert_eq!(glyph(&f, ColumnId::Timestamp), Validity::Unsupported);
         assert_eq!(glyph(&f, ColumnId::Signature), Validity::Unsupported);
+    }
+
+    fn p2_en(x: ProcessExtrasP2) -> Fixture {
+        let mut f = Fixture::new(
+            record(),
+            CellWords::from_fn(|key| Arc::from(tl_ui_base::i18n::tr_en(key, &[]).as_ref())),
+        );
+        f.extras_p2 = vec![x];
+        f
+    }
+
+    #[test]
+    fn p2_gpu_shared_engine_encode_decode() {
+        use tl_model::process::{GpuEngineKind, GpuEngineUse};
+        let engine = |gpu, engine, pct| Some(GpuEngineUse { gpu, engine, pct });
+        let f = p2_en(ProcessExtrasP2 {
+            gpu_mem_shared_bytes: Some(3 * 1024 * 1024),
+            gpu_encode_pct: Some(12.0),
+            gpu_decode_pct: Some(0.0),
+            gpu_engine: engine(0, GpuEngineKind::Encode, 12.0),
+            ..ProcessExtrasP2::default()
+        });
+        assert_eq!(f.text(ColumnId::GpuMemShared), "3.00 MiB");
+        assert_eq!(f.text(ColumnId::GpuEncode), "12.0%");
+        assert_eq!(f.text(ColumnId::GpuDecode), "0%");
+        assert_eq!(f.text(ColumnId::GpuEngine), "GPU 0 - Encode");
+        for (e, want) in [
+            (GpuEngineKind::Compute3d, "GPU 1 - 3D/Compute"),
+            (GpuEngineKind::Decode, "GPU 1 - Decode"),
+            (
+                GpuEngineKind::Drm("video-enhance".into()),
+                "GPU 1 - video-enhance",
+            ),
+        ] {
+            let f = p2_en(ProcessExtrasP2 {
+                gpu_engine: engine(1, e, 5.0),
+                ..ProcessExtrasP2::default()
+            });
+            assert_eq!(f.text(ColumnId::GpuEngine), want);
+        }
+        // NVIDIA: no shared memory value shows n/a.
+        let f = p2_en(ProcessExtrasP2 {
+            gpu_encode_pct: Some(1.0),
+            ..ProcessExtrasP2::default()
+        });
+        assert_eq!(glyph(&f, ColumnId::GpuMemShared), Validity::Unsupported);
+        assert_eq!(glyph(&f, ColumnId::GpuEngine), Validity::Unsupported);
+        assert_eq!(glyph(&f, ColumnId::GpuDecode), Validity::Unsupported);
+        // An engine at 0% is blank.
+        let f = p2_en(ProcessExtrasP2 {
+            gpu_engine: engine(0, GpuEngineKind::Compute3d, 0.0),
+            ..ProcessExtrasP2::default()
+        });
+        assert_eq!(f.text(ColumnId::GpuEngine), "");
+        assert_eq!(glyph(&f, ColumnId::GpuEngine), Validity::Valid);
     }
 
     #[test]
