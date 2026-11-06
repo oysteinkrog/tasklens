@@ -507,9 +507,6 @@ impl Host {
             validity: FieldValidity::all(Validity::Valid),
         };
         let extras = ProcessExtras {
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
             utime_ticks: rng.below(100_000) as u64,
             stime_ticks: rng.below(10_000) as u64,
             start_boot_ns: key.start_ticks * 10_000_000,
@@ -519,10 +516,6 @@ impl Host {
             vsize_bytes: rss * 8,
             vsize_peak_bytes: rss * 8,
             page_faults: rng.below(1_000_000) as u64,
-            page_faults_delta: 0,
-            major_faults: 0,
-            policy: tl_model::actions::SchedPolicy::Other,
-            rt_prio: 0,
             affinity: CpuSet([u32::MAX as u64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
             handles: if kernel {
                 None
@@ -531,20 +524,15 @@ impl Host {
             },
             exe_name: record.meta.comm.clone(),
             exe_path: record.meta.exe.clone().unwrap_or_else(|| Arc::from("")),
-            exe_deleted: false,
             unit: match kind {
                 Kind::Unit(u) => Some(self.units[u].clone()),
                 _ => None,
             },
             state_letter: if kernel { b'I' } else { b'S' },
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
-            flag_since_ns: 0,
             pgrp: pid,
             sid: pid,
             last_cpu: rng.below(32) as u32,
-            wine: None,
+            ..ProcessExtras::default()
         };
         self.procs.push(Proc {
             kind,
@@ -763,20 +751,16 @@ impl Host {
                 let (pids, anon) =
                     members.fold((0, 0), |(n, b), p| (n + 1, b + p.record.rss_anon_bytes));
                 AppCgroupSample {
-                    group: *key,
                     anon_bytes: anon,
-                    swap_bytes: 0,
-                    io_read_bps: 0.0,
-                    io_write_bps: 0.0,
-                    rios: 0,
-                    wios: 0,
                     pids,
-                    frozen: false,
-                    cgroup: CgroupRef {
-                        rel_path: Arc::from(format!("user.slice/app.slice/{scope}")),
-                        cgroup_id: 0x1000 + a as u64,
-                    },
-                    validity: FieldValidity::all(Validity::Valid),
+                    ..AppCgroupSample::empty(
+                        *key,
+                        CgroupRef {
+                            rel_path: Arc::from(format!("user.slice/app.slice/{scope}")),
+                            cgroup_id: 0x1000 + a as u64,
+                        },
+                        FieldValidity::all(Validity::Valid),
+                    )
                 }
             })
             .collect();
@@ -854,31 +838,12 @@ impl Host {
             let utime = sum(&|p| p.extras.utime_ticks as f64) as u64;
             let stime = sum(&|p| p.extras.stime_ticks as f64) as u64;
             groups.push(GroupRow {
-                node,
-                key,
-                kind,
-                class,
-                name,
-                icon: None,
                 members: list.len() as u32,
                 pids: list.len() as u32,
-                note: None,
                 memory_bytes: anon,
-                disk_bps: 0.0,
-                net_bps: 0.0,
-                gpu_pct: 0.0,
                 cpu_pct: cpu,
                 rss_anon_bytes: anon,
                 rss_bytes: rss,
-                pss_bytes: 0,
-                uss_bytes: 0,
-                swap_bytes: 0,
-                io_read_bps: 0.0,
-                io_write_bps: 0.0,
-                net_rx_bps: 0.0,
-                net_tx_bps: 0.0,
-                gpu_util_pct: 0.0,
-                gpu_mem_bytes: 0,
                 threads,
                 cpu_kernel_pct: cpu * 0.2,
                 cpu_user_pct: cpu * 0.8,
@@ -886,15 +851,15 @@ impl Host {
                 utime_ticks: utime,
                 stime_ticks: stime,
                 commit_bytes: rss * 2,
-                page_faults: 0,
-                page_faults_delta: 0,
-                major_faults: 0,
                 handles: Some(threads * 10),
-                desktop_path: None,
-                description: None,
-                user: None,
-                frozen: false,
-                validity: FieldValidity::all(Validity::Valid),
+                ..GroupRow::empty(
+                    node,
+                    key,
+                    kind,
+                    class,
+                    name,
+                    FieldValidity::all(Validity::Valid),
+                )
             });
         }
         // Apps; Background: this user's processes outside an app; System: the rest.

@@ -936,7 +936,7 @@ mod tests {
     use std::collections::HashMap;
 
     use proptest::prelude::*;
-    use tl_model::actions::{CgroupRef, SchedPolicy};
+    use tl_model::actions::CgroupRef;
     use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
     use tl_model::details::{AffinityInfo, DetailsSnapshot};
     use tl_model::ids::{
@@ -1042,25 +1042,14 @@ mod tests {
             vsize_bytes: 1 << 24,
             vsize_peak_bytes: 1 << 25,
             page_faults: 10,
-            page_faults_delta: 0,
-            major_faults: 0,
-            policy: SchedPolicy::Other,
-            rt_prio: 0,
-            affinity: CpuSet::default(),
             handles: Some(12),
             exe_name: text(format!("proc{pid}")),
             exe_path: text(format!("/usr/bin/proc{pid}")),
-            exe_deleted: false,
-            unit: None,
             state_letter: b'S',
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
-            flag_since_ns: 0,
             pgrp: pid,
             sid: pid,
             last_cpu: pid % 16,
-            wine: None,
+            ..ProcessExtras::default()
         }
     }
 
@@ -1079,49 +1068,29 @@ mod tests {
 
     fn group_row(n: u64) -> GroupRow {
         GroupRow {
-            node: NodeId::Group(GroupKey(n)),
-            key: GroupKey(n),
-            kind: GroupRowKind::App,
-            class: GroupKind::App {
-                app_id: text(format!("app{n}")),
-            },
-            name: text(format!("App {n}")),
-            icon: None,
             members: 3,
             pids: 3,
-            note: None,
             memory_bytes: n << 20,
-            disk_bps: 0.0,
-            net_bps: 0.0,
-            gpu_pct: 0.0,
             cpu_pct: 2.5,
             rss_anon_bytes: n << 20,
             rss_bytes: n << 21,
-            pss_bytes: 0,
-            uss_bytes: 0,
-            swap_bytes: 0,
-            io_read_bps: 0.0,
-            io_write_bps: 0.0,
-            net_rx_bps: 0.0,
-            net_tx_bps: 0.0,
-            gpu_util_pct: 0.0,
-            gpu_mem_bytes: 0,
             threads: 9,
             cpu_kernel_pct: 0.5,
             cpu_user_pct: 2.0,
             cpu_relative_pct: 2.5,
             utime_ticks: 7,
             stime_ticks: 2,
-            commit_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
             handles: Some(30),
-            desktop_path: None,
-            description: None,
-            user: None,
-            frozen: false,
-            validity: FieldValidity::all(Validity::Valid),
+            ..GroupRow::empty(
+                NodeId::Group(GroupKey(n)),
+                GroupKey(n),
+                GroupRowKind::App,
+                GroupKind::App {
+                    app_id: text(format!("app{n}")),
+                },
+                text(format!("App {n}")),
+                FieldValidity::all(Validity::Valid),
+            )
         }
     }
 
@@ -1200,20 +1169,18 @@ mod tests {
             },
             extras: pids.iter().map(|&p| extras(p)).collect(),
             apps: Arc::from([AppCgroupSample {
-                group: GroupKey(1),
                 anon_bytes: 1 << 20,
-                swap_bytes: 0,
-                io_read_bps: 0.0,
-                io_write_bps: 0.0,
                 rios: 1,
                 wios: 2,
                 pids: 3,
-                frozen: false,
-                cgroup: CgroupRef {
-                    rel_path: Arc::from("user.slice/app-a.scope"),
-                    cgroup_id: 9,
-                },
-                validity: FieldValidity::all(Validity::Valid),
+                ..AppCgroupSample::empty(
+                    GroupKey(1),
+                    CgroupRef {
+                        rel_path: Arc::from("user.slice/app-a.scope"),
+                        cgroup_id: 9,
+                    },
+                    FieldValidity::all(Validity::Valid),
+                )
             }]),
             extras_p2: pids.iter().map(|&p| extras_p2(p)).collect(),
             low_memory: None,
