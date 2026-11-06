@@ -1016,37 +1016,11 @@ Binary: /usr/bin/sshd";
 
     fn process_extras() -> ProcessExtras {
         ProcessExtras {
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
-            utime_ticks: 0,
-            stime_ticks: 0,
-            start_boot_ns: 0,
-            rss_peak_bytes: 0,
-            rss_shared_bytes: 0,
-            commit_bytes: 0,
-            vsize_bytes: 0,
-            vsize_peak_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            policy: SchedPolicy::Other,
-            rt_prio: 0,
-            affinity: CpuSet::empty(),
-            handles: None,
             exe_name: a("sshd"),
             exe_path: a("/usr/bin/sshd"),
-            exe_deleted: false,
             unit: Some(unit_ref("sshd.service")),
             state_letter: b'S',
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
-            flag_since_ns: 0,
-            pgrp: 0,
-            sid: 0,
-            last_cpu: 0,
-            wine: None,
+            ..ProcessExtras::default()
         }
     }
 
