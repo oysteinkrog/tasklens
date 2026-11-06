@@ -295,11 +295,17 @@ impl TlTheme {
             builtin,
             accent: def.accent,
             graph: match def.graph {
-                Some(g) if g.groups_unset() => GraphPalette {
-                    groups: fallback.graph.groups,
-                    ..g
-                },
-                Some(g) => g,
+                Some(mut g) => {
+                    if g.groups_unset() {
+                        g.groups = fallback.graph.groups;
+                    }
+                    if g.power_unset() {
+                        g.power_low = fallback.graph.power_low;
+                        g.power_mid = fallback.graph.power_mid;
+                        g.power_high = fallback.graph.power_high;
+                    }
+                    g
+                }
                 None => fallback.graph,
             },
             status: def.status.unwrap_or(fallback.status),
@@ -370,6 +376,9 @@ pub mod tests {
                 grid: hex(0x1B2B3B),
                 chart_bg: hex(0x1C2C3C),
                 groups: [hex(0x1D2D3D); palette::GROUP_COLORS],
+                power_low: hex(0x1E2E3E),
+                power_mid: hex(0x1F2F3F),
+                power_high: hex(0x203040),
             },
             status: StatusColors {
                 success: hex(0x4CAF50),
@@ -508,5 +517,28 @@ pub mod tests {
             assert_eq!(slot.get(&t), def.slots[i]);
         }
         assert_eq!(t.derived.focus_ring, def.accent);
+    }
+
+    /// A user theme with graph colours but no power ramp takes the fallback theme's ramp and
+    /// keeps its own other graph colours (tasklens-1vwxr).
+    #[test]
+    fn from_def_fills_unset_power_ramp() {
+        let fallback = test_theme(ThemeMode::Dark);
+        let mut def = def_with_window_bg(0x191B1D);
+        let mut graph = fallback.graph;
+        graph.grid = hex(0x445566);
+        graph.power_low = Hsla::default();
+        graph.power_mid = Hsla::default();
+        graph.power_high = Hsla::default();
+        def.graph = Some(graph);
+        let t = TlTheme::from_def(&def, &fallback, &AppearanceSettings::default(), false, 1);
+        assert_eq!(t.graph.power_ramp(), fallback.graph.power_ramp());
+        assert_eq!(t.graph.grid, hex(0x445566));
+
+        let mut own = graph;
+        own.power_mid = hex(0x778899);
+        def.graph = Some(own);
+        let t = TlTheme::from_def(&def, &fallback, &AppearanceSettings::default(), false, 1);
+        assert_eq!(t.graph.power_mid, hex(0x778899), "a set ramp is kept");
     }
 }

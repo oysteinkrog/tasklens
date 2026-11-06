@@ -21,6 +21,12 @@ pub struct GraphPalette {
     /// The categorical colours of the memory-by-app bands (D-036, UI-PRF-060). All twelve
     /// transparent means "not set": `TlTheme::from_def` then takes the fallback theme's.
     pub groups: [Hsla; GROUP_COLORS],
+    /// The power draw ramp (tasklens-1vwxr): `power-low` at 0 W, `power-mid` at half the axis
+    /// and `power-high` at the axis maximum. All three transparent means "not set":
+    /// `TlTheme::from_def` then takes the fallback theme's.
+    pub power_low: Hsla,
+    pub power_mid: Hsla,
+    pub power_high: Hsla,
 }
 
 /// Colours in `GraphPalette.groups`.
@@ -40,6 +46,16 @@ impl GraphPalette {
     /// True when no group colours are set (all twelve are transparent).
     pub fn groups_unset(&self) -> bool {
         self.groups.iter().all(|c| *c == Hsla::default())
+    }
+
+    /// True when no power ramp colour is set (all three are transparent).
+    pub fn power_unset(&self) -> bool {
+        self.power_ramp().iter().all(|c| *c == Hsla::default())
+    }
+
+    /// The power draw ramp, low to high.
+    pub const fn power_ramp(&self) -> [Hsla; 3] {
+        [self.power_low, self.power_mid, self.power_high]
     }
 
     /// The line colour is the device accent. Overview frames, charts, meters and sidebar cards
@@ -131,11 +147,16 @@ mod tests {
             grid: color(12),
             chart_bg: color(13),
             groups: [color(14); GROUP_COLORS],
+            power_low: color(15),
+            power_mid: color(16),
+            power_high: color(17),
         };
         assert_eq!(p.device_accent(DeviceAccent::Cpu), p.cpu_line);
         assert_eq!(p.device_accent(DeviceAccent::Memory), p.mem_line);
         assert_eq!(p.device_accent(DeviceAccent::Gpu), p.gpu_line);
         assert_eq!(p.device_accent(DeviceAccent::Disk), p.disk_line);
         assert_eq!(p.device_accent(DeviceAccent::Net), p.net_line);
+        assert_eq!(p.power_ramp(), [color(15), color(16), color(17)]);
+        assert!(!p.power_unset());
     }
 }

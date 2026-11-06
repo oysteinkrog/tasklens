@@ -498,6 +498,9 @@ pub fn lerp_theme(a: &TlTheme, b: &TlTheme, t: f32) -> TlTheme {
         grid: l(ga.grid, gb.grid),
         chart_bg: l(ga.chart_bg, gb.chart_bg),
         groups: std::array::from_fn(|i| l(ga.groups[i], gb.groups[i])),
+        power_low: l(ga.power_low, gb.power_low),
+        power_mid: l(ga.power_mid, gb.power_mid),
+        power_high: l(ga.power_high, gb.power_high),
     };
     let (da, db) = (&a.derived, &b.derived);
     out.derived = Derived {

@@ -47,6 +47,9 @@ const GRAPH_KEYS: [&str; 13] = [
     "chart_bg",
 ];
 
+/// The power draw ramp keys inside `graph` (tasklens-1vwxr).
+const POWER_KEYS: [&str; 3] = ["power_low", "power_mid", "power_high"];
+
 /// A colour string that is not `#RRGGBB` or `#RRGGBBAA`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColorParseError {
@@ -230,7 +233,8 @@ fn group_colors(
 }
 
 /// Parses one theme object. Reads `name`, optional `mode`, the 22 upper-case slots, `accent`,
-/// optional `status` (4 keys) and optional `graph` (13 keys plus the 12 `groups`). Every other key goes into `extra`.
+/// optional `status` (4 keys) and optional `graph` (13 keys plus the 12 `groups` and the 3 power
+/// ramp keys). Every other key goes into `extra`.
 ///
 /// A missing or bad slot or `accent` is always an error; the user store repairs those before it
 /// calls this (E17-008). With `strict = true` a broken `mode`, `status` or `graph` is also an
@@ -340,10 +344,27 @@ pub fn parse_theme_object(
             grid,
             chart_bg,
             groups: [Hsla::default(); GROUP_COLORS],
+            power_low: Hsla::default(),
+            power_mid: Hsla::default(),
+            power_high: Hsla::default(),
         },
     );
+    // Required in the built-in themes; a user theme without them takes the fallback theme's.
+    let power = nested_colors(
+        obj,
+        &name,
+        "graph",
+        &POWER_KEYS,
+        &["graph.power_low", "graph.power_mid", "graph.power_high"],
+        strict,
+    )?;
     let graph = match graph {
         Some(mut g) => {
+            if let Some([low, mid, high]) = power {
+                g.power_low = low;
+                g.power_mid = mid;
+                g.power_high = high;
+            }
             match group_colors(obj, &name, strict)? {
                 Some(groups) => g.groups = groups,
                 None if strict => {
@@ -483,8 +504,8 @@ mod tests {
         let root: Value = serde_json::from_str(BUILTIN_JSON).unwrap();
         let mut colours = Vec::new();
         collect_colour_strings(&root, &mut colours);
-        // 2 themes x (22 slots + accent + 4 status + 13 graph + 12 group colours).
-        assert_eq!(colours.len(), 2 * (23 + 4 + 13 + GROUP_COLORS));
+        // 2 themes x (22 slots + accent + 4 status + 13 graph + 12 group + 3 power colours).
+        assert_eq!(colours.len(), 2 * (23 + 4 + 13 + GROUP_COLORS + 3));
         for c in &colours {
             assert_eq!(c.len(), 7, "{c} is not #RRGGBB");
             assert!(c[1..].bytes().all(|b| b.is_ascii_hexdigit()), "{c}");
@@ -716,5 +737,52 @@ mod tests {
         ));
         let def = parse_theme_object(&obj, false).unwrap();
         assert!(def.graph.unwrap().groups_unset());
+    }
+
+    /// Each built-in theme sets its own three power ramp colours (tasklens-1vwxr), each at least
+    /// 3:1 against `chart_bg` so the line reads in light and dark themes, and all different.
+    #[test]
+    fn power_ramp_set_and_readable() {
+        let mut failures = Vec::new();
+        for def in load().iter() {
+            let graph = def.graph.expect("built-in themes have graph colours");
+            assert!(!graph.power_unset(), "{} has no power ramp", def.name);
+            let ramp = graph.power_ramp();
+            for (i, c) in ramp.iter().enumerate() {
+                let ratio = contrast(*c, graph.chart_bg);
+                if ratio < 3.0 {
+                    failures.push(format!("{}: power {i} is {ratio:.2} on chart_bg", def.name));
+                }
+                if ramp[..i].contains(c) {
+                    failures.push(format!("{}: power {i} repeats a colour", def.name));
+                }
+            }
+        }
+        let themes = load();
+        let (dark, light) = (themes[0].graph.unwrap(), themes[1].graph.unwrap());
+        assert_ne!(
+            dark.power_ramp(),
+            light.power_ramp(),
+            "each theme has its own"
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn power_ramp_is_optional_for_user_themes() {
+        let mut obj = dark_object();
+        let graph = obj.get_mut("graph").and_then(Value::as_object_mut).unwrap();
+        graph.remove("power_mid");
+        assert!(matches!(
+            parse_theme_object(&obj, true),
+            Err(ThemeParseError::MissingSlot {
+                key: "graph.power_mid",
+                ..
+            })
+        ));
+        let def = parse_theme_object(&obj, false).unwrap();
+        let graph = def.graph.expect("the other graph keys still parse");
+        assert!(graph.power_unset());
+        assert!(!graph.groups_unset());
     }
 }
