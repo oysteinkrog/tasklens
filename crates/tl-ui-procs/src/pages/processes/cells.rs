@@ -16,7 +16,7 @@ use tl_model::actions::{IoPriority, SchedPolicy};
 use tl_model::details::Elevated;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, PseudoKind};
 use tl_model::process::{
-    GroupKind, GroupRow, GroupRowKind, PackageStatus, ProcCounters, ProcFlags, ProcState,
+    CgroupIo, GroupKind, GroupRow, GroupRowKind, PackageStatus, ProcCounters, ProcFlags, ProcState,
     ProcessExtras, ProcessExtrasP2, ProcessRecord,
 };
 use tl_model::snapshot::{Snapshot, WindowsSnapshot};
@@ -365,16 +365,16 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::DiskReadRate, "processes-column-disk-read-rate", Group::Disk, Kind::DiskRate, Heat::DiskIo, 1),
     col(Id::DiskWriteRate, "processes-column-disk-write-rate", Group::Disk, Kind::DiskRate, Heat::DiskIo, 1),
     col(Id::DiskTotalRate, "processes-column-disk-total-rate", Group::Disk, Kind::DiskRate, Heat::DiskIo, 1),
-    col(Id::DiskReadBytes, "processes-column-disk-read-bytes", Group::Disk, Kind::BytesCumulative, Heat::None, NO_SOURCE),
-    col(Id::DiskWriteBytes, "processes-column-disk-write-bytes", Group::Disk, Kind::BytesCumulative, Heat::None, NO_SOURCE),
-    col(Id::DiskTotalBytes, "processes-column-disk-total-bytes", Group::Disk, Kind::BytesCumulative, Heat::None, NO_SOURCE),
-    col(Id::DiskReadDelta, "processes-column-disk-read-delta", Group::Disk, Kind::BytesCumulative, Heat::None, NO_SOURCE),
-    col(Id::DiskWriteDelta, "processes-column-disk-write-delta", Group::Disk, Kind::BytesCumulative, Heat::None, NO_SOURCE),
-    col(Id::DiskTotalDelta, "processes-column-disk-total-delta", Group::Disk, Kind::BytesCumulative, Heat::None, NO_SOURCE),
-    col(Id::DiskReads, "processes-column-disk-reads", Group::Disk, Kind::Count, Heat::None, NO_SOURCE),
-    col(Id::DiskWrites, "processes-column-disk-writes", Group::Disk, Kind::Count, Heat::None, NO_SOURCE),
-    col(Id::DiskReadsDelta, "processes-column-disk-reads-delta", Group::Disk, Kind::Count, Heat::None, NO_SOURCE),
-    col(Id::DiskWritesDelta, "processes-column-disk-writes-delta", Group::Disk, Kind::Count, Heat::None, NO_SOURCE),
+    col(Id::DiskReadBytes, "processes-column-disk-read-bytes", Group::Disk, Kind::BytesCumulative, Heat::None, 2),
+    col(Id::DiskWriteBytes, "processes-column-disk-write-bytes", Group::Disk, Kind::BytesCumulative, Heat::None, 2),
+    col(Id::DiskTotalBytes, "processes-column-disk-total-bytes", Group::Disk, Kind::BytesCumulative, Heat::None, 2),
+    col(Id::DiskReadDelta, "processes-column-disk-read-delta", Group::Disk, Kind::BytesCumulative, Heat::None, 2),
+    col(Id::DiskWriteDelta, "processes-column-disk-write-delta", Group::Disk, Kind::BytesCumulative, Heat::None, 2),
+    col(Id::DiskTotalDelta, "processes-column-disk-total-delta", Group::Disk, Kind::BytesCumulative, Heat::None, 2),
+    col(Id::DiskReads, "processes-column-disk-reads", Group::Disk, Kind::Count, Heat::None, 2),
+    col(Id::DiskWrites, "processes-column-disk-writes", Group::Disk, Kind::Count, Heat::None, 2),
+    col(Id::DiskReadsDelta, "processes-column-disk-reads-delta", Group::Disk, Kind::Count, Heat::None, 2),
+    col(Id::DiskWritesDelta, "processes-column-disk-writes-delta", Group::Disk, Kind::Count, Heat::None, 2),
     col(Id::Network, "processes-column-network", Group::Network, Kind::NetRate, Heat::Network, 1),
     col(Id::NetSendRate, "processes-column-net-send-rate", Group::Network, Kind::NetRate, Heat::Network, 1),
     col(Id::NetRecvRate, "processes-column-net-recv-rate", Group::Network, Kind::NetRate, Heat::Network, 1),
@@ -1239,6 +1239,18 @@ fn record_value<'a>(
         | C::IoWriteOps => extra(&|x| {
             io_column(&x.counters, col, v(F::IoRead), v(F::IoWrite)).unwrap_or(Value::Blank)
         }),
+        // PROC-031 disk bytes (counters) and operations (cgroup only)
+        C::DiskReadBytes
+        | C::DiskWriteBytes
+        | C::DiskTotalBytes
+        | C::DiskReadDelta
+        | C::DiskWriteDelta
+        | C::DiskTotalDelta => {
+            extra(&|x| disk_bytes_column(&x.counters, None, col, v(F::IoRead), v(F::IoWrite)))
+        }
+        C::DiskReads | C::DiskWrites | C::DiskReadsDelta | C::DiskWritesDelta => {
+            Value::Glyph(Validity::Unsupported)
+        }
         // PROC-032 network
         C::Network => Value::NetRate(r.net_rx_bps + r.net_tx_bps, pair(F::NetRx, F::NetTx)),
         C::NetSendRate => Value::NetRate(r.net_tx_bps, v(F::NetTx)),
@@ -1394,6 +1406,41 @@ fn io_column<'a>(
     })
 }
 
+/// One Disk byte column (PROC-031). Totals need `io_read`. A group with an unread member
+/// falls back to the cgroup `io.stat` bytes (PROC-008); `io.stat` has no byte deltas, so those
+/// cells show the Restricted glyph.
+fn disk_bytes_column<'a>(
+    c: &ProcCounters,
+    cg: Option<&CgroupIo>,
+    col: ColumnId,
+    read: Validity,
+    write: Validity,
+) -> Value<'a> {
+    use ColumnId as C;
+    if !c.io_read {
+        let cum = match (col, cg) {
+            (C::DiskReadBytes, Some(g)) => Some(g.rbytes),
+            (C::DiskWriteBytes, Some(g)) => Some(g.wbytes),
+            (C::DiskTotalBytes, Some(g)) => Some(g.rbytes.saturating_add(g.wbytes)),
+            _ => None,
+        };
+        return match cum {
+            Some(b) => Value::Bytes(b, Validity::Valid),
+            None => io_value(c, read, false, |v| Value::Bytes(0, v)),
+        };
+    }
+    let (r, w) = (c.read_bytes, c.write_bytes);
+    let (rd, wd) = (c.read_bytes_delta, c.write_bytes_delta);
+    match col {
+        C::DiskReadBytes => Value::Bytes(r, Validity::Valid),
+        C::DiskWriteBytes => Value::Bytes(w, Validity::Valid),
+        C::DiskTotalBytes => Value::Bytes(r.saturating_add(w), Validity::Valid),
+        C::DiskReadDelta => Value::Bytes(rd, read),
+        C::DiskWriteDelta => Value::Bytes(wd, write),
+        _ => Value::Bytes(rd.saturating_add(wd), worse(read, write)),
+    }
+}
+
 fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a> {
     use ColumnId as C;
     use ProcessField as F;
@@ -1486,6 +1533,32 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
         | C::IoReadOps
         | C::IoWriteOps => {
             sum(io_column(&g.counters, col, v(F::IoRead), v(F::IoWrite)).unwrap_or(Value::Blank))
+        }
+        C::DiskReadBytes
+        | C::DiskWriteBytes
+        | C::DiskTotalBytes
+        | C::DiskReadDelta
+        | C::DiskWriteDelta
+        | C::DiskTotalDelta => sum(disk_bytes_column(
+            &g.counters,
+            g.cgroup_io.as_ref(),
+            col,
+            v(F::IoRead),
+            v(F::IoWrite),
+        )),
+        C::DiskReads | C::DiskWrites | C::DiskReadsDelta | C::DiskWritesDelta => {
+            match g.cgroup_io.as_ref() {
+                Some(c) => sum(Value::Count(
+                    match col {
+                        C::DiskReads => c.rios,
+                        C::DiskWrites => c.wios,
+                        C::DiskReadsDelta => c.rios_delta,
+                        _ => c.wios_delta,
+                    },
+                    Validity::Valid,
+                )),
+                None => sum(Value::Glyph(Validity::Unsupported)),
+            }
         }
         C::CommitPeak => Value::Blank,
         C::CommitDelta => sum(Value::BytesSigned(

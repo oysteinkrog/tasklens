@@ -1228,6 +1228,107 @@ mod values {
         );
     }
 
+    /// tasklens-pdu.81: the ten Disk byte, delta and operation columns.
+    #[test]
+    fn disk_byte_and_op_columns() {
+        use tl_model::process::{CgroupIo, ProcCounters};
+        use tl_ui_procs::pages::processes::cells::PROCESS_COLUMNS;
+
+        let ids = [
+            ColumnId::DiskReadBytes,
+            ColumnId::DiskWriteBytes,
+            ColumnId::DiskTotalBytes,
+            ColumnId::DiskReadDelta,
+            ColumnId::DiskWriteDelta,
+            ColumnId::DiskTotalDelta,
+            ColumnId::DiskReads,
+            ColumnId::DiskWrites,
+            ColumnId::DiskReadsDelta,
+            ColumnId::DiskWritesDelta,
+        ];
+        for id in ids {
+            assert_eq!(
+                PROCESS_COLUMNS.iter().find(|c| c.id == id).unwrap().phase,
+                2
+            );
+        }
+        let mut f = Fixture::new(record(), key_words());
+        f.extras[0].counters = ProcCounters {
+            io_read: true,
+            read_bytes: 3 << 20,
+            write_bytes: 1 << 20,
+            read_bytes_delta: 2048,
+            write_bytes_delta: 1024,
+            ..ProcCounters::default()
+        };
+        assert_eq!(f.text(ColumnId::DiskReadBytes), "3.00 MiB");
+        assert_eq!(f.text(ColumnId::DiskWriteBytes), "1.00 MiB");
+        assert_eq!(f.text(ColumnId::DiskTotalBytes), "4.00 MiB");
+        assert_eq!(f.text(ColumnId::DiskReadDelta), "2.00 KiB");
+        assert_eq!(f.text(ColumnId::DiskWriteDelta), "1.00 KiB");
+        assert_eq!(f.text(ColumnId::DiskTotalDelta), "3.00 KiB");
+
+        // Operations are per cgroup: n/a on a process row.
+        let row = table_row(false, false, 0);
+        for id in [
+            ColumnId::DiskReads,
+            ColumnId::DiskWrites,
+            ColumnId::DiskReadsDelta,
+            ColumnId::DiskWritesDelta,
+        ] {
+            assert_eq!(f.record_cell(&row, id).validity, Validity::Unsupported);
+        }
+
+        // Counters not read: the glyph, never 0.
+        f.extras[0].counters.io_read = false;
+        for id in &ids[..6] {
+            assert_eq!(f.record_cell(&row, *id).validity, Validity::Restricted);
+        }
+
+        // App row: operations from cgroup_io.
+        let mut g = group(GroupRowKind::App);
+        g.cgroup_io = Some(CgroupIo {
+            rbytes: 7 << 20,
+            wbytes: 1 << 20,
+            rios: 1_500,
+            wios: 20,
+            rios_delta: 30,
+            wios_delta: 4,
+        });
+        g.counters = ProcCounters {
+            io_read: true,
+            read_bytes: 5 << 20,
+            write_bytes: 2 << 20,
+            ..ProcCounters::default()
+        };
+        let cell = |g: &GroupRow, id| shown(&f.group_cell(g, RowKind::Process, id));
+        assert_eq!(cell(&g, ColumnId::DiskReads), "1,500");
+        assert_eq!(cell(&g, ColumnId::DiskWrites), "20");
+        assert_eq!(cell(&g, ColumnId::DiskReadsDelta), "30");
+        assert_eq!(cell(&g, ColumnId::DiskWritesDelta), "4");
+        assert_eq!(cell(&g, ColumnId::DiskReadBytes), "5.00 MiB");
+        assert_eq!(cell(&g, ColumnId::DiskTotalBytes), "7.00 MiB");
+
+        // A Restricted member: bytes come from io.stat.
+        g.counters.io_read = false;
+        assert_eq!(cell(&g, ColumnId::DiskReadBytes), "7.00 MiB");
+        assert_eq!(cell(&g, ColumnId::DiskWriteBytes), "1.00 MiB");
+        assert_eq!(cell(&g, ColumnId::DiskTotalBytes), "8.00 MiB");
+        assert_eq!(
+            f.group_cell(&g, RowKind::Process, ColumnId::DiskReadDelta)
+                .validity,
+            Validity::Restricted
+        );
+
+        // No cgroup_io: operations are n/a.
+        g.cgroup_io = None;
+        assert_eq!(
+            f.group_cell(&g, RowKind::Process, ColumnId::DiskReads)
+                .validity,
+            Validity::Unsupported
+        );
+    }
+
     #[gpui_kit::test]
     fn commit_peak_header_tooltip(cx: &mut TestAppContext) {
         cx.update(|cx| {
