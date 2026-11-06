@@ -405,6 +405,83 @@ pub struct ProcessExtras {
     /// The Windows side of a Wine process, `None` for every other process. Shared by every
     /// sweep until the process's metadata is read again.
     pub wine: Option<Arc<WineProcess>>,
+    /// Phase-2 memory and I/O counters (PROC-030, PROC-031).
+    pub counters: ProcCounters,
+}
+
+/// Per-process counters behind the phase-2 memory and I/O columns (PROC-030, PROC-031).
+/// They sit next to their P1 siblings so they sort and sum like them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProcCounters {
+    /// Highest `commit_bytes` tasklens has seen for this key.
+    pub commit_peak_bytes: u64,
+    /// Signed change of `commit_bytes` since the previous sample.
+    pub commit_delta_bytes: i64,
+    /// `VmPTE` from `/proc/<pid>/status`.
+    pub page_tables_bytes: u64,
+    /// Change of `majflt` (stat field 12) since the previous sample.
+    pub major_faults_delta: u64,
+    /// True when `/proc/<pid>/io` was read this sweep.
+    pub io_read: bool,
+    /// `/proc/<pid>/io` `read_bytes`.
+    pub read_bytes: u64,
+    /// `/proc/<pid>/io` `write_bytes`.
+    pub write_bytes: u64,
+    /// Change of `read_bytes` since the previous sample.
+    pub read_bytes_delta: u64,
+    /// Change of `write_bytes` since the previous sample.
+    pub write_bytes_delta: u64,
+    /// `/proc/<pid>/io` `rchar`.
+    pub rchar: u64,
+    /// `/proc/<pid>/io` `wchar`.
+    pub wchar: u64,
+    /// Change of `rchar` since the previous sample.
+    pub rchar_delta: u64,
+    /// Change of `wchar` since the previous sample.
+    pub wchar_delta: u64,
+    /// `/proc/<pid>/io` `syscr`.
+    pub syscr: u64,
+    /// `/proc/<pid>/io` `syscw`.
+    pub syscw: u64,
+    /// `rchar` change per second.
+    pub rchar_bps: f32,
+    /// `wchar` change per second.
+    pub wchar_bps: f32,
+}
+
+impl ProcCounters {
+    /// Adds `other` into `self` for a group row. Sums saturate. `commit_peak_bytes` is summed
+    /// too (the UI shows that column blank on group rows, PROC-030). `io_read` is true only
+    /// when both sides were read.
+    pub fn add(&mut self, other: &ProcCounters) {
+        self.commit_peak_bytes = self
+            .commit_peak_bytes
+            .saturating_add(other.commit_peak_bytes);
+        self.commit_delta_bytes = self
+            .commit_delta_bytes
+            .saturating_add(other.commit_delta_bytes);
+        self.page_tables_bytes = self
+            .page_tables_bytes
+            .saturating_add(other.page_tables_bytes);
+        self.major_faults_delta = self
+            .major_faults_delta
+            .saturating_add(other.major_faults_delta);
+        self.io_read = self.io_read && other.io_read;
+        self.read_bytes = self.read_bytes.saturating_add(other.read_bytes);
+        self.write_bytes = self.write_bytes.saturating_add(other.write_bytes);
+        self.read_bytes_delta = self.read_bytes_delta.saturating_add(other.read_bytes_delta);
+        self.write_bytes_delta = self
+            .write_bytes_delta
+            .saturating_add(other.write_bytes_delta);
+        self.rchar = self.rchar.saturating_add(other.rchar);
+        self.wchar = self.wchar.saturating_add(other.wchar);
+        self.rchar_delta = self.rchar_delta.saturating_add(other.rchar_delta);
+        self.wchar_delta = self.wchar_delta.saturating_add(other.wchar_delta);
+        self.syscr = self.syscr.saturating_add(other.syscr);
+        self.syscw = self.syscw.saturating_add(other.syscw);
+        self.rchar_bps += other.rchar_bps;
+        self.wchar_bps += other.wchar_bps;
+    }
 }
 
 /// The value for tests and for fields a sweep did not read. The sweep still writes every field.
@@ -442,6 +519,7 @@ impl Default for ProcessExtras {
             sid: 0,
             last_cpu: 0,
             wine: None,
+            counters: ProcCounters::default(),
         }
     }
 }
@@ -631,6 +709,69 @@ pub struct LowMemoryInfo {
 mod tests {
     use super::*;
     use crate::time::BootId;
+
+    #[test]
+    fn proc_counters_add_sums_each_field() {
+        let a = ProcCounters {
+            commit_peak_bytes: 10,
+            commit_delta_bytes: 5,
+            page_tables_bytes: 1,
+            major_faults_delta: 2,
+            io_read: true,
+            read_bytes: 3,
+            write_bytes: 4,
+            read_bytes_delta: 5,
+            write_bytes_delta: 6,
+            rchar: 7,
+            wchar: 8,
+            rchar_delta: 9,
+            wchar_delta: 10,
+            syscr: 11,
+            syscw: 12,
+            rchar_bps: 1.5,
+            wchar_bps: 2.5,
+        };
+        let mut sum = a;
+        sum.add(&a);
+        assert_eq!(sum.commit_peak_bytes, 20);
+        assert_eq!(sum.commit_delta_bytes, 10);
+        assert_eq!(sum.page_tables_bytes, 2);
+        assert_eq!(sum.major_faults_delta, 4);
+        assert!(sum.io_read);
+        assert_eq!((sum.read_bytes, sum.write_bytes), (6, 8));
+        assert_eq!((sum.read_bytes_delta, sum.write_bytes_delta), (10, 12));
+        assert_eq!((sum.rchar, sum.wchar), (14, 16));
+        assert_eq!((sum.rchar_delta, sum.wchar_delta), (18, 20));
+        assert_eq!((sum.syscr, sum.syscw), (22, 24));
+        assert_eq!((sum.rchar_bps, sum.wchar_bps), (3.0, 5.0));
+    }
+
+    #[test]
+    fn proc_counters_add_negative_saturating_and_io_and() {
+        let mut a = ProcCounters {
+            commit_delta_bytes: 7,
+            io_read: true,
+            ..ProcCounters::default()
+        };
+        let b = ProcCounters {
+            commit_delta_bytes: -10,
+            rchar: u64::MAX,
+            io_read: false,
+            ..ProcCounters::default()
+        };
+        a.add(&b);
+        assert_eq!(a.commit_delta_bytes, -3);
+        assert!(!a.io_read);
+        a.rchar = 5;
+        a.add(&b);
+        assert_eq!(a.rchar, u64::MAX);
+        let mut m = ProcCounters {
+            commit_delta_bytes: i64::MIN,
+            ..ProcCounters::default()
+        };
+        m.add(&b);
+        assert_eq!(m.commit_delta_bytes, i64::MIN);
+    }
 
     fn pkey(start_ticks: u64, pid: u32) -> ProcessKey {
         ProcessKey {

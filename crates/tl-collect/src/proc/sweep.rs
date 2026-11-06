@@ -57,8 +57,8 @@ use smallvec::SmallVec;
 use tl_model::actions::{CgroupRef, SchedPolicy};
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{
-    AppCgroupSample, Coverage, GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessExtrasP2,
-    ProcessMeta, ProcessRecord, WineProcess,
+    AppCgroupSample, Coverage, GroupKind, ProcCounters, ProcFlags, ProcState, ProcessExtras,
+    ProcessExtrasP2, ProcessMeta, ProcessRecord, WineProcess,
 };
 use tl_model::system::CpuSet;
 use tl_model::table::{Manager, UnitRef};
@@ -1889,6 +1889,7 @@ impl PerPid for Build<'_, '_> {
             sid: u32::try_from(p.stat.session).unwrap_or(0),
             last_cpu: u32::try_from(p.stat.processor).unwrap_or(0),
             wine: slot.wine.clone(),
+            counters: ProcCounters::default(),
         });
         self.out.side.push(SweepSide {
             class: app.class,
