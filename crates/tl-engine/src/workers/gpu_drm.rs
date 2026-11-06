@@ -77,10 +77,10 @@ pub fn wants_processes(d: &Demand) -> bool {
     (d.any_surface_visible && d.gpu_process) || d.recording
 }
 
-/// Memory and engine use of each client in `scan` on one of `cards`, one row per client. The
-/// scan is already de-duplicated by `drm-client-id`, so a client shared by several fds or
-/// processes counts once. A client with no dedicated memory, no shared memory and no engine key
-/// is skipped. The reducer sums the rows of one pid (PROC-033).
+/// Memory and engine use of each process in `scan` on one of `cards`: one row per (card, pid),
+/// summed over that pid's clients (PROC-033). The scan is already de-duplicated by
+/// `drm-client-id`, so a client shared by several fds or processes counts once. A pid whose
+/// clients have no dedicated memory, no shared memory and no engine key has no row.
 ///
 /// Dedicated memory is `drm-memory-vram` (amdgpu before the common keys), else the resident size
 /// of the dedicated region (`vram`, `vram0` for xe, `local0` for i915), else its total size, else
@@ -88,10 +88,11 @@ pub fn wants_processes(d: &Demand) -> bool {
 /// or `system0` (i915), else 0.
 ///
 /// Engine busy percent comes from `prev`, the scan before `scan`: the delta of each
-/// `drm-engine-<name>` ns over the delta of the scan time, times 100, clamped to 0..=100. The
-/// previous ns are those of the client with the same pdev, client id and pid. Without `prev`, or
-/// for a client new since `prev`, the row has no engines. xe reports cycles, not ns, so xe rows
-/// have no engines here.
+/// `drm-engine-<name>` ns over the delta of the scan time, times 100, summed over the pid's
+/// clients and clamped to 0..=100. The previous ns are those of the client with the same pdev,
+/// client id and pid. Without `prev`, or for a client new since `prev`, the client adds no
+/// engines. xe reports cycles, not ns, so xe rows have no engines here. Encode and decode are
+/// the busiest of the pid's encode and decode engines (`engine_role`).
 pub fn process_vram(
     scan: &FdinfoScan,
     prev: Option<&FdinfoScan>,
@@ -117,28 +118,68 @@ pub fn process_vram(
         if vram.is_none() && shared.is_none() && c.engine_ns.is_empty() {
             continue;
         }
-        let mut row = DrmProcessVram::new(Arc::clone(&card.pci_slot), c.pid, vram.unwrap_or(0));
-        row.shared_bytes = shared.unwrap_or(0);
+        let i = match out
+            .iter()
+            .position(|r| r.pid == c.pid && r.pdev == card.pci_slot)
+        {
+            Some(i) => i,
+            None => {
+                out.push(DrmProcessVram::new(Arc::clone(&card.pci_slot), c.pid, 0));
+                out.len() - 1
+            }
+        };
+        let row = &mut out[i];
+        row.vram_bytes = row.vram_bytes.saturating_add(vram.unwrap_or(0));
+        row.shared_bytes = row.shared_bytes.saturating_add(shared.unwrap_or(0));
         let before = prev.filter(|_| dt > 0).and_then(|p| {
             p.clients
                 .iter()
                 .find(|p| p.client_id == c.client_id && p.pid == c.pid && p.pdev == c.pdev)
         });
-        if let Some(before) = before {
-            for (name, now) in &c.engine_ns {
-                let then = before
-                    .engine_ns
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map_or(*now, |&(_, v)| v);
-                // A counter that went backwards adds nothing (ADR-008).
-                let pct = now.saturating_sub(then) as f64 / dt as f64 * 100.0;
-                row.engines
-                    .push((Arc::clone(name), (pct as f32).clamp(0.0, 100.0)));
+        let Some(before) = before else {
+            continue;
+        };
+        for (name, now) in &c.engine_ns {
+            let then = before
+                .engine_ns
+                .iter()
+                .find(|(n, _)| n == name)
+                .map_or(*now, |&(_, v)| v);
+            // A counter that went backwards adds nothing (ADR-008).
+            let pct = (now.saturating_sub(then) as f64 / dt as f64 * 100.0) as f32;
+            match row.engines.iter_mut().find(|(n, _)| n == name) {
+                Some((_, sum)) => *sum += pct,
+                None => row.engines.push((Arc::clone(name), pct)),
             }
         }
-        out.push(row);
     }
+    for row in out.iter_mut() {
+        for (name, pct) in &mut row.engines {
+            *pct = pct.clamp(0.0, 100.0);
+            let (enc, dec) = engine_role(name);
+            if enc {
+                row.encode_pct = Some(row.encode_pct.map_or(*pct, |e| e.max(*pct)));
+            }
+            if dec {
+                row.decode_pct = Some(row.decode_pct.map_or(*pct, |d| d.max(*pct)));
+            }
+        }
+    }
+}
+
+/// Whether the fdinfo engine `name` counts as (encode, decode). PROC-033 takes both from
+/// `drm-engine-video*` (Intel `video`, `video-enhance`). Leader decision 2026-11-06: amdgpu
+/// `drm-engine-enc` is encode and `drm-engine-dec` is decode; `enc_1` and further numbered rings
+/// count as `enc`.
+pub fn engine_role(name: &str) -> (bool, bool) {
+    if name.starts_with("video") {
+        return (true, true);
+    }
+    let ring = |base: &str| {
+        name.strip_prefix(base)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('_'))
+    };
+    (ring("enc"), ring("dec"))
 }
 
 /// Names of the dedicated memory region: amdgpu, xe, i915 (R-275).
@@ -973,29 +1014,26 @@ mod tests {
     fn amdgpu_fdinfo_vram() {
         let rows = fixture_vram(&[card("0000:03:00.0", "amdgpu")]);
         // Client 40 is open on fds 3 and 4 of pid 3000 and fd 7 of pid 3001: it counts once,
-        // with `drm-memory-vram`. Client 41 has only the common keys: resident wins over total.
-        // pid 3004 is on a card this worker does not read.
-        let shared = rows.iter().filter(|r| r.2 == 64 * MIB).count();
-        assert_eq!(shared, 1, "{rows:?}");
-        assert!(
-            rows.contains(&("0000:03:00.0".into(), 3000, 16 * MIB)),
-            "{rows:?}"
-        );
-        assert_eq!(rows.len(), 2, "{rows:?}");
-        let total: u64 = rows.iter().map(|r| r.2).sum();
-        assert_eq!(total, 80 * MIB);
+        // with `drm-memory-vram`, for the pid the scan meets first. Client 41 of pid 3000 has
+        // only the common keys: resident wins over total. pid 3004 is on a card this worker does
+        // not read.
+        let one_pid = [("0000:03:00.0".to_string(), 3000, 80 * MIB)];
+        let two_pids = [
+            ("0000:03:00.0".to_string(), 3000, 16 * MIB),
+            ("0000:03:00.0".to_string(), 3001, 64 * MIB),
+        ];
+        assert!(rows == one_pid || rows == two_pids, "{rows:?}");
     }
 
     #[test]
     fn intel_fdinfo_vram() {
         let rows = fixture_vram(&[card("0000:00:02.0", "i915"), card("0000:04:00.0", "xe")]);
-        // i915 `local0` and xe `vram0`; the xe client with system memory only has a row with no
-        // dedicated memory.
+        // i915 `local0`. xe `vram0`: pid 3003 has two clients, one with system memory only, and
+        // gets one row.
         assert_eq!(
             rows,
             [
                 ("0000:00:02.0".into(), 3002, 8 * MIB),
-                ("0000:04:00.0".into(), 3003, 0),
                 ("0000:04:00.0".into(), 3003, 20 * MIB),
             ]
         );
@@ -1027,35 +1065,27 @@ mod tests {
         amd.memory_bytes.push((Arc::from("gtt"), 6 * MIB));
         let mut out = Vec::new();
         process_vram(&cur, Some(&fixture_scan(SEC)), &cards, &mut out);
-        let mut rows: Vec<_> = out
-            .iter()
-            .map(|r| (r.pdev.to_string(), r.pid, r.vram_bytes, r.shared_bytes))
-            .collect();
-        rows.sort();
-        let amd_40 = ("0000:03:00.0".to_string(), 64 * MIB, 0);
-        assert!(
-            rows.iter()
-                .any(|r| (r.0.clone(), r.2, r.3) == amd_40 && (r.1 == 3000 || r.1 == 3001)),
-            "{rows:?}"
-        );
-        for row in [
-            // amdgpu client 41: `drm-memory-gtt` before `drm-resident-gtt` (4 MiB).
-            ("0000:03:00.0".to_string(), 3000, 16 * MIB, 6 * MIB),
-            // i915: `drm-resident-system0`.
-            ("0000:00:02.0".to_string(), 3002, 8 * MIB, MIB),
-            // xe: `drm-resident-system`; client 9 has only `drm-total-system`, which is not
-            // resident.
-            ("0000:04:00.0".to_string(), 3003, 0, 4 * MIB),
-            ("0000:04:00.0".to_string(), 3003, 20 * MIB, 0),
-        ] {
-            assert!(rows.contains(&row), "{row:?} in {rows:?}");
-        }
-        assert_eq!(rows.len(), 5, "{rows:?}");
+        let row = |pid: u32| {
+            out.iter()
+                .find(|r| r.pid == pid)
+                .map(|r| (r.pdev.to_string(), r.shared_bytes))
+        };
+        // amdgpu client 41 of pid 3000: `drm-memory-gtt` before `drm-resident-gtt` (4 MiB).
+        // Client 40 has no shared memory, so pid 3000 has 6 MiB wherever client 40 counts.
+        assert_eq!(row(3000), Some(("0000:03:00.0".into(), 6 * MIB)));
+        // i915: `drm-resident-system0`.
+        assert_eq!(row(3002), Some(("0000:00:02.0".into(), MIB)));
+        // xe: `drm-resident-system` of client 10; client 9 has only `drm-total-system`, which is
+        // not resident. Both are pid 3003.
+        assert_eq!(row(3003), Some(("0000:04:00.0".into(), 4 * MIB)));
+        let xe = out.iter().find(|r| r.pid == 3003).expect("xe row");
+        assert_eq!(xe.vram_bytes, 20 * MIB);
+        assert!(matches!(out.len(), 3 | 4), "{out:?}");
     }
 
-    #[test]
-    fn fdinfo_engine_percent_from_ns_step() {
-        let client = |pid: u32, id: u64, engines: &[(&str, u64)]| DrmClient {
+    /// An i915 client of `pid` with the given engine ns.
+    fn engine_client(pid: u32, id: u64, engines: &[(&str, u64)]) -> DrmClient {
+        DrmClient {
             pid,
             driver: Arc::from("i915"),
             pdev: Arc::from("0000:00:02.0"),
@@ -1065,7 +1095,23 @@ mod tests {
                 .map(|&(n, ns)| (Arc::<str>::from(n), ns))
                 .collect(),
             ..DrmClient::default()
-        };
+        }
+    }
+
+    /// The engines of the row of `pid`, as (name, percent).
+    fn engines_of(out: &[DrmProcessVram], pid: u32) -> Vec<(String, f32)> {
+        let rows: Vec<_> = out.iter().filter(|r| r.pid == pid).collect();
+        assert_eq!(rows.len(), 1, "one row for pid {pid}: {out:?}");
+        rows[0]
+            .engines
+            .iter()
+            .map(|(n, p)| (n.to_string(), *p))
+            .collect()
+    }
+
+    #[test]
+    fn fdinfo_engine_percent_from_ns_step() {
+        let client = engine_client;
         let prev = FdinfoScan {
             clients: vec![
                 client(10, 1, &[("render", 1_000), ("video", 5 * SEC)]),
@@ -1088,7 +1134,7 @@ mod tests {
                     ],
                 ),
                 client(12, 2, &[("render", SEC)]),
-                // New since `prev`.
+                // New since `prev`: adds nothing to pid 10.
                 client(10, 3, &[("render", SEC)]),
             ],
             partial: false,
@@ -1101,30 +1147,28 @@ mod tests {
         process_vram(&prev, None, &cards, &mut out);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|r| r.engines.is_empty()), "{out:?}");
+        assert!(
+            out.iter()
+                .all(|r| r.encode_pct.is_none() && r.decode_pct.is_none())
+        );
 
         process_vram(&cur, Some(&prev), &cards, &mut out);
-        let engines = |pid: u32, id_order: usize| {
-            out.iter()
-                .filter(|r| r.pid == pid)
-                .nth(id_order)
-                .map(|r| {
-                    r.engines
-                        .iter()
-                        .map(|(n, p)| (n.to_string(), *p))
-                        .collect::<Vec<_>>()
-                })
-                .expect("row")
-        };
+        assert_eq!(out.len(), 2, "{out:?}");
         assert_eq!(
-            engines(10, 0),
+            engines_of(&out, 10),
             [
                 ("render".to_string(), 25.0),
                 ("video".to_string(), 12.5),
                 ("copy".to_string(), 0.0),
             ]
         );
-        assert!(engines(10, 1).is_empty());
-        assert!(engines(12, 0).is_empty());
+        assert!(engines_of(&out, 12).is_empty());
+        // Intel `video` is both encode and decode (PROC-033).
+        let pid10 = out.iter().find(|r| r.pid == 10).expect("pid 10");
+        assert_eq!(
+            (pid10.encode_pct, pid10.decode_pct),
+            (Some(12.5), Some(12.5))
+        );
 
         // A step of the same counter at the same time gives no engines, and a counter that went
         // backwards gives 0.
@@ -1143,6 +1187,108 @@ mod tests {
             out.iter().flat_map(|r| &r.engines).all(|(_, p)| *p == 0.0),
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn fdinfo_engine_two_clients_of_one_pid_sum() {
+        let client = engine_client;
+        let prev = FdinfoScan {
+            clients: vec![
+                client(20, 1, &[("render", 0), ("video", 0)]),
+                client(20, 2, &[("render", 0), ("copy", 0)]),
+                client(21, 3, &[("render", 0)]),
+                client(21, 4, &[("render", 0)]),
+            ],
+            partial: false,
+            t_ns: SEC,
+        };
+        let cur = FdinfoScan {
+            clients: vec![
+                // pid 20 in 1 s: render 250 ms + 500 ms, video 100 ms, copy 200 ms.
+                client(20, 1, &[("render", SEC / 4), ("video", SEC / 10)]),
+                client(20, 2, &[("render", SEC / 2), ("copy", SEC / 5)]),
+                // pid 21: 600 ms + 700 ms of render is more than the second: clamped to 100.
+                client(21, 3, &[("render", SEC * 6 / 10)]),
+                client(21, 4, &[("render", SEC * 7 / 10)]),
+            ],
+            partial: false,
+            t_ns: 2 * SEC,
+        };
+        let mut out = Vec::new();
+        process_vram(&cur, Some(&prev), &[card("0000:00:02.0", "i915")], &mut out);
+        assert_eq!(out.len(), 2, "one row per pid: {out:?}");
+        assert_eq!(
+            engines_of(&out, 20),
+            [
+                ("render".to_string(), 75.0),
+                ("video".to_string(), 10.0),
+                ("copy".to_string(), 20.0),
+            ]
+        );
+        assert_eq!(engines_of(&out, 21), [("render".to_string(), 100.0)]);
+    }
+
+    #[test]
+    fn fdinfo_amdgpu_enc_dec_map_to_encode_and_decode() {
+        let amd = |pid: u32, id: u64, engines: &[(&str, u64)]| DrmClient {
+            driver: Arc::from("amdgpu"),
+            pdev: Arc::from("0000:03:00.0"),
+            ..engine_client(pid, id, engines)
+        };
+        let prev = FdinfoScan {
+            clients: vec![
+                amd(30, 1, &[("gfx", 0), ("enc", 0), ("dec", 0)]),
+                amd(30, 2, &[("enc_1", 0), ("dec", 0)]),
+                amd(31, 3, &[("gfx", 0)]),
+            ],
+            partial: false,
+            t_ns: SEC,
+        };
+        let cur = FdinfoScan {
+            clients: vec![
+                // pid 30 in 1 s: gfx 900 ms, enc 100 ms, enc_1 300 ms, dec 200 ms + 150 ms.
+                amd(
+                    30,
+                    1,
+                    &[("gfx", SEC * 9 / 10), ("enc", SEC / 10), ("dec", SEC / 5)],
+                ),
+                amd(30, 2, &[("enc_1", SEC * 3 / 10), ("dec", SEC * 15 / 100)]),
+                amd(31, 3, &[("gfx", SEC / 2)]),
+            ],
+            partial: false,
+            t_ns: 2 * SEC,
+        };
+        let mut out = Vec::new();
+        process_vram(
+            &cur,
+            Some(&prev),
+            &[card("0000:03:00.0", "amdgpu")],
+            &mut out,
+        );
+        let pid = |p: u32| out.iter().find(|r| r.pid == p).expect("row");
+        // Encode is the busier of `enc` and `enc_1`; decode is `dec` summed over both clients.
+        // `gfx` is neither.
+        assert_eq!(pid(30).encode_pct, Some(30.0));
+        assert_eq!(pid(30).decode_pct, Some(35.0));
+        assert_eq!((pid(31).encode_pct, pid(31).decode_pct), (None, None));
+    }
+
+    #[test]
+    fn engine_role_names() {
+        for (name, role) in [
+            ("video", (true, true)),
+            ("video-enhance", (true, true)),
+            ("enc", (true, false)),
+            ("enc_1", (true, false)),
+            ("dec", (false, true)),
+            ("dec_2", (false, true)),
+            ("gfx", (false, false)),
+            ("render", (false, false)),
+            ("encoder", (false, false)),
+            ("compute", (false, false)),
+        ] {
+            assert_eq!(engine_role(name), role, "{name}");
+        }
     }
 
     #[test]
@@ -1205,16 +1351,11 @@ mod tests {
             panic!("{up:?}");
         };
         let rows = g.drm_processes.expect("rows");
-        assert_eq!(rows.len(), 2, "{rows:?}");
-        assert!(
-            rows.iter()
-                .any(|r| (r.pid, r.vram_bytes, r.shared_bytes) == (3003, 20 * MIB, 0)),
-            "{rows:?}"
-        );
-        assert!(
-            rows.iter()
-                .any(|r| (r.pid, r.vram_bytes, r.shared_bytes) == (3003, 0, 4 * MIB)),
-            "{rows:?}"
+        // pid 3003 has two xe clients: one row with both.
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            (rows[0].pid, rows[0].vram_bytes, rows[0].shared_bytes),
+            (3003, 20 * MIB, 4 * MIB)
         );
 
         src.set_processes(false);

@@ -305,24 +305,29 @@ pub struct GpuSample {
     pub drm_processes: Option<Vec<DrmProcessVram>>,
 }
 
-/// GPU memory and engine use of one DRM client, from `/proc/<pid>/fdinfo`. A process with
-/// several clients has several rows; a client shared by several processes has one row.
+/// GPU memory and engine use of one process on one DRM card, from `/proc/<pid>/fdinfo`: the sum
+/// over that pid's clients (PROC-033). A client shared by several processes counts for one of
+/// them only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrmProcessVram {
     /// The card's PCI slot in sysfs form, as in its `DeviceIdentity`.
     pub pdev: Arc<str>,
     pub pid: u32,
-    /// Dedicated memory; 0 when the client has none (an integrated card).
+    /// Dedicated memory; 0 when the process has none (an integrated card).
     pub vram_bytes: u64,
     /// Shared (GTT) memory: amdgpu `drm-memory-gtt`, Intel `drm-resident-system` (xe) or
     /// `drm-resident-system0` (i915) (PROC-033).
     pub shared_bytes: u64,
     /// Busy percent, 0 to 100, per fdinfo engine name since the previous scan: the delta of
-    /// `drm-engine-<name>` ns over the delta of the scan time. Empty on the first scan and for a
-    /// client that is new since then. The names are the plain fdinfo names. Encode and decode come
-    /// from `video*` (PROC-033) and, by leader decision 2026-11-06, from amdgpu `enc` and `dec`;
-    /// the processes reducer does that mapping.
+    /// `drm-engine-<name>` ns over the delta of the scan time, summed over the pid's clients.
+    /// Empty on the first scan and for a process whose clients are all new since then. The names
+    /// are the plain fdinfo names.
     pub engines: SmallVec<[(Arc<str>, f32); 4]>,
+    /// Encode busy percent: the busiest of `engines` named `video*` (PROC-033) or, by leader
+    /// decision 2026-11-06, amdgpu `enc` and `enc_<n>`. `None` when there is no such engine.
+    pub encode_pct: Option<f32>,
+    /// Decode busy percent: as `encode_pct`, from `video*` or amdgpu `dec` and `dec_<n>`.
+    pub decode_pct: Option<f32>,
 }
 
 impl DrmProcessVram {
@@ -334,6 +339,8 @@ impl DrmProcessVram {
             vram_bytes,
             shared_bytes: 0,
             engines: SmallVec::new(),
+            encode_pct: None,
+            decode_pct: None,
         }
     }
 }

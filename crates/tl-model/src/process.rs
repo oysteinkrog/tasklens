@@ -547,10 +547,13 @@ pub struct ProcessExtrasP2 {
     /// Shared (GTT) GPU memory: AMD `drm-memory-gtt`, Intel `drm-resident-system`. `None` for
     /// NVIDIA, which has no per-process value. The DRM rows fill it.
     pub gpu_mem_shared_bytes: Option<u64>,
-    /// NVML encoder utilization, the max over the process's devices. `None` when no device that
-    /// supports process utilization has a sample for it (PROC-033 `n/a`).
+    /// Encoder utilization, the max over the process's devices: NVML encUtil, or for AMD and
+    /// Intel the fdinfo `drm-engine-video*` busy percent (PROC-033) and, by leader decision
+    /// 2026-11-06, amdgpu `drm-engine-enc`. `None` when no device that supports process
+    /// utilization has a sample for it (PROC-033 `n/a`).
     pub gpu_encode_pct: Option<f32>,
-    /// NVML decoder utilization, as `gpu_encode_pct`.
+    /// Decoder utilization, as `gpu_encode_pct`: NVML decUtil, fdinfo `drm-engine-video*`, or
+    /// amdgpu `drm-engine-dec`.
     pub gpu_decode_pct: Option<f32>,
     /// The busiest engine over all devices, as `gpu_encode_pct`.
     pub gpu_engine: Option<GpuEngineUse>,
