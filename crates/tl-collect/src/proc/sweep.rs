@@ -217,6 +217,18 @@ pub struct SweptProc {
     pub page_tables_bytes: u64,
     /// `majflt` minus the previous sample's, 0 without a usable previous sample.
     pub major_faults_delta: u64,
+    /// `read_bytes` change since the previous sample, 0 without a usable one.
+    pub read_bytes_delta: u64,
+    /// `write_bytes` change since the previous sample.
+    pub write_bytes_delta: u64,
+    /// `rchar` change since the previous sample.
+    pub rchar_delta: u64,
+    /// `wchar` change since the previous sample.
+    pub wchar_delta: u64,
+    /// `rchar` change per second (PROC-031 I/O read rate).
+    pub rchar_bps: f32,
+    /// `wchar` change per second.
+    pub wchar_bps: f32,
     pub validity: FieldValidity,
 }
 
@@ -868,6 +880,12 @@ fn sweep_one(
         commit_delta_bytes: 0,
         page_tables_bytes: status.vm_pte.unwrap_or(0),
         major_faults_delta: 0,
+        read_bytes_delta: 0,
+        write_bytes_delta: 0,
+        rchar_delta: 0,
+        wchar_delta: 0,
+        rchar_bps: 0.0,
+        wchar_bps: 0.0,
         validity,
     };
 
@@ -937,6 +955,10 @@ fn rate_base<'a>(old: &'a Prev, cur: &Prev) -> Option<(&'a Prev, f64)> {
     if let (Some(a), Some(b)) = (old.io, cur.io) {
         reset |= b.read_bytes < a.read_bytes
             || b.write_bytes < a.write_bytes
+            || b.rchar < a.rchar
+            || b.wchar < a.wchar
+            || b.syscr < a.syscr
+            || b.syscw < a.syscw
             || b.cancelled_write_bytes < a.cancelled_write_bytes;
     }
     if reset {
@@ -976,6 +998,12 @@ fn apply_rates(ctx: &SweepCtx, old: &Prev, cur: &Prev, dt_s: f64, p: &mut SweptP
         p.disk_read_bps = p.io_read_bps;
         p.disk_write_raw_bps = (d_write as f64 / dt_s) as f32;
         p.cancelled_write_bps = (d_cancel as f64 / dt_s) as f32;
+        p.read_bytes_delta = d_read;
+        p.write_bytes_delta = d_write;
+        p.rchar_delta = b.rchar - a.rchar;
+        p.wchar_delta = b.wchar - a.wchar;
+        p.rchar_bps = (p.rchar_delta as f64 / dt_s) as f32;
+        p.wchar_bps = (p.wchar_delta as f64 / dt_s) as f32;
     }
 }
 
@@ -1916,12 +1944,31 @@ impl PerPid for Build<'_, '_> {
             sid: u32::try_from(p.stat.session).unwrap_or(0),
             last_cpu: u32::try_from(p.stat.processor).unwrap_or(0),
             wine: slot.wine.clone(),
-            counters: ProcCounters {
-                commit_peak_bytes: p.commit_peak_bytes,
-                commit_delta_bytes: p.commit_delta_bytes,
-                page_tables_bytes: p.page_tables_bytes,
-                major_faults_delta: p.major_faults_delta,
-                ..ProcCounters::default()
+            counters: {
+                let io = match p.io {
+                    IoState::Valid(io) => io,
+                    IoState::Restricted | IoState::WarmingUp => PidIo::default(),
+                };
+                ProcCounters {
+                    commit_peak_bytes: p.commit_peak_bytes,
+                    commit_delta_bytes: p.commit_delta_bytes,
+                    page_tables_bytes: p.page_tables_bytes,
+                    major_faults_delta: p.major_faults_delta,
+                    io_read: matches!(p.io, IoState::Valid(_)),
+                    read_bytes: io.read_bytes,
+                    write_bytes: io.write_bytes,
+                    read_bytes_delta: p.read_bytes_delta,
+                    write_bytes_delta: p.write_bytes_delta,
+                    rchar: io.rchar,
+                    wchar: io.wchar,
+                    rchar_delta: p.rchar_delta,
+                    wchar_delta: p.wchar_delta,
+                    syscr: io.syscr,
+                    syscw: io.syscw,
+                    rchar_bps: p.rchar_bps,
+                    wchar_bps: p.wchar_bps,
+                    ..ProcCounters::default()
+                }
             },
         });
         self.out.side.push(SweepSide {

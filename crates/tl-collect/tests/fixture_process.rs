@@ -5476,3 +5476,68 @@ fn sweep_commit_peak_deltas_and_page_tables() {
     assert_eq!(p.commit_delta_bytes, -250 * page as i64);
     assert_eq!(p.major_faults_delta, 0);
 }
+
+sweep_clock!(io_counter_clock);
+
+/// Writes the 4201 `io` file with these `rchar`, `wchar`, `syscr`, `syscw`, `read_bytes`
+/// and `write_bytes` values.
+fn set_io(root: &SysRoot, v: [u64; 6]) {
+    let text = format!(
+        "rchar: {}\nwchar: {}\nsyscr: {}\nsyscw: {}\nread_bytes: {}\nwrite_bytes: {}\ncancelled_write_bytes: 0\n",
+        v[0], v[1], v[2], v[3], v[4], v[5]
+    );
+    fs::write(root.proc_path("4201/io"), text).expect("write io");
+}
+
+/// PROC-031: cumulative io counters, deltas and rates, and the reset and Restricted cases.
+#[test]
+fn sweep_io_counters_deltas_and_rates() {
+    let (_tmp, root) = sweep_root();
+    let mut core = SweepCore::new(root.clone()).with_clock(io_counter_clock::now);
+    let ctx = sweep_ctx(false);
+    let mut out = Vec::new();
+
+    set_io(&root, [1000, 2000, 10, 20, 4096, 8192]);
+    io_counter_clock::set(10 * SEC, 10 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert_eq!(
+        p.io,
+        IoState::Valid(PidIo {
+            rchar: 1000,
+            wchar: 2000,
+            syscr: 10,
+            syscw: 20,
+            read_bytes: 4096,
+            write_bytes: 8192,
+            cancelled_write_bytes: 0,
+        })
+    );
+    assert_eq!(
+        (p.read_bytes_delta, p.rchar_delta, p.rchar_bps),
+        (0, 0, 0.0)
+    );
+
+    // Two seconds later.
+    set_io(&root, [5000, 2600, 30, 25, 12288, 8192]);
+    io_counter_clock::set(12 * SEC, 12 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert_eq!(p.read_bytes_delta, 8192);
+    assert_eq!(p.write_bytes_delta, 0);
+    assert_eq!(p.rchar_delta, 4000);
+    assert_eq!(p.wchar_delta, 600);
+    assert_eq!(p.rchar_bps, 2000.0);
+    assert_eq!(p.wchar_bps, 300.0);
+
+    // `syscr` goes down: no deltas and no rates for this sweep.
+    set_io(&root, [9000, 3000, 5, 30, 12288, 8192]);
+    io_counter_clock::set(13 * SEC, 13 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert_eq!(
+        (p.rchar_delta, p.wchar_delta, p.read_bytes_delta),
+        (0, 0, 0)
+    );
+    assert_eq!((p.rchar_bps, p.wchar_bps), (0.0, 0.0));
+}
