@@ -3,6 +3,12 @@
 //! `ui_scale` 1.0 and 1.1 and compared with `tests/golden/chart_gap_spike_<scale>.png` and
 //! `cpu_grid_16_<scale>.png`. The power draw charts (tasklens-1vwxr) render low and high watts
 //! with the value ramp: `power_cpu_dark.png`, `power_gpu_dark.png` and `power_gpu_light.png`.
+//!
+//! Value colours (tasklens-j477q): the gap-and-spike chart and the CPU grid above render with
+//! `appearance.color_charts_by_value` off, so they still match the flat goldens from before the
+//! ramps. With the setting on, `chart_gap_spike_ramp_100.png` and `cpu_grid_16_ramp_100.png` show
+//! the CPU ramp, and `ramp_<kind>_<theme>.png` one chart per kind: GPU utilisation, disk active
+//! time and memory in use.
 //! `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
 //! The data is a fixed sine with seeded noise, never read from the host. Sample times sit on a
@@ -22,14 +28,17 @@ use tl_model::client::EngineClient;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::time::now_boot_ns;
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
 use tl_ui_base::hub::SnapshotHub;
-use tl_ui_base::theme::{current, metrics};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::{GraphPalette, ValueRampKind, current, metrics};
 use tl_ui_chart::chart::view::ChartView;
 use tl_ui_chart::chart::{
     ChartGridSpec, ChartGridView, ChartLabels, ChartSeries, ChartSpec, GridCellSpec, GridStyle,
     LegendStyle, ValueAlign, ValueFormat, YScale,
 };
 use tl_ui_pagehost::render::{RenderHarness, run_on_lavapipe};
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 use tl_ui_testkit::render::RgbaImage;
 
@@ -281,47 +290,93 @@ fn grid_window_h() -> f32 {
     3. * CELL_H + 2. * 8.
 }
 
-fn check_chart(scale: f32, name: &str) {
+/// Installs the settings global with `appearance.color_charts_by_value = on` (tasklens-j477q).
+fn set_value_colors(on: bool, cx: &mut App) {
+    let client: Arc<dyn EngineClient> = FakeEngine::new();
+    cx.set_global(EngineGlobal(client));
+    let mut settings = Settings::default();
+    settings.appearance.color_charts_by_value = on;
+    cx.set_global(BootSettings {
+        settings,
+        state: UiState::default(),
+        persist: None,
+        startup_toasts: Vec::new(),
+    });
+    TlSettings::init(cx);
+}
+
+/// `root` with value colours `on`.
+fn colored<V: 'static>(
+    on: bool,
+    root: fn(&mut Window, &mut App) -> Entity<V>,
+) -> impl FnOnce(&mut Window, &mut App) -> Entity<V> {
+    move |window, cx| {
+        set_value_colors(on, cx);
+        root(window, cx)
+    }
+}
+
+fn check_chart(scale: f32, on: bool, name: &str) {
     let mut harness = RenderHarness::new();
     harness.set_theme("Default Dark");
     harness.set_scale(scale);
-    let img = harness.render(size(px(CHART_W), px(CHART_H)), chart_root);
+    let img = harness.render(size(px(CHART_W), px(CHART_H)), colored(on, chart_root));
     assert_golden(name, &img);
 }
 
-fn check_grid(scale: f32, name: &str) {
+fn check_grid(scale: f32, on: bool, name: &str) {
     let mut harness = RenderHarness::new();
     harness.set_theme("Default Dark");
     harness.set_scale(scale);
-    let img = harness.render(size(px(GRID_W), px(grid_window_h())), grid_root);
+    let img = harness.render(
+        size(px(GRID_W), px(grid_window_h())),
+        colored(on, grid_root),
+    );
     assert_golden(name, &img);
 }
 
+/// Value colours off: the flat golden from before the ramps (tasklens-j477q).
 #[test]
 fn render_chart_gap_and_spike_1_0() {
     run_on_lavapipe("render_chart::render_chart_gap_and_spike_1_0", || {
-        check_chart(1.0, "chart_gap_spike_100")
+        check_chart(1.0, false, "chart_gap_spike_100")
     });
 }
 
 #[test]
 fn render_chart_gap_and_spike_1_1() {
     run_on_lavapipe("render_chart::render_chart_gap_and_spike_1_1", || {
-        check_chart(1.1, "chart_gap_spike_110")
+        check_chart(1.1, false, "chart_gap_spike_110")
     });
 }
 
 #[test]
 fn render_cpu_grid_16_1_0() {
     run_on_lavapipe("render_chart::render_cpu_grid_16_1_0", || {
-        check_grid(1.0, "cpu_grid_16_100")
+        check_grid(1.0, false, "cpu_grid_16_100")
     });
 }
 
 #[test]
 fn render_cpu_grid_16_1_1() {
     run_on_lavapipe("render_chart::render_cpu_grid_16_1_1", || {
-        check_grid(1.1, "cpu_grid_16_110")
+        check_grid(1.1, false, "cpu_grid_16_110")
+    });
+}
+
+/// Value colours on: the CPU chart with its CPU ramp (tasklens-j477q).
+#[test]
+fn render_chart_gap_and_spike_ramp() {
+    run_on_lavapipe("render_chart::render_chart_gap_and_spike_ramp", || {
+        check_chart(1.0, true, "chart_gap_spike_ramp_100")
+    });
+}
+
+/// Value colours on: every core cell with the CPU ramp, row by row (tasklens-j477q).
+#[test]
+fn render_cpu_grid_16_ramp() {
+    run_on_lavapipe("render_chart::render_cpu_grid_16_ramp", || {
+        check_grid(1.0, true, "cpu_grid_16_ramp_100")
     });
 }
 
@@ -506,5 +561,209 @@ fn render_power_gpu_dark() {
 fn render_power_gpu_light() {
     run_on_lavapipe("render_chart::render_power_gpu_light", || {
         check_power("Default Light", "power_gpu_light", power_gpu_root)
+    });
+}
+
+// One chart per value ramp kind (tasklens-j477q).
+
+const GIB: f32 = (1u64 << 30) as f32;
+
+/// The ramp fixture of a kind: about 10 % of `axis` for the older 250 samples, a climb, then
+/// about 89 %: the power fixture's shape on another axis.
+fn kind_values(axis: f32) -> Vec<f32> {
+    power_values(1.0).iter().map(|w| w / 200.0 * axis).collect()
+}
+
+/// One filled series of `id` on `y` with the device's fill and line colours.
+fn kind_root(
+    id: SeriesId,
+    y: YScale,
+    axis: f32,
+    fmt: ValueFormat,
+    heading: &'static str,
+    colors: fn(&GraphPalette) -> (gpui_kit::Hsla, gpui_kit::Hsla),
+    cx: &mut App,
+) -> Entity<Root<ChartView>> {
+    set_value_colors(true, cx);
+    let (fill, line) = colors(&current(cx).graph);
+    let spec = ChartSpec {
+        series: smallvec![ChartSeries {
+            id,
+            fill: Some(fill),
+            line,
+            ..ChartSeries::default()
+        }],
+        y,
+        grid: power_grid(),
+        ..ChartSpec::default()
+    };
+    let labels = ChartLabels {
+        heading: Some(heading.into()),
+        value_fmt: fmt,
+        value_align: ValueAlign::Right,
+        range_word: heading.into(),
+        legend: SmallVec::new(),
+        show_axis_max: true,
+    };
+    let hub = hub(cx);
+    let s = view(id, power_samples(&kind_values(axis), newest_ns()));
+    let chart = cx.new(|cx| {
+        let mut v = ChartView::new(spec, labels, &hub, cx);
+        v.set_series_for_test(smallvec![Some(s)], cx);
+        v
+    });
+    cx.new(|_| Root { child: chart })
+}
+
+const PERCENT: YScale = YScale::Fixed {
+    min: 0.0,
+    max: 100.0,
+};
+
+fn gpu_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartView>> {
+    let id = metric(1, MetricId::GPU_UTIL);
+    kind_root(
+        id,
+        PERCENT,
+        100.0,
+        ValueFormat::Percent,
+        "GPU",
+        |g| (g.gpu_fill, g.gpu_line),
+        cx,
+    )
+}
+
+fn disk_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartView>> {
+    let id = metric(2, MetricId::DISK_ACTIVE);
+    kind_root(
+        id,
+        PERCENT,
+        100.0,
+        ValueFormat::Percent,
+        "Active time",
+        |g| (g.disk_fill, g.disk_line),
+        cx,
+    )
+}
+
+fn mem_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartView>> {
+    let id = metric(3, MetricId::MEM_USED);
+    kind_root(
+        id,
+        YScale::FixedTotal(16.0 * GIB),
+        16.0 * GIB,
+        ValueFormat::Bytes,
+        "Memory usage",
+        |g| (g.mem_fill, g.mem_line),
+        cx,
+    )
+}
+
+/// The pixel at `frac` of the axis height in logical column `x`, in device px.
+fn axis_pixel(img: &RgbaImage, x: f32, frac: f32) -> [u8; 4] {
+    let k = img.width() as f32 / CHART_W;
+    let y = 1.0 + (1.0 - frac) * 198.0;
+    img.get_pixel((x * k).round() as u32, (y * k).round() as u32)
+        .0
+}
+
+/// Renders a kind chart, compares it with its golden and checks the ramp in the pixels: in the
+/// column at about 89 %, the fill near 85 % is near the theme's hot colour (red is its largest
+/// channel) and the fill near 5 % is nearer the kind's calm colour than the hot one.
+fn check_kind(
+    theme: &str,
+    name: &str,
+    kind: ValueRampKind,
+    root: fn(&mut Window, &mut App) -> Entity<Root<ChartView>>,
+) {
+    let mut harness = RenderHarness::new();
+    harness.set_theme(theme);
+    harness.set_scale(1.0);
+    let img = harness.render(size(px(CHART_W), px(CHART_H)), root);
+    assert_golden(name, &img);
+    let hot = axis_pixel(&img, 350.0, 0.85);
+    let cool = axis_pixel(&img, 350.0, 0.05);
+    assert!(
+        hot[0] > hot[1] && hot[0] > hot[2],
+        "{name}: the fill near 85 % is hot: {hot:?}"
+    );
+    let ramp = harness_ramp(theme, kind);
+    let d = |p: [u8; 4], c: gpui_kit::Rgba| {
+        let f = |v: u8| f32::from(v) / 255.0;
+        (f(p[0]) - c.r).abs() + (f(p[1]) - c.g).abs() + (f(p[2]) - c.b).abs()
+    };
+    assert!(
+        d(cool, ramp[0]) < d(cool, ramp[2]),
+        "{name}: the fill near 5 % is calm: {cool:?}"
+    );
+}
+
+/// The ramp of `kind` in built-in theme `theme` as the fill shows it: each colour at
+/// `FILL_ALPHA` over the theme's `chart_bg`, in sRGB.
+fn harness_ramp(theme: &str, kind: ValueRampKind) -> [gpui_kit::Rgba; 3] {
+    let graph = tl_ui_base::theme::builtin::load()
+        .iter()
+        .find(|d| &*d.name == theme)
+        .and_then(|d| d.graph)
+        .expect("a built-in theme with graph colours");
+    let bg: gpui_kit::Rgba = graph.chart_bg.into();
+    let a = tl_ui_chart::chart::ramp::FILL_ALPHA;
+    graph.value_ramp(kind).map(|c| {
+        let c: gpui_kit::Rgba = c.into();
+        let l = |x: f32, y: f32| y + (x - y) * a;
+        gpui_kit::Rgba {
+            r: l(c.r, bg.r),
+            g: l(c.g, bg.g),
+            b: l(c.b, bg.b),
+            a: 1.0,
+        }
+    })
+}
+
+#[test]
+fn render_ramp_gpu_dark() {
+    run_on_lavapipe("render_chart::render_ramp_gpu_dark", || {
+        check_kind(
+            "Default Dark",
+            "ramp_gpu_dark",
+            ValueRampKind::Gpu,
+            gpu_root,
+        )
+    });
+}
+
+#[test]
+fn render_ramp_disk_dark() {
+    run_on_lavapipe("render_chart::render_ramp_disk_dark", || {
+        check_kind(
+            "Default Dark",
+            "ramp_disk_dark",
+            ValueRampKind::Disk,
+            disk_root,
+        )
+    });
+}
+
+#[test]
+fn render_ramp_mem_dark() {
+    run_on_lavapipe("render_chart::render_ramp_mem_dark", || {
+        check_kind(
+            "Default Dark",
+            "ramp_mem_dark",
+            ValueRampKind::Memory,
+            mem_root,
+        )
+    });
+}
+
+#[test]
+fn render_ramp_mem_light() {
+    run_on_lavapipe("render_chart::render_ramp_mem_light", || {
+        check_kind(
+            "Default Light",
+            "ramp_mem_light",
+            ValueRampKind::Memory,
+            mem_root,
+        )
     });
 }
