@@ -4036,6 +4036,7 @@ fn nvidia_encode_decode_and_engine_fields() {
     let mut rig = Rig::new();
     let a = gpu_id([8; 16], "00000000:01:00.0");
     let b = gpu_id([9; 16], "00000000:02:00.0");
+    let c = gpu_id([10; 16], "00000000:03:00.0");
     let row = |uuid, pid, sm, enc, dec| GpuProcessSample {
         uuid,
         pid,
@@ -4047,19 +4048,24 @@ fn nvidia_encode_decode_and_engine_fields() {
     };
     rig.run(vec![
         src(SourceUpdate::GpuInfo(GpuInfoUpdate {
-            devices: vec![gpu_static(&a, true), gpu_static(&b, true)],
+            devices: vec![
+                gpu_static(&a, true),
+                gpu_static(&b, true),
+                gpu_static(&c, false),
+            ],
         })),
-        sweep_without_pss(now_boot_ns(), &[1, 2, 3]),
-        gpu_sample(&[(&a, 10.0), (&b, 10.0)]),
+        sweep_without_pss(now_boot_ns(), &[1, 2, 3, 4]),
+        gpu_sample(&[(&a, 10.0), (&b, 10.0), (&c, 10.0)]),
     ])
     .expect("no invariant violation");
     // One sample carries the rows of every device; a later sample replaces them.
-    let mut msg = gpu_sample(&[(&a, 10.0), (&b, 10.0)]);
+    let mut msg = gpu_sample(&[(&a, 10.0), (&b, 10.0), (&c, 10.0)]);
     if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut msg {
         s.processes = Some(vec![
             row([8; 16], 1, 10, 30, 5),
             row([8; 16], 2, 20, 20, 20),
             row([9; 16], 1, 10, 20, 60),
+            row([10; 16], 4, 90, 80, 70),
         ]);
     }
     rig.run(vec![msg]).expect("no invariant violation");
@@ -4099,6 +4105,11 @@ fn nvidia_encode_decode_and_engine_fields() {
     assert_eq!(none.gpu_encode_pct, None);
     assert_eq!(none.gpu_decode_pct, None);
     assert_eq!(none.gpu_engine, None);
+    // A row on a device without process utilization is ignored.
+    let unsupported = p2(4);
+    assert_eq!(unsupported.gpu_encode_pct, None);
+    assert_eq!(unsupported.gpu_decode_pct, None);
+    assert_eq!(unsupported.gpu_engine, None);
     rig.passed();
 }
 
