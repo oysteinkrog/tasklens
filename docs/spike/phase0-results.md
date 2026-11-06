@@ -916,6 +916,110 @@ The rest of the cost is in GPUI, taffy and libc. Under leader rule 1 (leader-not
 
 RSS: the RSS gate is not fixed here. It goes to the owner in tasklens-wlf.2 (see the wlf.41 section above).
 
+#### Rerun after wlf.46 (2026-11-06)
+
+Result: FAIL. With the wlf.46 GPUI text measure patch (`9c20b8156`), table-2000 had a median
+UI thread p99 of 3.90 ms (hidden nested KWin, 60 Hz), against the 2.0 ms limit. The same
+code without the patch, run in the same session and interleaved, had 3.94 ms. That
+difference is inside the run-to-run spread. Instruction counts show the saving: the patched
+binary ran 2.5% fewer user-space instructions per run.
+
+What the patch does: a text element's measure function no longer shapes the same text again
+when taffy asks for its size several times in one layout. The table's Name text has an
+ellipsis, so upstream GPUI shaped it twice on each measure call that had a width, about 5
+times per row per frame. The test `name_text_shaped_once_per_row_per_frame` pins one shape per row:
+two table frames with 27 rows went from 290 shapes to 58. `third_party/gpui-pre/PATCHES.md`
+lists the change.
+
+Setup:
+
+- Two binaries, both `cargo build --locked --profile perf -p tl-app --features bench`.
+  - Without patch: `/var/tmp/claude/wlf46/tasklens-before`, code at `2bc9e4b0f`.
+  - With patch: `/var/tmp/claude/wlf46/tasklens-after`, code at `da0b718a3`.
+    `git diff 2bc9e4b0f da0b718a3` touches only `third_party/gpui-pre/src/elements/text.rs`,
+    `third_party/gpui-pre/src/text_system.rs`, `PATCHES.md` and one test file.
+  - Both report the same version string. Tell them apart by path.
+- Hidden nested KWin `harness.sh start wlf46` (1920x1200, scale 1, 60 Hz output, app on the
+  nested Xwayland). Each run starts a fresh nested session. Wrappers set
+  `TL_BENCH_NESTED=1`, `TL_BENCH_REFRESH_HZ=60` and `TL_PIXEL_PACING=off`. Every report has
+  `refresh_hz` 60, `pacing` off, `window_active` true and 0 stalls.
+- `TL_PIXEL_PACING=off` is needed since `d85687e24` made pixel pacing the default. With
+  pacing on, the bench counts only the frames that notified a chart. table-2000 and
+  history-scrub have none, so every run failed with "0 frames drawn" (first two attempts,
+  03:40 to 03:43, kept in `drive-a1.log` and `drive-a2.log`). The pdu.69 and 8fx.47 gate
+  runs also report `pacing` off. A third attempt (`drive-a3.log`) ran nothing: its nested
+  session inherited the bench lock, so the driver now uses `flock -o`.
+- Quiet-machine rule as in the wlf.45 rerun above. Each run holds the bench slot lock.
+- Command per run: `tasklens --bench table-2000 --duration 30 --warmup 5 --json <file>`.
+  Scripts, reports and profiles: `/var/tmp/claude/wlf46/` (`drive.sh`, `drive.log`,
+  `runs-a4/`, `prof/`).
+
+| Run | Binary | Start (local) | Load at start (1, 5, 15 min) | Load at end (1 min) | Counts | p50 | p99 | max | Missed, long missed | Process CPU | RSS MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| before 1 | without patch | 03:53:11 | 3.00, 3.20, 4.42 | 3.36 | yes | 2.83 ms | 4.17 ms | 9.13 ms | 0, 0 | 18.04% | 246.62 |
+| after 1 | with patch | 03:53:49 | 3.25, 3.24, 4.38 | 3.03 | yes | 2.81 ms | 3.90 ms | 5.90 ms | 0, 0 | 17.59% | 245.92 |
+| before 2 | without patch | 03:54:28 | 3.03, 3.19, 4.32 | 3.09 | yes | 2.93 ms | 3.94 ms | 4.86 ms | 0, 0 | 18.27% | 246.62 |
+| after 2 | with patch | 03:55:07 | 2.92, 3.15, 4.25 | 2.75 | yes | 2.88 ms | 3.82 ms | 4.99 ms | 0, 0 | 17.87% | 246.17 |
+| before 3 | without patch | 03:55:46 | 2.75, 3.09, 4.19 | 2.55 | yes | 2.88 ms | 3.85 ms | 5.33 ms | 0, 0 | 17.93% | 246.93 |
+| after 3 | with patch | 03:56:25 | 2.55, 3.01, 4.12 | 3.03 | yes | 2.98 ms | 4.01 ms | 5.27 ms | 0, 0 | 18.59% | 246.37 |
+| Median before | | | | | | 2.88 ms | 3.94 ms | | 0, 0 | 18.04% | 246.62 |
+| Median after | | | | | | 2.88 ms | 3.90 ms | | 0, 0 | 17.87% | 246.17 |
+
+All frame values are UI thread CPU per frame (hidden nested KWin, 60 Hz).
+
+| Gate (hidden nested KWin, 60 Hz) | Limit | After wlf.46 | Runs | Result |
+|---|---|---|---|---|
+| UI thread CPU per frame, `table-2000`, p99 | <= 2.0 ms | 3.90 ms | 3.90, 3.82, 4.01 | FAIL |
+| Missed frames, `table-2000` | median 0, every run <= 2, long 0 | 0 missed, 0 long | 0, 0, 0 | PASS |
+| RSS after `table-2000` | <= 150 MB | 246.17 MB | 245.92, 246.17, 246.37 | FAIL |
+
+Instruction counts: two more interleaved runs per binary under `perf stat -e
+instructions:u,task-clock:u` (whole process, warm-up included; `runs-stat/`, `drive3.log`).
+Before 1 ended at load 16.92, so its timing does not count; its instruction count is kept
+because load barely moves it.
+
+| Run | Binary | Start | Load at start | Load at end | Instructions (user) | Task clock | p99 |
+|---|---|---|---|---|---|---|---|
+| before 1 | without patch | 04:16:44 | 7.82, 7.11 | 16.92 | 36,605,143,048 | 9,432 ms | 10.02 ms |
+| after 1 | with patch | 04:49:19 | 4.11, 7.94 | 3.01 | 35,701,725,297 | 6,664 ms | 3.69 ms |
+| before 2 | without patch | 04:50:44 | 2.79, 6.54 | 3.60 | 36,797,144,854 | 7,023 ms | 4.10 ms |
+| after 2 | with patch | 04:52:04 | 3.60, 5.95 | 3.29 | 35,889,908,899 | 6,919 ms | 4.28 ms |
+
+The patched binary ran 35.80 G instructions on average against 36.70 G, 2.5% fewer.
+
+Profile: one 30 s run of a profiling build of the patched code (`cargo rustc --locked
+--profile profiling -p tl-app --bin tasklens --features bench -- -C
+link-arg=-Wl,-z,separate-loadable-segments`, the relinked build from the wlf.41 section,
+because the stacks of the perf binary do not unwind), under `perf record -e cpu-clock:u -F
+499 --call-graph dwarf,65528 --user-callchains` (04:49:59, load 3.09, end load 2.86): p50
+2.81 ms, p99 3.91 ms, 3,009 main-thread samples. The before profile is the 8fx.47 profiling
+binary (`e779a7029`, same table code, without the wlf.45 and wlf.46 patches), run the same
+way in this session at 03:25:40 (load 7.46, end load 8.99): 4,271 main-thread samples. The
+two builds and loads differ, so compare shares, not sample counts. Files:
+`prof/old-table.txt`, `prof/pafter-table.txt`, `tools/measure.py`, `tools/broad.py`.
+
+Inclusive shares of main-thread samples:
+
+| Stack contains | Before | After |
+|---|---|---|
+| Row layout (`layout_as_root` inside `UniformList` prepaint) | 16.97% | 14.59% |
+| Text measure function (`TextLayout::layout` closure) | 5.64% | 3.02% |
+| `shape_text` called from the text measure function | 2.69% | 1.53% |
+| Real shaping on a cache miss (`PlatformTextSystem::layout_line`) | 1.83% | 1.99% |
+| Taffy `compute_layout_with_measure` | 13.5% | 10.9% |
+| `BoundsTree` | 8.6% | 9.4% |
+| Scene build and replay (`gpui::scene`) | 18.6% | 20.3% |
+| GPU submit (`render_frame`) | 17.5% | 21.2% |
+| Row canvas paint (`tl_ui_table` `row_paint`) | 14.7% | 15.1% |
+
+Reading: the patch removed most of the repeated shaping in row layout. What is left of the
+text measure cost is mostly real shaping of the rows that scroll into view (about one row per
+frame at 1,200 px/s). Row layout as a whole is still about 15% of the frame, and the rest of
+the frame is GPU submit, scene build, `BoundsTree` and the row canvas paint. None of these is
+near the 1.9 ms the gate still needs. Under leader rule 1 (2026-11-05) the gate stays FAIL
+and goes to the owner in tasklens-wlf.2. The next levers named in the plan are
+`BoundsTree::insert` and GPU submit. They are not part of this bead.
+
 ### Static scene idle CPU (tasklens-wlf.27, 2026-11-04)
 
 Result: FAIL. The rerun on 2026-11-05 at `e44eb654a`, after the wlf.39 fix, used a median
@@ -1603,6 +1707,97 @@ Under the leader rule of 2026-11-05 this is recorded FAIL and goes to the owner 
 tasklens-wlf.2. One lever is left in history/: fewer strip vertices, for example fewer
 stack buckets or fewer stack layers. That changes how the strip looks, so it needs an owner
 decision. No history/ code changed in this pass.
+
+#### Rerun after wlf.46 (2026-11-06)
+
+Result: FAIL, at the limit. With the wlf.46 GPUI text measure patch, the six counted runs of
+the patched binary have a median `scrub_frame_ms.p99` of 4.31 ms (hidden nested KWin, 60 Hz),
+against the 4.0 ms limit. The first three counted runs alone give 4.00 ms, which passes only
+at the limit. The three counted runs without the patch have a median of 3.67 ms. The spread
+follows load: two of the three slowest patched runs started at a 1-minute load of 7.32 and
+7.91, the counted unpatched runs at 4.72 to 7.74. Instruction counts show the patch saves work: the
+patched binary ran 2.7% fewer user-space instructions per run.
+
+Setup: as in the table-2000 rerun after wlf.46 in the pdu.69 section (same two binaries,
+fresh hidden nested KWin `wlf46` per run, X11 on the nested Xwayland at scale 1,
+`TL_BENCH_REFRESH_HZ=60`, `TL_PIXEL_PACING=off`, bench slot lock, quiet-machine rule). The
+8fx.47 runs above used a Wayland nested session at scale 1.1, so compare the binaries with
+each other here, not with the 8fx.47 numbers. Command per run: `tasklens --bench
+history-scrub --duration 30 --warmup 5 --json <file>`. Every report has `pacing` off,
+`window_active` true and 0 stalls.
+
+The first set (`drive.log`, `runs-a4/`) checked the load before the nested session started,
+so before 2 started at a 1-minute load of 9.21. It does not count. The set had only two
+counted unpatched runs, so three more interleaved pairs followed (`drive2.log`, `runs-a5/`),
+with the load check moved to just before the app starts. Every run stays in the table.
+
+| Run | Binary | Start (local) | Load at start (1, 5, 15 min) | Load at end (1 min) | Counts | scrub p50 | p95 | p99 | max | Missed, long missed |
+|---|---|---|---|---|---|---|---|---|---|---|
+| before 1 | without patch | 03:57:46 | 4.35, 3.33, 4.13 | 11.51 | no (end load) | 4.08 ms | 5.72 ms | 8.12 ms | 14.08 ms | 0, 0 |
+| after 1 | with patch | 04:00:45 | 7.32, 6.22, 5.20 | 6.01 | yes | 2.91 ms | 4.47 ms | 4.98 ms | 8.04 ms | 0, 0 |
+| before 2 | without patch | 04:01:25 | 9.21, 6.64, 5.38 | 7.44 | no (start load) | 2.48 ms | 2.93 ms | 3.59 ms | 8.77 ms | 0, 0 |
+| after 2 | with patch | 04:02:04 | 7.08, 6.49, 5.38 | 11.19 | no (end load) | 2.94 ms | 4.92 ms | 7.08 ms | 20.38 ms | 1, 0 |
+| before 3 | without patch | 04:06:43 | 5.56, 7.86, 6.43 | 4.76 | yes | 2.47 ms | 2.89 ms | 3.60 ms | 8.43 ms | 0, 0 |
+| after 3 | with patch | 04:07:22 | 4.61, 7.32, 6.31 | 4.72 | yes | 2.88 ms | 3.62 ms | 4.00 ms | 9.37 ms | 0, 0 |
+| before 4 | without patch | 04:08:01 | 4.72, 7.06, 6.26 | 3.74 | yes | 2.52 ms | 3.27 ms | 3.67 ms | 8.03 ms | 0, 0 |
+| after 4 | with patch | 04:08:40 | 3.74, 6.52, 6.11 | 3.13 | yes | 2.51 ms | 3.25 ms | 3.73 ms | 8.19 ms | 0, 0 |
+| before 5 | without patch | 04:10:41 | 4.83, 5.85, 5.90 | 9.13 | no (end load) | 3.26 ms | 4.21 ms | 4.81 ms | 9.82 ms | 0, 0 |
+| after 5 | with patch | 04:11:30 | 7.97, 6.83, 6.25 | 5.59 | yes | 2.74 ms | 3.40 ms | 3.83 ms | 8.56 ms | 0, 0 |
+| before 6 | without patch | 04:12:09 | 5.30, 6.30, 6.09 | 12.79 | no (end load) | 3.33 ms | 5.15 ms | 8.23 ms | 21.83 ms | 3, 0 |
+| after 6 | with patch | 04:13:43 | 7.91, 7.28, 6.48 | 7.74 | yes | 3.25 ms | 3.99 ms | 4.62 ms | 9.57 ms | 0, 0 |
+| before 7 | without patch | 04:14:22 | 7.74, 7.33, 6.53 | 5.48 | yes | 2.55 ms | 3.47 ms | 3.80 ms | 8.40 ms | 0, 0 |
+| after 7 | with patch | 04:15:01 | 5.48, 6.82, 6.39 | 5.93 | yes | 2.57 ms | 4.26 ms | 5.21 ms | 8.03 ms | 0, 0 |
+
+All values are hidden nested KWin, 60 Hz. Every run drew 1793 to 1796 scrub frames.
+
+| Metric | Rule | Median | Counted runs | Result |
+|---|---|---|---|---|
+| `scrub_frame_ms.p99` (UI-PRC-032), with patch | <= 4.0 ms | 4.31 ms (all six); 4.00 ms (first three) | 4.98, 4.00, 3.73, 3.83, 4.62, 5.21 | FAIL |
+| `scrub_frame_ms.p99`, without patch (same session) | <= 4.0 ms | 3.67 ms | 3.60, 3.67, 3.80 | pass in this session |
+
+Instruction counts, as for table-2000 (`perf stat`, whole process, `runs-stat/`):
+
+| Run | Binary | Start | Load at start | Load at end | Instructions (user) | Task clock | scrub p99 |
+|---|---|---|---|---|---|---|---|
+| before 1 | without patch | 04:53:24 | 3.66, 5.39 | 3.40 | 31,143,114,004 | 6,220 ms | 3.73 ms |
+| after 1 | with patch | 04:54:03 | 3.29, 5.09 | 3.65 | 30,304,663,672 | 6,127 ms | 3.83 ms |
+| before 2 | without patch | 04:54:42 | 3.65, 4.97 | 3.36 | 31,126,886,266 | 6,742 ms | 3.74 ms |
+| after 2 | with patch | 04:55:21 | 3.36, 4.73 | 3.08 | 30,301,506,193 | 6,511 ms | 4.01 ms |
+
+The patched binary ran 30.30 G instructions on average against 31.13 G, 2.7% fewer. In these
+four quiet runs the p99 is again slightly higher with the patch, by 0.10 and 0.27 ms. With
+2.7% less work, that is noise or an effect that the profile does not show (not measured).
+
+Profile: the relinked profiling build of the patched code, one run at 04:51:23 (load 3.55,
+end load 3.74): scrub p50 2.78 ms, p99 3.70 ms, 2,953 main-thread samples. Before: the 8fx.47
+profiling binary, same way, at 04:52:43 (load 3.67, end load 3.54): p50 2.80 ms, p99 4.01 ms,
+2,857 samples. Same perf command as for table-2000. Files: `prof/pafter-history-scrub.txt`,
+`prof/old-history-scrub.txt`; buckets by `bucket.py` from 8fx.47.
+
+| Stack contains (inclusive share of main-thread samples) | Before | After |
+|---|---|---|
+| Text measure function, all text elements | 6.86% | 4.61% |
+| Text measure function inside table rows | 3.08% | 1.39% |
+| Row layout (`layout_as_root` inside `UniformList` prepaint) | 8.09% | 6.50% |
+| Real shaping on a cache miss | 4.27% | 3.66% |
+
+| Owner (8fx.47 rules, each sample counted once) | Before | After |
+|---|---|---|
+| GPU submit (gpui_wgpu, wgpu, NVIDIA driver) | 35.2% | 35.4% |
+| tl-ui-table: rows, header, row layout and paint | 28.7% | 27.6% |
+| Other frame work: window layout, other views, scene build | 16.2% | 17.1% |
+| history/: table install and sort | 6.1% | 5.9% |
+| Minigraph panel | 4.6% | 5.9% |
+| history/: strip, scrubber, minimap | 4.3% | 2.9% |
+| Bench driver | 3.6% | 3.7% |
+| history/: page, header, hub handler | 1.4% | 1.4% |
+
+Reading: the patch cut the text measure share by a third and the row part of it by more than
+half, but that is about 2% of the frame, below the spread between runs. GPU submit is still
+the largest owner at 35%. The gate result depends on machine load more than on this change.
+Under leader rule 1 (2026-11-05) it is recorded FAIL and goes to the owner in tasklens-wlf.2.
+The next lever named in the plan is GPU submit (the path vertex upload in `gpui-pre-wgpu`).
+It is not part of this bead.
 
 ### Bridge wake-to-render latency, nested rerun (tasklens-wlf.42, 2026-11-05)
 
