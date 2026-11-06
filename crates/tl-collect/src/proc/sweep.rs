@@ -1967,7 +1967,6 @@ impl PerPid for Build<'_, '_> {
                     syscw: io.syscw,
                     rchar_bps: p.rchar_bps,
                     wchar_bps: p.wchar_bps,
-                    ..ProcCounters::default()
                 }
             },
         });
