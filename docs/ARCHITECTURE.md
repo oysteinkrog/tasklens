@@ -2349,7 +2349,7 @@ UI and rendering speed are the owner's top priority. Astra found the chart cost 
 - UI thread CPU per frame: `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` on the main thread, read in each `on_next_frame` callback; delta between callbacks.
 - Frame interval: `Instant::now()` in each frame callback. A **missed frame** is an interval above 1.5 × the output period (10.42 ms at 144 Hz).
 - Process CPU: `/proc/self/stat` utime+stime over the run, divided by wall time, as percent of one core. Child `tl-gpu-probe` measured the same way and reported separately.
-- Memory: `VmRSS` from `/proc/self/status` at the end; PSS from `smaps_rollup` reported only.
+- Memory: `RssAnon` + `RssShmem` from `/proc/self/status` at the end (`app_mem_mb`, gated; owner 2026-11-05, wlf.47). `VmRSS` (`rss_mb`), PSS and USS (`Private_Clean` + `Private_Dirty`, `uss_mb`) from `smaps_rollup` are reported only.
 - GPU: NVML power and utilization sampled by the bench through the probe at 1 Hz, reported against a 30 s baseline with tasklens closed. Report only, no gate.
 - `cargo xtask bench` builds with `--profile perf` (thin LTO, ADR-002) and runs `target/perf/tasklens`; `--release` uses the fat-LTO build and `target/release/tasklens`. Compare only summaries made with the same profile. It runs every scene 3 times and writes `target/bench/<date>-<git sha>.json` plus a table.
 
@@ -2375,7 +2375,7 @@ UI and rendering speed are the owner's top priority. Astra found the chart cost 
 | Collection cost, real engine, Processes tab visible with this machine's processes | ≤ 3.5% of one core |
 | First frame after launch (warm cache) | ≤ 200 ms median of 5 launches, measured from process start time (`/proc/self/stat` field 22) to the first frame callback |
 | First frame, cold (after `echo 3 > drop_caches`, run by the owner) | ≤ 500 ms |
-| RSS after `table-2000` | ≤ 150 MB |
+| App memory (`RssAnon` + `RssShmem`) after `table-2000` | ≤ 150 MB |
 | zed#64499 soak | 0 stalls over 250 ms in 10 minutes |
 | Bridge | 10 Hz samples arrive; wake-to-render latency p99 ≤ 20 ms |
 
