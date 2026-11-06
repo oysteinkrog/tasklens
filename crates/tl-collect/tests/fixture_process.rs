@@ -5417,3 +5417,62 @@ mod hash_tests {
         assert!(!cache.is_empty());
     }
 }
+
+sweep_clock!(commit_clock);
+
+/// Rewrites stat field `field` (3-based, as in proc(5)) of the 4201 copy.
+fn set_stat_field(root: &SysRoot, field: usize, value: u64) {
+    let path = root.proc_path("4201/stat");
+    let line = fs::read_to_string(&path).expect("read stat");
+    let close = line.rfind(')').expect("stat has a close paren");
+    let mut fields: Vec<String> = line[close + 2..]
+        .trim_end()
+        .split(' ')
+        .map(str::to_owned)
+        .collect();
+    fields[field - 3] = value.to_string();
+    fs::write(path, format!("{} {}\n", &line[..=close], fields.join(" "))).expect("write stat");
+}
+
+/// Rewrites the `data` field (6) of the 4201 `statm`, which gives `commit_bytes`.
+fn set_statm_data(root: &SysRoot, data_pages: u64) {
+    let new = format!("666958 61234 60925 181 0 {data_pages} 0\n");
+    fs::write(root.proc_path("4201/statm"), new).expect("write statm");
+}
+
+/// PROC-030: commit peak holds after a drop, commit and major-fault deltas, page tables.
+#[test]
+fn sweep_commit_peak_deltas_and_page_tables() {
+    let (_tmp, root) = sweep_root();
+    let mut core = SweepCore::new(root.clone()).with_clock(commit_clock::now);
+    let ctx = sweep_ctx(false);
+    let mut out = Vec::new();
+    let page = rustix::param::page_size() as u64;
+
+    set_stat_field(&root, 12, 10);
+    set_statm_data(&root, 100);
+    commit_clock::set(10 * SEC, 10 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    // First sample: no deltas, the peak starts at the current value.
+    assert_eq!(p.commit_peak_bytes, 100 * page);
+    assert_eq!((p.commit_delta_bytes, p.major_faults_delta), (0, 0));
+    assert_eq!(p.page_tables_bytes, 1388 * 1024);
+
+    set_stat_field(&root, 12, 17);
+    set_statm_data(&root, 300);
+    commit_clock::set(11 * SEC, 11 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert_eq!(p.commit_peak_bytes, 300 * page);
+    assert_eq!(p.commit_delta_bytes, 200 * page as i64);
+    assert_eq!(p.major_faults_delta, 7);
+
+    set_statm_data(&root, 50);
+    commit_clock::set(12 * SEC, 12 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert_eq!(p.commit_peak_bytes, 300 * page, "peak holds after the drop");
+    assert_eq!(p.commit_delta_bytes, -250 * page as i64);
+    assert_eq!(p.major_faults_delta, 0);
+}

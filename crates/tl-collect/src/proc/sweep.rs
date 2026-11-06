@@ -151,6 +151,10 @@ struct Prev {
     stime: u64,
     minflt: u64,
     majflt: u64,
+    /// `commit_bytes` at this sample.
+    commit_bytes: u64,
+    /// Highest `commit_bytes` seen for this key, this sample included.
+    commit_peak_bytes: u64,
     io: Option<PidIo>,
 }
 
@@ -205,6 +209,14 @@ pub struct SweptProc {
     /// Cancelled write bytes per second (PROC-031).
     pub cancelled_write_bps: f32,
     pub page_faults_delta: u64,
+    /// Highest `commit_bytes` seen for this key (PROC-030).
+    pub commit_peak_bytes: u64,
+    /// `commit_bytes` minus the previous sample's, 0 without a usable previous sample.
+    pub commit_delta_bytes: i64,
+    /// `VmPTE` in bytes. 0 when `status` has none.
+    pub page_tables_bytes: u64,
+    /// `majflt` minus the previous sample's, 0 without a usable previous sample.
+    pub major_faults_delta: u64,
     pub validity: FieldValidity,
 }
 
@@ -819,6 +831,8 @@ fn sweep_one(
         stime: stat.stime,
         minflt: stat.minflt,
         majflt: stat.majflt,
+        commit_bytes,
+        commit_peak_bytes: commit_bytes.max(prev.get(&key).map_or(0, |o| o.commit_peak_bytes)),
         io: match io {
             IoState::Valid(io) => Some(io),
             IoState::Restricted | IoState::WarmingUp => None,
@@ -850,6 +864,10 @@ fn sweep_one(
         disk_write_raw_bps: 0.0,
         cancelled_write_bps: 0.0,
         page_faults_delta: 0,
+        commit_peak_bytes: cur.commit_peak_bytes,
+        commit_delta_bytes: 0,
+        page_tables_bytes: status.vm_pte.unwrap_or(0),
+        major_faults_delta: 0,
         validity,
     };
 
@@ -939,6 +957,15 @@ fn apply_rates(ctx: &SweepCtx, old: &Prev, cur: &Prev, dt_s: f64, p: &mut SweptP
     p.cpu_kernel_pct = pct(d_sys) as f32;
     p.cpu_relative_pct = (pct(d_user + d_sys) * cpus) as f32;
     p.page_faults_delta = (cur.minflt - old.minflt) + (cur.majflt - old.majflt);
+    p.major_faults_delta = cur.majflt - old.majflt;
+    p.commit_delta_bytes = i64::try_from(
+        i128::from(cur.commit_bytes) - i128::from(old.commit_bytes),
+    )
+    .unwrap_or(if cur.commit_bytes > old.commit_bytes {
+        i64::MAX
+    } else {
+        i64::MIN
+    });
 
     if let (Some(a), Some(b)) = (old.io, cur.io) {
         let d_read = b.read_bytes - a.read_bytes;
@@ -1889,7 +1916,13 @@ impl PerPid for Build<'_, '_> {
             sid: u32::try_from(p.stat.session).unwrap_or(0),
             last_cpu: u32::try_from(p.stat.processor).unwrap_or(0),
             wine: slot.wine.clone(),
-            counters: ProcCounters::default(),
+            counters: ProcCounters {
+                commit_peak_bytes: p.commit_peak_bytes,
+                commit_delta_bytes: p.commit_delta_bytes,
+                page_tables_bytes: p.page_tables_bytes,
+                major_faults_delta: p.major_faults_delta,
+                ..ProcCounters::default()
+            },
         });
         self.out.side.push(SweepSide {
             class: app.class,

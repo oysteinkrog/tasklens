@@ -109,11 +109,12 @@ pub fn history_only(d: &Demand, s: &EngineSettings) -> bool {
 }
 
 /// The status-only columns (R-286): with one shown, `status` is read for every pid.
-const STATUS_COLUMNS: [ColumnId; 4] = [
+const STATUS_COLUMNS: [ColumnId; 5] = [
     ColumnId::Swap,
     ColumnId::WsPeak,
     ColumnId::VsizePeak,
     ColumnId::Affinity,
+    ColumnId::PageTables,
 ];
 
 /// The optional per-process reads of a sweep, from the demand and settings.
@@ -1141,6 +1142,10 @@ mod tests {
         d.process_columns.insert(ColumnId::DiskReadRate);
         let w = sweep_wants(&d, &s);
         assert!(w.fd_count && w.status_fields && w.io, "{w:?}");
+
+        let mut d = Demand::default();
+        d.process_columns.insert(ColumnId::PageTables);
+        assert!(sweep_wants(&d, &s).status_fields);
 
         let mut d = Demand::default();
         d.process_columns.insert(ColumnId::Memory);
