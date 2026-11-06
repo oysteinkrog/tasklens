@@ -4,3 +4,4 @@
 
 mod chart;
 mod chart_geometry;
+mod power_ramp;

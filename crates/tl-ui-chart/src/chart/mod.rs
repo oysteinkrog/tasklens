@@ -17,6 +17,7 @@ pub mod grid_element;
 pub mod hover;
 pub mod labels;
 pub mod lines;
+pub mod ramp;
 pub mod scale;
 pub mod view;
 
@@ -27,6 +28,7 @@ pub use grid_element::{
 };
 pub use labels::{NetFormat, format_value, range_label};
 pub use lines::LineSet;
+pub use ramp::ValueRamp;
 pub use scale::{ScaleResult, ScaleState};
 pub use view::ChartView;
 

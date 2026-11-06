@@ -29,6 +29,7 @@ use super::grid::{self, GridPaint};
 use super::hover::{self, HoverPaint};
 use super::labels::{self, LabelPaint, LabelRows, NetFormat};
 use super::lines;
+use super::ramp::{self, RampBand, ValueRamp};
 use super::view::ChartView;
 use super::{ChartSeries, ChartState, GeometryScalars, PathSet, scale};
 use tl_ui_base::anim::{AnimationDriver, Pacing};
@@ -332,6 +333,9 @@ fn paint_view(
             .and_then(|link| link.follow(view_id));
     }
     let compact_scale = view.compact_scale;
+    // Power draw charts fill and draw series 0 with the value ramp (tasklens-1vwxr).
+    let value_ramp = ValueRamp::of_chart(view.labels.value_fmt, &view.spec, &env.theme);
+    let ramp_target = view.spec.series.first().map(|s| (s.fill, s.line));
     let frozen = view.frozen;
     let newest_marks = view.newest_marks;
     let ChartView {
@@ -539,7 +543,10 @@ fn paint_view(
     grid::paint_background(window, frame, env.theme.graph.chart_bg, radius);
 
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-    view.path_colors.borrow_mut().clear();
+    {
+        view.path_colors.borrow_mut().clear();
+        view.path_ramps.borrow_mut().clear();
+    }
 
     // Failed, Restricted, Unsupported: background, outline and a dotted baseline across the
     // whole plot (UI-PRF-001). No grid, no paths, no frame requests.
@@ -584,13 +591,37 @@ fn paint_view(
 
     if has_data {
         let offset = point(plot.left() + px(dx / sf), plot.top());
-        let painted = |window: &mut Window, sets: &[PathSet], alpha: f32| {
+        // The ramp alpha of a set: series 0's fill (at `ramp::FILL_ALPHA`) and its solid line
+        // take the ramp; every other set keeps its colour.
+        let ramp_alpha = |set: &PathSet, fill: bool| -> Option<f32> {
+            let (s_fill, s_line) = ramp_target?;
+            if fill && s_fill == Some(set.color) {
+                Some(ramp::FILL_ALPHA * set.color.a)
+            } else if !fill && !set.dashed && s_line == set.color {
+                Some(set.color.a)
+            } else {
+                None
+            }
+        };
+        let painted = |window: &mut Window, sets: &[PathSet], alpha: f32, fill: bool| {
             for set in sets {
+                let path = translated(&set.path, offset, sf);
+                if let (Some(r), Some(a)) = (value_ramp.as_ref(), ramp_alpha(set, fill)) {
+                    let bands = r.bands(plot, sf, a * alpha);
+                    paint_ramped(window, path, &bands, |_band| {
+                        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+                        {
+                            view.path_paints.set(view.path_paints.get() + 1);
+                            view.path_ramps.borrow_mut().push(*_band);
+                        }
+                    });
+                    continue;
+                }
                 let color = Hsla {
                     a: set.color.a * alpha,
                     ..set.color
                 };
-                window.paint_path(translated(&set.path, offset, sf), color);
+                window.paint_path(path, color);
                 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 {
                     view.path_paints.set(view.path_paints.get() + 1);
@@ -610,10 +641,10 @@ fn paint_view(
             if live {
                 grid::paint_newest_glow(window, plot, gp.outline_color, env.reduce_motion);
             }
-            painted(window, &cache.fills, dim);
-            painted(window, &cache.stale_fills, STALE_ALPHA * dim);
-            painted(window, &cache.strokes, dim);
-            painted(window, &cache.stale_strokes, STALE_ALPHA * dim);
+            painted(window, &cache.fills, dim, true);
+            painted(window, &cache.stale_fills, STALE_ALPHA * dim, true);
+            painted(window, &cache.strokes, dim, false);
+            painted(window, &cache.stale_strokes, STALE_ALPHA * dim, false);
             if let Some(set) = line_set.as_ref() {
                 if let Some(value) = set.reference {
                     lines::paint_reference(
@@ -640,6 +671,14 @@ fn paint_view(
             }
             if live {
                 for &(p, color) in &cache.newest {
+                    // A ramped line's dot takes the colour of its value.
+                    let color = match (value_ramp.as_ref(), ramp_target) {
+                        (Some(r), Some((_, line))) if line == color && ph > 0 => Hsla {
+                            a: color.a,
+                            ..r.at(1.0 - f32::from(p.y) / ph as f32)
+                        },
+                        _ => color,
+                    };
                     let c = newest_point(p, offset, sf);
                     grid::paint_newest_dot(window, c, color, env.reduce_motion);
                 }
@@ -766,6 +805,35 @@ struct QuadCount(u32);
 impl grid::QuadSink for QuadCount {
     fn quad(&mut self, _: gpui_kit::PaintQuad) {
         self.0 += 1;
+    }
+}
+
+/// Paints `path` once per ramp band it reaches, each time with its bounds set to that band: the
+/// bounds clip the path and span the band's gradient (tasklens-1vwxr). Calls `on_paint` after
+/// each paint.
+fn paint_ramped(
+    window: &mut Window,
+    mut path: Path<Pixels>,
+    bands: &[RampBand; 2],
+    mut on_paint: impl FnMut(&RampBand),
+) {
+    let [lower, upper] = bands;
+    let (low, up) = (lower.reaches(&path.bounds), upper.reaches(&path.bounds));
+    if low && up {
+        let mut first = path.clone();
+        first.bounds = lower.bounds;
+        window.paint_path(first, lower.background());
+        on_paint(lower);
+    } else if low {
+        path.bounds = lower.bounds;
+        window.paint_path(path, lower.background());
+        on_paint(lower);
+        return;
+    }
+    if up {
+        path.bounds = upper.bounds;
+        window.paint_path(path, upper.background());
+        on_paint(upper);
     }
 }
 

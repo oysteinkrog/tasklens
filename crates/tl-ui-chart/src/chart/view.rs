@@ -111,6 +111,10 @@ pub struct ChartView {
     /// Colours handed to `paint_path` by the last paint, in paint order.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub path_colors: RefCell<SmallVec<[gpui_kit::Hsla; 8]>>,
+    /// Ramp bands of the last paint's ramped paths (power draw charts, tasklens-1vwxr), in paint
+    /// order. A ramped path paints once per band it reaches and is not in `path_colors`.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub path_ramps: RefCell<SmallVec<[super::ramp::RampBand; 4]>>,
     /// Right edge of the last paint.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_right_edge_ns: std::cell::Cell<u64>,
@@ -177,6 +181,8 @@ impl ChartView {
             path_paints: std::cell::Cell::new(0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             path_colors: RefCell::default(),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            path_ramps: RefCell::default(),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_right_edge_ns: std::cell::Cell::new(0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
