@@ -467,17 +467,14 @@ fn status_line_exit_button_ends_compact_view(cx: &mut TestAppContext) {
     assert!(!drawn(&mut r, THIN_EXIT_ID));
 }
 
-/// View > "Show status line in compact view" shows only while compact view is on, checked from
-/// `performance.compact_status_line`, and runs `ToggleSetting` for it. Off, the line goes, the
-/// setting is saved, and a restart keeps compact view without the line (tasklens-i5cj4).
+/// View > "Show status line in compact view": a check from `performance.compact_status_line`
+/// that runs `ToggleSetting` for it. Compact view hides the menu bar, so the item is set from
+/// normal view. Off, the setting is saved and compact view draws no line (tasklens-i5cj4).
 #[gpui_kit::test]
 fn view_menu_status_line_toggle_is_saved(cx: &mut TestAppContext) {
     let mut r = open(cx, UiState::default(), true);
     let label = "Show status line in compact view";
-    assert!(view_item(&mut r, label).is_none(), "absent in normal view");
-    press(&mut r, "escape f11");
-    assert_compact(&mut r);
-    let item = view_item(&mut r, label).expect("present in compact view");
+    let item = view_item(&mut r, label).expect("in the View menu");
     assert!(item.checked, "on by default");
     assert!(item.action.as_ref().is_some_and(|a| a.partial_eq(&ToggleSetting(
         SettingKey::PerformanceCompactStatusLine
@@ -490,10 +487,11 @@ fn view_menu_status_line_toggle_is_saved(cx: &mut TestAppContext) {
         Some(&false),
         "settings.toml written"
     );
-    assert_compact(&mut r);
-    assert!(!drawn(&mut r, BAR_ID));
     let item = view_item(&mut r, label).expect("still listed");
     assert!(!item.checked, "unchecked while off");
+    press(&mut r, "escape f11");
+    assert_compact(&mut r);
+    assert!(!drawn(&mut r, BAR_ID), "no line in compact view");
 }
 
 /// The saved choice at start: compact view without its line comes back without it.
@@ -566,8 +564,8 @@ fn view_menu_compact_view_check(cx: &mut TestAppContext) {
             .as_ref()
             .is_some_and(|a| a.partial_eq(&ToggleCompactView))
     );
-    // Second from the end, above "Show sidebar".
-    press(&mut r, "end up enter");
+    // Third from the end, above "Show status line in compact view" and "Show sidebar".
+    press(&mut r, "end up up enter");
     assert_compact(&mut r);
     // Left alone, nothing changes after a while.
     r.vcx.executor().advance_clock(Duration::from_secs(3));

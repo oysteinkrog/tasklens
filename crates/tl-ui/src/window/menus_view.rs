@@ -2,8 +2,9 @@
 //!
 //! The root lists submenus in a fixed order: "Columns", "Process View", "Window", "Appearance",
 //! "Theme", "Graphs". Each appears once its bead adds it. Then "Compact view" (tasklens-qdn1r), a
-//! check that runs `ToggleCompactView` (F11), and while it is on "Show status line in compact
-//! view" (tasklens-i5cj4). Last, "Show sidebar" (tasklens-o5853)
+//! check that runs `ToggleCompactView` (F11), and "Show status line in compact view"
+//! (tasklens-i5cj4), a check for `performance.compact_status_line`. Last, "Show sidebar"
+//! (tasklens-o5853)
 //! is a check for the Performance device sidebar: `PerfToggleSidebar`, which the
 //! Performance page handles with its animation; on another tab [`init`]'s fallback flips
 //! `state.performance.sidebar_hidden` and the page follows it. View > Columns acts on the table of the
@@ -285,43 +286,39 @@ pub fn build(
             }),
             None => menu.item_disabled(columns, Some(tr(cx, "shell-menu-view-no-table"))),
         };
-        let menu = menu
-            .submenu(
-                tr(cx, "shell-menu-view-process-view"),
-                window,
-                cx,
-                process_view_submenu,
-            )
-            .submenu(tr(cx, "shell-menu-view-window"), window, cx, window_submenu)
-            .submenu(
-                tr(cx, "shell-menu-view-appearance"),
-                window,
-                cx,
-                move |menu, _, cx| appearance_submenu(menu, &sliders, cx),
-            )
-            .submenu(tr(cx, "shell-menu-view-theme"), window, cx, theme_submenu)
-            .submenu(
-                tr(cx, "shell-menu-view-graphs"),
-                window,
-                cx,
-                move |menu, window, cx| graphs_submenu(&host, menu, window, cx),
-            )
-            .check_item(
-                tr(cx, "shell-menu-view-compact"),
-                compact_view_mark(cx),
-                Box::new(ToggleCompactView),
-            );
-        // While compact view is on: its thin status line on or off (tasklens-i5cj4).
-        let menu = if compact_view_mark(cx) {
-            menu.check_item(
-                tr(cx, "shell-menu-view-compact-status-line"),
-                compact_status_line_mark(cx),
-                Box::new(ToggleSetting(SettingKey::PerformanceCompactStatusLine)),
-            )
-        } else {
-            menu
-        };
-        menu.check_item(
+        menu.submenu(
+            tr(cx, "shell-menu-view-process-view"),
+            window,
+            cx,
+            process_view_submenu,
+        )
+        .submenu(tr(cx, "shell-menu-view-window"), window, cx, window_submenu)
+        .submenu(
+            tr(cx, "shell-menu-view-appearance"),
+            window,
+            cx,
+            move |menu, _, cx| appearance_submenu(menu, &sliders, cx),
+        )
+        .submenu(tr(cx, "shell-menu-view-theme"), window, cx, theme_submenu)
+        .submenu(
+            tr(cx, "shell-menu-view-graphs"),
+            window,
+            cx,
+            move |menu, window, cx| graphs_submenu(&host, menu, window, cx),
+        )
+        .check_item(
+            tr(cx, "shell-menu-view-compact"),
+            compact_view_mark(cx),
+            Box::new(ToggleCompactView),
+        )
+        // Compact view's thin status line on or off (tasklens-i5cj4). Listed in normal view
+        // too: compact view hides the menu bar, so its menus do not show there.
+        .check_item(
+            tr(cx, "shell-menu-view-compact-status-line"),
+            compact_status_line_mark(cx),
+            Box::new(ToggleSetting(SettingKey::PerformanceCompactStatusLine)),
+        )
+        .check_item(
             tr(cx, "shell-menu-view-show-sidebar"),
             show_sidebar_mark(cx),
             Box::new(PerfToggleSidebar),
