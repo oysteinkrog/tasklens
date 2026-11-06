@@ -42,7 +42,7 @@ use tl_ui_settings::settings::EngineSettings;
 use super::scenes::{BenchError, BenchOptions, BenchScene, WINDOW_H, WINDOW_W, fixture};
 use super::stats::{
     BenchClocks, BenchReport, FrameProbe, count_missed, percentiles_ms, process_cpu_pct,
-    read_rss_pss_mb,
+    read_memory_mb,
 };
 use super::synth::{BenchRng, SEED};
 use crate::app::TasklensUi;
@@ -963,7 +963,7 @@ async fn measure(
         )));
     }
     let (missed, long_missed) = count_missed(intervals, &opts.budget);
-    let (rss_mb, pss_mb) = read_rss_pss_mb();
+    let mem = read_memory_mb();
     let pacing = cx.update(|cx| anim.read(cx).pacing().as_str());
     let report = BenchReport {
         scene: name,
@@ -977,8 +977,10 @@ async fn measure(
         long_missed_frames: long_missed,
         process_cpu_pct: process_cpu_pct(cpu_ns, wall_ns),
         probe_cpu_pct: None,
-        rss_mb,
-        pss_mb,
+        rss_mb: mem.rss,
+        pss_mb: mem.pss,
+        uss_mb: mem.uss,
+        app_mem_mb: mem.app,
         stalls: u32::try_from(at_end.saturating_sub(at_measure)).unwrap_or(u32::MAX),
         warmup_stalls: u32::try_from(at_measure.saturating_sub(at_start)).unwrap_or(u32::MAX),
         window_active,

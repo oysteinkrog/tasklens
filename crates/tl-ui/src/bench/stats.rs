@@ -286,6 +286,10 @@ pub struct BenchReport {
     pub probe_cpu_pct: Option<f64>,
     pub rss_mb: f64,
     pub pss_mb: f64,
+    /// Private_Clean + Private_Dirty from smaps_rollup; information only.
+    pub uss_mb: f64,
+    /// RssAnon + RssShmem from /proc/self/status, the app's own data; the RSS gate (wlf.47).
+    pub app_mem_mb: f64,
     /// Stalls in the measured window.
     pub stalls: u32,
     /// Stalls during the warm-up, kept apart so they are not hidden.
@@ -297,28 +301,45 @@ pub struct BenchReport {
     pub gpu: Option<GpuReport>,
 }
 
-/// VmRSS from /proc/self/status, Pss from /proc/self/smaps_rollup, both in MB. A missing file or
-/// line gives 0.0 and a warning.
-pub fn read_rss_pss_mb() -> (f64, f64) {
-    let rss = read_kb_mb("/proc/self/status", "VmRSS:");
-    let pss = read_kb_mb("/proc/self/smaps_rollup", "Pss:");
-    (rss, pss)
+/// Memory figures in MB. `app` is the gated one (wlf.47); the rest are information.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MemoryMb {
+    /// VmRSS.
+    pub rss: f64,
+    /// Pss from smaps_rollup.
+    pub pss: f64,
+    /// Private_Clean + Private_Dirty from smaps_rollup.
+    pub uss: f64,
+    /// RssAnon + RssShmem from /proc/self/status.
+    pub app: f64,
 }
 
-fn read_kb_mb(path: &str, key: &str) -> f64 {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) => {
-            warn!(target: "tasklens::perf", path, %e, "cannot read memory figure");
-            return 0.0;
-        }
-    };
-    match parse_kb_mb(&text, key) {
-        Some(mb) => mb,
-        None => {
-            warn!(target: "tasklens::perf", path, key, "memory line missing");
+/// Reads the memory figures. A missing file or line gives 0.0 for that part and a warning.
+pub fn read_memory_mb() -> MemoryMb {
+    let status = read_text("/proc/self/status");
+    let rollup = read_text("/proc/self/smaps_rollup");
+    memory_from(&status, &rollup)
+}
+
+fn read_text(path: &str) -> String {
+    fs::read_to_string(path).unwrap_or_else(|e| {
+        warn!(target: "tasklens::perf", path, %e, "cannot read memory figure");
+        String::new()
+    })
+}
+
+fn memory_from(status: &str, rollup: &str) -> MemoryMb {
+    let get = |text: &str, key: &str| {
+        parse_kb_mb(text, key).unwrap_or_else(|| {
+            warn!(target: "tasklens::perf", key, "memory line missing");
             0.0
-        }
+        })
+    };
+    MemoryMb {
+        rss: get(status, "VmRSS:"),
+        pss: get(rollup, "Pss:"),
+        uss: get(rollup, "Private_Clean:") + get(rollup, "Private_Dirty:"),
+        app: get(status, "RssAnon:") + get(status, "RssShmem:"),
     }
 }
 
@@ -378,6 +399,8 @@ mod tests {
             probe_cpu_pct: None,
             rss_mb: 120.0,
             pss_mb: 110.0,
+            uss_mb: 100.0,
+            app_mem_mb: 80.0,
             stalls: 0,
             warmup_stalls: 0,
             window_active: true,
@@ -472,6 +495,24 @@ mod tests {
     }
 
     #[test]
+    fn memory_from_status_and_rollup() {
+        let status = "VmRSS:\t232000 kB\nRssAnon:\t64000 kB\nRssShmem:\t13400 kB\n";
+        let rollup = "Pss:\t152000 kB\nPrivate_Clean:\t64400 kB\nPrivate_Dirty:\t66100 kB\n";
+        let m = memory_from(status, rollup);
+        let mb = |kb: u64| (kb * 1024) as f64 / 1e6;
+        assert!((m.app - mb(64000 + 13400)).abs() < 1e-9);
+        assert!((m.uss - mb(64400 + 66100)).abs() < 1e-9);
+        assert!((m.rss - mb(232000)).abs() < 1e-9);
+        assert!((m.pss - mb(152000)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn memory_from_missing_lines() {
+        let m = memory_from("", "");
+        assert_eq!((m.rss, m.pss, m.uss, m.app), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
     fn json_shape_and_order() {
         let value = serde_json::to_value(report()).unwrap();
         let keys: Vec<&str> = value
@@ -496,6 +537,8 @@ mod tests {
             "probe_cpu_pct",
             "rss_mb",
             "pss_mb",
+            "uss_mb",
+            "app_mem_mb",
             "stalls",
             "warmup_stalls",
             "window_active",

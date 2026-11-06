@@ -20,7 +20,7 @@ const GATED_METRICS: [&str; 6] = [
     "frame_cpu_ms.p99",
     "missed_frames",
     "process_cpu_pct",
-    "rss_mb",
+    "app_mem_mb",
     "bridge_latency_ms.p99",
 ];
 
@@ -252,8 +252,8 @@ fn metric(report: &Value, path: &str) -> Option<f64> {
 /// Markdown table, one row per scene, values from the median run.
 fn table(summary: &Value) -> String {
     let mut out = String::from(
-        "| Scene | frame CPU p50 ms | p99 ms | missed | process CPU % | RSS MB | stalls | bridge p99 ms |\n\
-         |---|---|---|---|---|---|---|---|\n",
+        "| Scene | frame CPU p50 ms | p99 ms | missed | process CPU % | RSS MB | app MB | stalls | bridge p99 ms |\n\
+         |---|---|---|---|---|---|---|---|---|\n",
     );
     let empty = Map::new();
     let scenes = summary["scenes"].as_object().unwrap_or(&empty);
@@ -262,12 +262,13 @@ fn table(summary: &Value) -> String {
         let cell =
             |path: &str| metric(median, path).map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"));
         out.push_str(&format!(
-            "| {scene} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {scene} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             cell("frame_cpu_ms.p50"),
             cell("frame_cpu_ms.p99"),
             cell("missed_frames"),
             cell("process_cpu_pct"),
             cell("rss_mb"),
+            cell("app_mem_mb"),
             cell("stalls"),
             cell("bridge_latency_ms.p99"),
         ));
@@ -387,6 +388,8 @@ mod tests {
             "probe_cpu_pct": 0.1,
             "rss_mb": 120.0,
             "pss_mb": 110.0,
+            "uss_mb": 100.0,
+            "app_mem_mb": 80.0,
             "stalls": 0,
             "bridge_latency_ms": null,
             "gpu": null
@@ -463,6 +466,23 @@ mod tests {
     }
 
     #[test]
+    fn compare_gates_app_mem_not_rss() {
+        let with = |rss: f64, app: f64| {
+            let mut r = report("perf-cpu", 0.5, 1.0, 20.0);
+            r["rss_mb"] = json!(rss);
+            r["app_mem_mb"] = json!(app);
+            summarize("2026-10-04", "abc", vec![("perf-cpu".to_owned(), vec![r])]).unwrap()
+        };
+        let rss_only = compare(&with(120.0, 80.0), &with(180.0, 80.0));
+        assert!(rss_only.regression.is_none());
+        let app = compare(&with(120.0, 80.0), &with(120.0, 100.0));
+        assert_eq!(
+            app.regression,
+            Some(("perf-cpu".to_owned(), "app_mem_mb".to_owned()))
+        );
+    }
+
+    #[test]
     fn compare_passes_under_20pct() {
         let result = compare(&summary_with_p99(1.0), &summary_with_p99(1.15));
         assert!(result.regression.is_none());
@@ -495,7 +515,9 @@ mod tests {
             })
         );
         let table = table(&summary);
-        assert!(table.contains("| perf-cpu | 0.70 | 1.20 | 0.00 | 22.00 | 120.00 | 0.00 | - |"));
+        assert!(
+            table.contains("| perf-cpu | 0.70 | 1.20 | 0.00 | 22.00 | 120.00 | 80.00 | 0.00 | - |")
+        );
     }
 
     #[test]

@@ -34,7 +34,7 @@ use tracing::info;
 use super::engine::{BenchEngine, BenchFeed, DEV_MEMORY, DEV_PACKAGE, MEM_TOTAL_BYTES};
 use super::stats::{
     BenchClocks, BenchReport, FrameBudget, FrameProbe, LatencyPct, count_missed, percentiles_ms,
-    process_cpu_pct, read_rss_pss_mb, write_json,
+    process_cpu_pct, read_memory_mb, write_json,
 };
 use super::synth::SEED;
 use crate::app::TasklensUi;
@@ -755,7 +755,7 @@ async fn measure(
         )));
     }
     let (missed, long_missed) = count_missed(intervals, &opts.budget);
-    let (rss_mb, pss_mb) = read_rss_pss_mb();
+    let mem = read_memory_mb();
     let bridge_latency_ms = paint_log
         .filter(|_| bridge)
         .and_then(|log| bridge_latency(&log.records, engine));
@@ -776,8 +776,10 @@ async fn measure(
         long_missed_frames: long_missed,
         process_cpu_pct: process_cpu_pct(cpu_ns, wall_ns),
         probe_cpu_pct: None,
-        rss_mb,
-        pss_mb,
+        rss_mb: mem.rss,
+        pss_mb: mem.pss,
+        uss_mb: mem.uss,
+        app_mem_mb: mem.app,
         stalls: u32::try_from(stalls).unwrap_or(u32::MAX),
         warmup_stalls: u32::try_from(warmup_stalls).unwrap_or(u32::MAX),
         window_active,
