@@ -61,6 +61,7 @@ use super::geometry::{self, BuildInput, CellPiece, PieceLayer, TimeMap};
 use super::grid::{self, GridPaint};
 use super::hover::{self, HoverPaint, HoverState};
 use super::labels::{self, CachedLine, LabelCache, LineStyle, NetFormat};
+use super::ramp::{self, ValueRamp};
 use super::view::{ChangedRuns, HistoryClock, find_tiered, history_view, reads_history};
 use super::{
     ChartCache, ChartLabels, ChartSeries, ChartSpec, ChartState, DEFAULT_RANGE_NS, GeometryScalars,
@@ -303,6 +304,10 @@ pub struct ChartGridView {
     /// `paint_path` calls, over every paint.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub path_paints: std::cell::Cell<u32>,
+    /// Ramp bands of the last paint's ramped paths, in paint order (tasklens-j477q): per row of
+    /// cells, the total fill's bands, then the total line's.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub path_ramps: RefCell<SmallVec<[ramp::RampBand; 8]>>,
     /// Shapes of heading, value and "Offline" lines, over every paint.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub heading_shapes: std::cell::Cell<u32>,
@@ -376,6 +381,8 @@ impl ChartGridView {
             last_dx: std::cell::Cell::new(0.0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             path_paints: std::cell::Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            path_ramps: RefCell::default(),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             heading_shapes: std::cell::Cell::new(0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -811,6 +818,7 @@ impl Element for ChartGridElement {
             reduce_motion: cx.reduce_motion(),
             power_saving: tl_ui_base::demand::power_saving(cx),
             network_unit: NetFormat::of(cx),
+            value_colors: ValueRamp::enabled(cx),
         };
         let view_id = self.view.entity_id();
         let had_hitboxes = !hitboxes.headings.is_empty();
@@ -918,6 +926,8 @@ struct PaintEnv {
     /// Save power on battery is in effect: no sliding (wlf.32).
     power_saving: bool,
     network_unit: NetFormat,
+    /// `appearance.color_charts_by_value` (tasklens-j477q).
+    value_colors: bool,
 }
 
 struct PaintOut {
@@ -1228,10 +1238,49 @@ fn paint_grid_view(
                 painted(window, path, color);
             }
         };
+        // A value ramp (tasklens-j477q) paints the total fill and line one row of cells at a
+        // time, since each row has its own plot top and bottom: per row one path, painted once
+        // per ramp half it reaches. The bands span the element's width, so only their height
+        // clips. The overlay line and the stale sets keep their flat colours.
+        let value_ramp = ValueRamp::of_grid(spec, theme, env.value_colors);
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        view.path_ramps.borrow_mut().clear();
+        let ramped = |window: &mut Window, r: &ValueRamp, layer: PieceLayer, alpha: f32| {
+            for row in 0..layout.rows {
+                let first = row * layout.cols;
+                let last = (first + layout.cols).min(pieces.len());
+                if first >= last {
+                    break;
+                }
+                let cells = pieces[first..last].iter().map(|p| &p[0]);
+                let Some(path) = geometry::piece_path(cells, layer, offset, sf) else {
+                    continue;
+                };
+                let cell = cell_bounds(bounds, &layout, first, cell_h, gap).inset(px(1.));
+                let plot = Bounds::new(
+                    point(bounds.left(), cell.top()),
+                    size(bounds.size.width, cell.size.height),
+                );
+                let bands = r.bands(plot, sf, alpha);
+                super::element::paint_ramped(window, path, &bands, |_band| {
+                    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+                    {
+                        view.path_paints.set(view.path_paints.get() + 1);
+                        view.path_ramps.borrow_mut().push(*_band);
+                    }
+                });
+            }
+        };
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            live(window, 0, PieceLayer::Fill, spec.fill);
+            match value_ramp.as_ref() {
+                Some(r) => ramped(window, r, PieceLayer::Fill, ramp::FILL_ALPHA * spec.fill.a),
+                None => live(window, 0, PieceLayer::Fill, spec.fill),
+            }
             stale_sets(window, &cache.stale_fills);
-            live(window, 0, PieceLayer::Stroke, spec.line);
+            match value_ramp.as_ref() {
+                Some(r) => ramped(window, r, PieceLayer::Stroke, spec.line.a),
+                None => live(window, 0, PieceLayer::Stroke, spec.line),
+            }
             live(window, 1, PieceLayer::Stroke, spec.overlay_line);
             stale_sets(window, &cache.stale_strokes);
         });

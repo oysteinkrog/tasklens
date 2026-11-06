@@ -391,6 +391,8 @@ mod element {
 
     #[gpui_kit::test]
     fn geometry_built_once_for_static_data(cx: &mut TestAppContext) {
+        // Flat colours: this test counts and checks flat-coloured paths (tasklens-j477q).
+        crate::value_ramp::value_colors(cx, false);
         let mut r = rig(cx, spec(false, true));
         r.set(view_of(600, now_boot_ns(), 100 * MS, 1), ChartState::Live);
         r.vcx.run_until_parked();
@@ -589,6 +591,8 @@ mod element {
 
     #[gpui_kit::test]
     fn chart_stale_tail_half_alpha(cx: &mut TestAppContext) {
+        // Flat colours: this test counts and checks flat-coloured paths (tasklens-j477q).
+        crate::value_ramp::value_colors(cx, false);
         let mut r = rig(cx, spec(false, false));
         let now = now_boot_ns();
         r.set(
@@ -1148,6 +1152,8 @@ mod anchor {
 
     #[gpui_kit::test]
     fn gap_and_spike_scene_shape(cx: &mut TestAppContext) {
+        // Flat colours: this test counts and checks flat-coloured paths (tasklens-j477q).
+        crate::value_ramp::value_colors(cx, false);
         let (root, vcx) = window_with(cx, &FakeEngine::new(), vec![spec(A, false)], 400., 200.);
         at_scale_one(vcx);
         let c = chart(&root, vcx, 0);
@@ -2168,6 +2174,8 @@ mod grid_element {
 
     #[gpui_kit::test]
     fn grid_one_fill_path_for_all_cells(cx: &mut TestAppContext) {
+        // Flat colours: this test counts and checks flat-coloured paths (tasklens-j477q).
+        crate::value_ramp::value_colors(cx, false);
         let engine = FakeEngine::new();
         publish(&engine, 32, true, 1, 1, |i| 10.0 + f32::from(i));
         let (grid, vcx) = grid_in_window(cx, &engine, spec(32, true));
@@ -2186,10 +2194,71 @@ mod grid_element {
         });
     }
 
+    /// With value colours on (the default), a CPU grid paints its total fill and line one row of
+    /// cells at a time with the CPU ramp, each once per plot half it reaches: every core at 80 %
+    /// fills both halves and its line only the upper one. The overlay line stays flat
+    /// (tasklens-j477q).
+    #[gpui_kit::test]
+    fn grid_value_ramp_paints_per_row(cx: &mut TestAppContext) {
+        crate::value_ramp::value_colors(cx, true);
+        let engine = FakeEngine::new();
+        publish(&engine, 32, true, 1, 1, |_| 80.0);
+        let (grid, vcx) = grid_in_window(cx, &engine, spec(32, true));
+        draw(vcx);
+        let before = vcx.read_entity(&grid, |v, _| v.path_paints.get());
+        vcx.update(|_, cx| grid.update(cx, |_, cx| cx.notify()));
+        draw(vcx);
+        let g = vcx.update(|_, cx| tl_ui_base::theme::current(cx).graph);
+        let cpu = g.value_ramp(tl_ui_base::theme::ValueRampKind::Cpu);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.built_layout().map(|l| (l.cols, l.rows)), Some((8, 4)));
+            let bands = v.path_ramps.borrow().to_vec();
+            // 4 rows: fill in 2 halves (8), line in the upper half (4).
+            assert_eq!(bands.len(), 12, "{bands:?}");
+            assert_eq!(
+                v.path_paints.get() - before,
+                13,
+                "12 ramped paints and the overlay"
+            );
+            let fill_alpha = tl_ui_chart::chart::ramp::FILL_ALPHA * 0.2;
+            for row in 0..4 {
+                let (lower, upper) = (bands[2 * row], bands[2 * row + 1]);
+                assert_eq!(
+                    lower.from,
+                    Hsla {
+                        a: fill_alpha,
+                        ..cpu[0]
+                    },
+                    "row {row}"
+                );
+                assert_eq!(
+                    upper.to,
+                    Hsla {
+                        a: fill_alpha,
+                        ..cpu[2]
+                    },
+                    "row {row}"
+                );
+                assert_eq!(lower.bounds.top(), upper.bounds.bottom());
+                let line = bands[8 + row];
+                assert_eq!((line.from, line.to), (cpu[1], cpu[2]), "row {row} line");
+                assert_eq!(line.bounds, upper.bounds, "row {row} line in its own row");
+                if row > 0 {
+                    assert!(
+                        upper.bounds.top() > bands[2 * row - 1].bounds.top(),
+                        "rows go down"
+                    );
+                }
+            }
+        });
+    }
+
     /// tasklens-wlf.45 (gpui-pre patch): a cached grid that replays its last paint copies each
     /// path vertex once, and a repaint copies none, because the scene moves the painted path in.
     #[gpui_kit::test]
     fn grid_replay_copies_each_path_once(cx: &mut TestAppContext) {
+        // Flat colours: this test counts and checks flat-coloured paths (tasklens-j477q).
+        crate::value_ramp::value_colors(cx, false);
         let engine = FakeEngine::new();
         publish(&engine, 32, true, 1, 1, |i| 10.0 + f32::from(i));
         let (grid, vcx) = grid_in_window(cx, &engine, spec(32, true));
@@ -2414,6 +2483,8 @@ mod grid_element {
     /// exactly the paths of a grid that builds in full every time at the same anchor.
     #[gpui_kit::test]
     fn grid_append_emits_few_vertices(cx: &mut TestAppContext) {
+        // Flat colours: this test counts and checks flat-coloured paths (tasklens-j477q).
+        crate::value_ramp::value_colors(cx, false);
         let engine = FakeEngine::new();
         // The newest sample 60 s ahead of now, so a slow test run never turns the series stale.
         let start = now_boot_ns() + 60_000 * MS;
@@ -2652,6 +2723,8 @@ mod grid_offline_and_gaps {
 
     #[gpui_kit::test]
     fn grid_cell_gap_paints_dotted_span(cx: &mut TestAppContext) {
+        // Flat colours: this test counts and checks flat-coloured paths (tasklens-j477q).
+        crate::value_ramp::value_colors(cx, false);
         let engine = FakeEngine::new();
         publish(&engine, 4, 1, Some(1));
         let (grid, vcx) = grid_in_window(cx, &engine, spec(4));

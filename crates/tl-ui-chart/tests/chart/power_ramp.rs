@@ -24,13 +24,13 @@ use tl_ui_testkit::fake_engine::FakeEngine;
 
 const S: u64 = 1_000_000_000;
 
-const PKG: SeriesId = SeriesId {
+pub(crate) const PKG: SeriesId = SeriesId {
     device: DeviceIdx(0),
-    metric: MetricId::CPU_TOTAL,
+    metric: MetricId::CPU_POWER_PKG,
 };
 const CORES: SeriesId = SeriesId {
     device: DeviceIdx(0),
-    metric: MetricId::CPU_KERNEL,
+    metric: MetricId::CPU_POWER_CORE,
 };
 
 /// Chart size in logical px. The plot is the chart inset by its 1 px outline: 1..399 × 1..199.
@@ -39,7 +39,7 @@ const H: f32 = 200.;
 const PLOT_TOP: f32 = 1.;
 const PLOT_BOTTOM: f32 = 199.;
 
-fn init(cx: &mut TestAppContext) {
+pub(crate) fn init(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         store::init(
@@ -52,7 +52,7 @@ fn init(cx: &mut TestAppContext) {
     });
 }
 
-fn labels(fmt: ValueFormat) -> ChartLabels {
+pub(crate) fn labels(fmt: ValueFormat) -> ChartLabels {
     ChartLabels {
         heading: None,
         value_fmt: fmt,
@@ -65,7 +65,7 @@ fn labels(fmt: ValueFormat) -> ChartLabels {
 
 /// A power chart over `y`: series 0 filled with the theme's GPU colours, plus a dashed second
 /// series when `cores`, as the CPU page's Power draw chart.
-fn spec(y: YScale, cores: bool, g: &GraphPalette) -> ChartSpec {
+pub(crate) fn spec(y: YScale, cores: bool, g: &GraphPalette) -> ChartSpec {
     let mut series: SmallVec<[ChartSeries; 4]> = smallvec![ChartSeries {
         id: PKG,
         fill: Some(g.gpu_fill),
@@ -96,7 +96,7 @@ fn spec(y: YScale, cores: bool, g: &GraphPalette) -> ChartSpec {
 }
 
 /// 61 samples 1 s apart ending now: the older half at `low` W, the newer half at `high` W.
-fn step(id: SeriesId, low: f32, high: f32) -> Arc<SeriesView> {
+pub(crate) fn step(id: SeriesId, low: f32, high: f32) -> Arc<SeriesView> {
     let newest = now_boot_ns();
     let samples = (0..61u64)
         .map(|i| Sample::valid(newest - (60 - i) * S, if i < 30 { low } else { high }))
@@ -127,7 +127,7 @@ impl Render for Root {
 }
 
 /// One chart in a window at scale 1, with `series` bound and drawn once.
-fn draw_chart(
+pub(crate) fn draw_chart(
     cx: &mut TestAppContext,
     make_spec: impl FnOnce(&GraphPalette) -> ChartSpec,
     fmt: ValueFormat,
@@ -154,28 +154,28 @@ fn draw_chart(
     (chart, vcx)
 }
 
-fn redraw(chart: &Entity<ChartView>, vcx: &mut VisualTestContext) {
+pub(crate) fn redraw(chart: &Entity<ChartView>, vcx: &mut VisualTestContext) {
     chart.update(vcx, |_, cx| cx.notify());
     vcx.update(|window, cx| {
         window.draw(cx).clear(cx);
     });
 }
 
-fn ramps(chart: &Entity<ChartView>, vcx: &mut VisualTestContext) -> Vec<RampBand> {
+pub(crate) fn ramps(chart: &Entity<ChartView>, vcx: &mut VisualTestContext) -> Vec<RampBand> {
     vcx.read_entity(chart, |v, _| v.path_ramps.borrow().to_vec())
 }
 
-fn solid(chart: &Entity<ChartView>, vcx: &mut VisualTestContext) -> Vec<Hsla> {
+pub(crate) fn solid(chart: &Entity<ChartView>, vcx: &mut VisualTestContext) -> Vec<Hsla> {
     vcx.read_entity(chart, |v, _| v.path_colors.borrow().to_vec())
 }
 
-fn rgba(c: Hsla) -> Rgba {
+pub(crate) fn rgba(c: Hsla) -> Rgba {
     c.into()
 }
 
 /// The colour a band's gradient gives at row `y` (logical px), mixed in sRGB as the GPUI path
 /// shader does: `from` at the bottom of the band, `to` at its top.
-fn band_color_at(band: &RampBand, y: f32) -> Rgba {
+pub(crate) fn band_color_at(band: &RampBand, y: f32) -> Rgba {
     let (top, bottom) = (
         f32::from(band.bounds.top()),
         f32::from(band.bounds.bottom()),
@@ -192,7 +192,7 @@ fn band_color_at(band: &RampBand, y: f32) -> Rgba {
 }
 
 /// The colour of row `y` from the band that holds it.
-fn color_at(bands: &[RampBand], y: f32) -> Rgba {
+pub(crate) fn color_at(bands: &[RampBand], y: f32) -> Rgba {
     let band = bands
         .iter()
         .find(|b| f32::from(b.bounds.top()) <= y && y <= f32::from(b.bounds.bottom()))
@@ -201,16 +201,16 @@ fn color_at(bands: &[RampBand], y: f32) -> Rgba {
 }
 
 /// The plot row of `watts` on a 0..`axis` W axis.
-fn row_of(watts: f32, axis: f32) -> f32 {
+pub(crate) fn row_of(watts: f32, axis: f32) -> f32 {
     PLOT_TOP + (1.0 - watts / axis) * (PLOT_BOTTOM - PLOT_TOP)
 }
 
-fn dist(a: Rgba, b: Hsla) -> f32 {
+pub(crate) fn dist(a: Rgba, b: Hsla) -> f32 {
     let b = rgba(b);
     ((a.r - b.r).powi(2) + (a.g - b.g).powi(2) + (a.b - b.b).powi(2)).sqrt()
 }
 
-fn with_alpha(c: Hsla, a: f32) -> Hsla {
+pub(crate) fn with_alpha(c: Hsla, a: f32) -> Hsla {
     Hsla { a, ..c }
 }
 
@@ -429,8 +429,8 @@ fn each_builtin_theme_uses_its_power_tokens(cx: &mut TestAppContext) {
     assert_ne!(seen[0], seen[1], "dark and light have their own ramps");
 }
 
-/// Charts that are not power draw keep their flat colours: a percent chart, and a battery's
-/// charge and discharge chart in watts.
+/// Charts that are not power draw and have no value ramp keep their flat colours: a percent
+/// chart of a metric without a ramp, and a battery's charge and discharge chart in watts.
 #[gpui_kit::test]
 fn percent_and_battery_charts_keep_flat_colours(cx: &mut TestAppContext) {
     let (chart, vcx) = draw_chart(

@@ -132,6 +132,7 @@ impl Element for ChartElement {
             network_unit: NetFormat::of(cx),
             curved: cx.has_global::<TlSettings>()
                 && TlSettings::settings(cx).performance.curved_lines,
+            value_colors: ValueRamp::enabled(cx),
         };
         let view_id = self.view.entity_id();
         let out = self.view.update(cx, |view, cx| {
@@ -275,6 +276,8 @@ struct PaintEnv {
     network_unit: NetFormat,
     /// `performance.curved_lines`.
     curved: bool,
+    /// `appearance.color_charts_by_value` (tasklens-j477q).
+    value_colors: bool,
 }
 
 struct PaintOut {
@@ -333,8 +336,14 @@ fn paint_view(
             .and_then(|link| link.follow(view_id));
     }
     let compact_scale = view.compact_scale;
-    // Power draw charts fill and draw series 0 with the value ramp (tasklens-1vwxr).
-    let value_ramp = ValueRamp::of_chart(view.labels.value_fmt, &view.spec, &env.theme);
+    // Power draw charts (tasklens-1vwxr) and one-series charts on a fixed scale (tasklens-j477q)
+    // fill and draw series 0 with a value ramp, while the setting is on.
+    let value_ramp = ValueRamp::of_chart(
+        view.labels.value_fmt,
+        &view.spec,
+        &env.theme,
+        env.value_colors,
+    );
     let ramp_target = view.spec.series.first().map(|s| (s.fill, s.line));
     let frozen = view.frozen;
     let newest_marks = view.newest_marks;
@@ -811,7 +820,7 @@ impl grid::QuadSink for QuadCount {
 /// Paints `path` once per ramp band it reaches, each time with its bounds set to that band: the
 /// bounds clip the path and span the band's gradient (tasklens-1vwxr). Calls `on_paint` after
 /// each paint.
-fn paint_ramped(
+pub(super) fn paint_ramped(
     window: &mut Window,
     mut path: Path<Pixels>,
     bands: &[RampBand; 2],

@@ -5,3 +5,4 @@
 mod chart;
 mod chart_geometry;
 mod power_ramp;
+mod value_ramp;
