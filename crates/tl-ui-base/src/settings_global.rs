@@ -354,7 +354,7 @@ macro_rules! setting_keys {
 
         impl SettingKey {
             /// Every key in table (a) order.
-            pub const ALL: [SettingKey; 92] = [$(SettingKey::$key,)*];
+            pub const ALL: [SettingKey; 93] = [$(SettingKey::$key,)*];
 
             /// The dotted name, for example `"motion.animations"`. `Fans` is `"fans"`.
             pub fn as_str(self) -> &'static str {
