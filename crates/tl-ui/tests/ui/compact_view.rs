@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use gpui_kit::{
     AppContext as _, Context, Entity, FocusHandle, IntoElement, Modifiers, MouseButton,
-    MouseDownEvent, MouseUpEvent, Render, TestAppContext, VisualTestContext, Window, div, point,
-    px, size,
+    MouseDownEvent, MouseExitEvent, MouseUpEvent, Render, TestAppContext, VisualTestContext,
+    Window, div, point, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
@@ -295,6 +295,31 @@ fn exit_button_ends_compact_view(cx: &mut TestAppContext) {
     draw(r.vcx);
     assert_normal(&mut r);
     assert!(!drawn(&mut r, COMPACT_EXIT_ID));
+}
+
+/// The exit button follows the mouse over the whole window: a move over the client title bar,
+/// which compact view keeps, shows it, and leaving the window from there hides it.
+#[gpui_kit::test]
+fn exit_button_shows_on_a_title_bar_move(cx: &mut TestAppContext) {
+    let mut r = open(cx, UiState::default(), true);
+    press(&mut r, "f11");
+    assert_compact(&mut r);
+    assert!(!drawn(&mut r, COMPACT_EXIT_ID), "no button before a move");
+    // The middle of the 34 px client title bar, clear of the caption buttons.
+    let on_bar = point(px(600.), px(17.));
+    r.vcx.simulate_mouse_move(on_bar, None, Modifiers::none());
+    draw(r.vcx);
+    assert!(drawn(&mut r, COMPACT_EXIT_ID), "a title bar move shows it");
+    r.vcx.simulate_event(MouseExitEvent {
+        position: on_bar,
+        pressed_button: None,
+        modifiers: Modifiers::none(),
+    });
+    draw(r.vcx);
+    assert!(
+        !drawn(&mut r, COMPACT_EXIT_ID),
+        "leaving the window from the title bar hides it"
+    );
 }
 
 /// A right-click on the page in compact view offers "Exit compact view", which ends it.

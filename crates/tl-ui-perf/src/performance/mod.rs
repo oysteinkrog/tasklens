@@ -45,11 +45,12 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::{ResizableState, h_flex, h_resizable, resizable_panel};
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, AppContext as _, AsyncApp, Bounds,
-    ClipboardItem, Context, Div, Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, ParentElement as _, Pixels, Point,
-    Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Task, WeakEntity, Window, div, px, radians,
+    ClipboardItem, Context, DispatchPhase, Div, Element, ElementId, Entity, EventEmitter,
+    FocusHandle, Focusable, GlobalElementId, InspectorElementId, InteractiveElement as _,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    ParentElement as _, Pixels, Point, Render, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, canvas,
+    div, px, radians,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -130,12 +131,13 @@ pub const COMPACT_EXIT_ID: &str = "perf-compact-exit";
 /// The exit button's side and its inset from the top and right edges, × ui_scale.
 pub const COMPACT_EXIT_SIZE: f32 = 28.;
 pub const COMPACT_EXIT_INSET: f32 = 8.;
-/// The exit button fades out after this long without a mouse move over the tab.
+/// The exit button fades out after this long without a mouse move in the window.
 pub const COMPACT_EXIT_IDLE: Duration = Duration::from_secs(2);
 
-/// The compact view exit button (tasklens-qdn1r). It shows on a mouse move over the tab, fades
-/// out over `m_base` after [`COMPACT_EXIT_IDLE`] without one, and goes at once when the pointer
-/// leaves the window. It stays while the pointer rests on it.
+/// The compact view exit button (tasklens-qdn1r). It shows on a mouse move anywhere in the
+/// window, the client title bar included. It fades out over `m_base` after
+/// [`COMPACT_EXIT_IDLE`] without one, and goes at once when the pointer leaves the window. It
+/// stays while the pointer rests on it.
 struct ExitButton {
     shown: bool,
     /// The generation of the fade-out in progress.
@@ -685,7 +687,7 @@ impl PerformancePage {
         self.compact
     }
 
-    /// The exit button is drawn: compact view is on and the mouse moved over the tab less than
+    /// The exit button is drawn: compact view is on and the mouse moved in the window less than
     /// [`COMPACT_EXIT_IDLE`] ago, or the button is fading out.
     pub fn exit_button_shown(&self) -> bool {
         self.compact && self.exit.shown
@@ -712,9 +714,40 @@ impl PerformancePage {
         self.exit.timer = None;
     }
 
-    /// A mouse move over the tab shows the exit button in compact view and restarts its idle
-    /// time. Only the first move after it was hidden or began to fade renders again.
-    fn on_pointer_move(&mut self, _: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    /// Window-wide pointer listeners for the exit button, so a move over the client title bar
+    /// counts as much as one over the tab (tasklens-qdn1r). An element's own mouse handlers only
+    /// fire while its hitbox is hovered. These run in the capture phase, so no handler that stops
+    /// propagation hides a move from them. Registered only in compact view.
+    fn pointer_watch(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if !self.compact {
+            return None;
+        }
+        let this = cx.weak_entity();
+        let watch = canvas(
+            |_, _, _| (),
+            move |_, _, window, _| {
+                let on_move = this.clone();
+                window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = on_move.update(cx, |p, cx| p.pointer_moved(cx));
+                    }
+                });
+                let on_exit = this.clone();
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = on_exit.update(cx, |p, cx| p.pointer_left(cx));
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full();
+        Some(watch)
+    }
+
+    /// A mouse move anywhere in the window shows the exit button in compact view and restarts
+    /// its idle time. Only the first move after it was hidden or began to fade renders again.
+    fn pointer_moved(&mut self, cx: &mut Context<Self>) {
         if !self.compact {
             return;
         }
@@ -752,7 +785,7 @@ impl PerformancePage {
     }
 
     /// The pointer left the window: the exit button goes at once.
-    fn on_pointer_exit(&mut self, _: &MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn pointer_left(&mut self, cx: &mut Context<Self>) {
         if self.exit.shown {
             self.hide_exit_button();
             cx.notify();
@@ -1535,6 +1568,7 @@ impl Render for PerformancePage {
                     .child(page),
             );
 
+        let watch = self.pointer_watch(cx);
         let exit = self.exit_button(window, cx);
         let root = h_flex()
             .relative()
@@ -1550,12 +1584,11 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_set_overview_range))
             .on_action(cx.listener(Self::on_copy_value))
             .on_action(cx.listener(Self::on_copy_device_info))
-            .on_mouse_move(cx.listener(Self::on_pointer_move))
-            .on_mouse_exit(cx.listener(Self::on_pointer_exit))
             .size_full()
             .children(strip)
             .children(animated)
             .child(split)
+            .children(watch)
             // Last, so it draws over the page.
             .children(exit);
         match self.leaving {
