@@ -1320,7 +1320,10 @@ mod tab {
     use tl_ui_perf::performance::actions::PerfToggleSidebar;
     use tl_ui_perf::performance::cpu::CpuPage;
     use tl_ui_perf::performance::page::DevicePage as _;
-    use tl_ui_perf::performance::{DeviceKey, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID};
+    use tl_ui_perf::performance::{
+        DeviceKey, PAGE_PANEL_ID, PerformancePage, SIDEBAR_COLLAPSE_ID, SIDEBAR_EXPAND_ID,
+        SIDEBAR_PANEL_ID, SIDEBAR_STRIP_W,
+    };
     use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -1361,8 +1364,8 @@ mod tab {
     struct Rig<'a> {
         page: Entity<PerformancePage>,
         demand: Entity<DemandAggregator>,
-        /// `nav_width` of every persisted state.
-        persisted: Rc<RefCell<Vec<u16>>>,
+        /// Every persisted state.
+        persisted: Rc<RefCell<Vec<UiState>>>,
         vcx: &'a mut VisualTestContext,
     }
 
@@ -1387,7 +1390,7 @@ mod tab {
     }
 
     /// Every Global the tab needs over a fake catalog with CPU (`cpus` logical CPUs) and Memory.
-    fn install(cx: &mut TestAppContext, state: UiState, cpus: u16) -> Rc<RefCell<Vec<u16>>> {
+    fn install(cx: &mut TestAppContext, state: UiState, cpus: u16) -> Rc<RefCell<Vec<UiState>>> {
         let engine = FakeEngine::new();
         engine.publish_with(|s| {
             let mut entries = vec![
@@ -1402,7 +1405,7 @@ mod tab {
             Arc::make_mut(&mut s.system).cpu_topology = Arc::new(topology(cpus));
         });
         let client: Arc<dyn EngineClient> = engine;
-        let persisted: Rc<RefCell<Vec<u16>>> = Rc::default();
+        let persisted: Rc<RefCell<Vec<UiState>>> = Rc::default();
         let seen = Rc::clone(&persisted);
         cx.update(|cx| {
             gpui_kit::init(cx);
@@ -1420,7 +1423,7 @@ mod tab {
                 settings: hidden_overview(),
                 state,
                 persist: Some(Box::new(move |_, state| {
-                    seen.borrow_mut().push(state.performance.nav_width)
+                    seen.borrow_mut().push(state.clone())
                 })),
                 startup_toasts: Vec::new(),
             });
@@ -1508,7 +1511,8 @@ mod tab {
         r.vcx.executor().advance_clock(Duration::from_millis(600));
         draw(r.vcx);
 
-        assert_eq!(r.persisted.borrow().last(), Some(&300));
+        let last = r.persisted.borrow().last().map(|s| s.performance.nav_width);
+        assert_eq!(last, Some(300));
         let page = r.page.clone();
         let (saved, nav) = r.vcx.update(|_, cx| {
             (
@@ -1534,26 +1538,135 @@ mod tab {
         draw(r.vcx);
     }
 
+    /// The page panel's left edge and width while the sidebar is hidden: right of the 12 px
+    /// expand strip, to the window's right edge (tasklens-o5853).
+    fn page_beside_strip(r: &mut Rig) {
+        let strip = r.vcx.debug_bounds(SIDEBAR_EXPAND_ID).expect("expand strip");
+        assert_eq!(
+            (strip.left(), strip.size.width),
+            (px(0.), px(SIDEBAR_STRIP_W))
+        );
+        assert_eq!(
+            strip.size.height,
+            px(800.),
+            "the strip has the tab's height"
+        );
+        let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");
+        assert_eq!(
+            (page.left(), page.size.width),
+            (px(SIDEBAR_STRIP_W), px(1280. - SIDEBAR_STRIP_W))
+        );
+    }
+
+    /// The last persisted `sidebar_hidden`.
+    fn persisted_hidden(r: &Rig) -> Option<bool> {
+        r.persisted
+            .borrow()
+            .last()
+            .map(|s| s.performance.sidebar_hidden)
+    }
+
+    /// F9 hides the sidebar and saves `sidebar_hidden`; F9 again brings it back and saves that.
     #[gpui_kit::test]
-    fn toggle_sidebar_not_persisted(cx: &mut TestAppContext) {
+    fn toggle_sidebar_persists(cx: &mut TestAppContext) {
         let mut r = open(cx, UiState::default(), 16, 1280., 800.);
-        let before = r.persisted.borrow().len();
-        let state = r.vcx.update(|_, cx| TlSettings::state(cx).clone());
+        assert!(r.vcx.debug_bounds(SIDEBAR_COLLAPSE_ID).is_some(), "arrow");
+        assert!(r.vcx.debug_bounds(SIDEBAR_EXPAND_ID).is_none(), "no strip");
 
         toggle(&mut r);
         assert!(!sidebar_visible(&mut r), "hidden");
         assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_none());
-        let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");
-        assert_eq!((page.left(), page.size.width), (px(0.), px(1280.)));
+        assert!(r.vcx.debug_bounds(SIDEBAR_COLLAPSE_ID).is_none());
+        page_beside_strip(&mut r);
+        let hidden = r
+            .vcx
+            .update(|_, cx| TlSettings::state(cx).performance.sidebar_hidden);
+        assert!(hidden, "state.performance.sidebar_hidden");
+        assert_eq!(persisted_hidden(&r), Some(true));
 
         toggle(&mut r);
         assert!(sidebar_visible(&mut r), "shown again");
         let sidebar = r.vcx.debug_bounds(SIDEBAR_PANEL_ID).expect("sidebar panel");
         assert_eq!(sidebar.size.width, px(252.));
+        assert!(r.vcx.debug_bounds(SIDEBAR_EXPAND_ID).is_none(), "no strip");
+        assert_eq!(persisted_hidden(&r), Some(false));
+    }
 
-        assert_eq!(r.persisted.borrow().len(), before, "nothing persisted");
-        let after = r.vcx.update(|_, cx| TlSettings::state(cx).clone());
-        assert_eq!(after, state);
+    /// A click on the collapse arrow hides the sidebar; a click on the expand strip brings it
+    /// back with the same card selected (tasklens-o5853).
+    #[gpui_kit::test]
+    fn collapse_arrow_and_expand_strip_clicks(cx: &mut TestAppContext) {
+        let mut r = open(cx, UiState::default(), 16, 1280., 800.);
+        let page = r.page.clone();
+        let sidebar = r.vcx.update(|_, cx| page.read(cx).sidebar().clone());
+        r.vcx
+            .update(|_, cx| sidebar.update(cx, |s, cx| s.select(key(DeviceKey::MEMORY), cx)));
+        draw(r.vcx);
+
+        let arrow = r.vcx.debug_bounds(SIDEBAR_COLLAPSE_ID).expect("arrow");
+        let panel = r.vcx.debug_bounds(SIDEBAR_PANEL_ID).expect("sidebar panel");
+        assert_eq!(arrow.right(), panel.right(), "on the sidebar's right edge");
+        assert_eq!(arrow.size, size(px(SIDEBAR_STRIP_W), px(32.)));
+        assert_eq!(arrow.center().y, panel.center().y, "centred on its height");
+        r.vcx.simulate_click(arrow.center(), Modifiers::none());
+        draw(r.vcx);
+        r.vcx.executor().advance_clock(Duration::from_millis(250));
+        draw(r.vcx);
+        assert!(!sidebar_visible(&mut r), "hidden by the arrow");
+        page_beside_strip(&mut r);
+        assert_eq!(persisted_hidden(&r), Some(true));
+
+        let strip = r.vcx.debug_bounds(SIDEBAR_EXPAND_ID).expect("strip");
+        r.vcx.simulate_click(strip.center(), Modifiers::none());
+        draw(r.vcx);
+        r.vcx.executor().advance_clock(Duration::from_millis(250));
+        draw(r.vcx);
+        assert!(sidebar_visible(&mut r), "shown by the strip");
+        assert_eq!(persisted_hidden(&r), Some(false));
+        let selected = r.vcx.update(|_, cx| {
+            (
+                page.read(cx).selected().cloned(),
+                sidebar.read(cx).selected().cloned(),
+            )
+        });
+        assert_eq!(
+            selected,
+            (Some(key(DeviceKey::MEMORY)), Some(key(DeviceKey::MEMORY))),
+            "the same card stays selected"
+        );
+    }
+
+    /// A saved hidden sidebar stays hidden at the next start (tasklens-o5853).
+    #[gpui_kit::test]
+    fn hidden_sidebar_restored_at_start(cx: &mut TestAppContext) {
+        let mut state = UiState::default();
+        state.performance.sidebar_hidden = true;
+        let mut r = open(cx, state, 16, 1280., 800.);
+        assert!(!sidebar_visible(&mut r), "hidden at start");
+        assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_none());
+        page_beside_strip(&mut r);
+
+        toggle(&mut r);
+        assert!(sidebar_visible(&mut r), "F9 brings it back");
+        let sidebar = r.vcx.debug_bounds(SIDEBAR_PANEL_ID).expect("sidebar panel");
+        assert_eq!(sidebar.size.width, px(252.));
+    }
+
+    /// A change of `sidebar_hidden` from outside the page, as View > Show sidebar makes on
+    /// another tab, hides and shows the sidebar.
+    #[gpui_kit::test]
+    fn sidebar_follows_state_written_elsewhere(cx: &mut TestAppContext) {
+        let mut r = open(cx, UiState::default(), 16, 1280., 800.);
+        r.vcx
+            .update(|_, cx| TlSettings::update(cx, |d| d.state.performance.sidebar_hidden = true));
+        draw(r.vcx);
+        assert!(!sidebar_visible(&mut r));
+        page_beside_strip(&mut r);
+        r.vcx
+            .update(|_, cx| TlSettings::update(cx, |d| d.state.performance.sidebar_hidden = false));
+        draw(r.vcx);
+        assert!(sidebar_visible(&mut r));
+        assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_some());
     }
 
     #[gpui_kit::test]
@@ -1572,7 +1685,11 @@ mod tab {
         r.vcx.executor().advance_clock(Duration::from_millis(150));
         draw(r.vcx);
         let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");
-        assert_eq!(page.left(), px(0.));
+        assert_eq!(
+            page.left(),
+            px(SIDEBAR_STRIP_W),
+            "right of the expand strip"
+        );
     }
 
     #[gpui_kit::test]

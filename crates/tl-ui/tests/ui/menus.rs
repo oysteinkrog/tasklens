@@ -571,13 +571,14 @@ fn set_tab(cx: &mut VisualTestContext, tab: Tab, history: bool) {
 }
 
 /// The View root items in order.
-const VIEW_ROOT: [&str; 6] = [
+const VIEW_ROOT: [&str; 7] = [
     "Columns",
     "Process View",
     "Window",
     "Appearance",
     "Theme",
     "Graphs",
+    "Show sidebar",
 ];
 
 /// The labels of the open submenus: every drawn label except the View root items.
@@ -604,8 +605,8 @@ fn menubar_alt_keys(cx: &mut TestAppContext) {
     let entries = entries(r.cx);
     assert_eq!(
         entries.len(),
-        6,
-        "Columns, Process View, Window, Appearance, Theme, Graphs: {entries:?}"
+        7,
+        "Columns, Process View, Window, Appearance, Theme, Graphs, Show sidebar: {entries:?}"
     );
     assert_eq!(entries[0].label(), Some("Columns"));
     assert_eq!(entries[0].selected(), Some(true), "Columns highlighted");
@@ -614,6 +615,7 @@ fn menubar_alt_keys(cx: &mut TestAppContext) {
     assert_eq!(entries[3].label(), Some("Appearance"));
     assert_eq!(entries[4].label(), Some("Theme"));
     assert_eq!(entries[5].label(), Some("Graphs"));
+    assert_eq!(entries[6].label(), Some("Show sidebar"));
 }
 
 #[gpui_kit::test]
@@ -688,7 +690,7 @@ fn columns_disabled_on_performance(cx: &mut TestAppContext) {
     keys(r.cx, "alt-v");
     assert_eq!(open_menu(r.cx), Some(MenuId::View));
     let drawn = entries(r.cx);
-    assert_eq!(drawn.len(), 6);
+    assert_eq!(drawn.len(), 7);
     assert_eq!(drawn[0].label(), Some("Columns"));
     assert_ne!(
         drawn[0].selected(),
@@ -3579,4 +3581,54 @@ fn documentation_open_uri_and_failure(cx: &mut TestAppContext) {
         toasts[0].starts_with("Could not open the documentation"),
         "{toasts:?}"
     );
+}
+
+/// The built entries of the open View root.
+fn view_root_entries(
+    cx: &mut VisualTestContext,
+) -> Vec<tl_ui_kit::components::menu::MenuEntryInfo> {
+    let bar = bar(cx);
+    cx.update(|window, cx| {
+        let popup = bar.read(cx).popup().expect("menu open").clone();
+        popup.read(cx).entries_for_test(window)
+    })
+}
+
+/// View > Show sidebar (tasklens-o5853): a check from `state.performance.sidebar_hidden` that
+/// runs `PerfToggleSidebar`. With no Performance page in the focus path, the fallback in
+/// `menus_view::init` flips the saved value.
+#[gpui_kit::test]
+fn view_show_sidebar_check_follows_state(cx: &mut TestAppContext) {
+    use tl_ui_perf_core::core::actions::PerfToggleSidebar;
+    let r = rig(cx);
+    let item = |cx: &mut VisualTestContext| {
+        view_root_entries(cx)
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some("Show sidebar"))
+            .expect("Show sidebar item")
+    };
+    let hidden = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| TlSettings::state(cx).performance.sidebar_hidden)
+    };
+    keys(r.cx, "alt-v");
+    let e = item(r.cx);
+    assert!(e.checked, "checked while the sidebar shows");
+    assert!(
+        e.action
+            .as_ref()
+            .is_some_and(|a| a.partial_eq(&PerfToggleSidebar)),
+        "runs PerfToggleSidebar"
+    );
+    let persists = r.persists.get();
+    keys(r.cx, "end enter");
+    assert_eq!(open_menu(r.cx), None, "the menu closes");
+    assert!(hidden(r.cx), "the saved value is hidden");
+    assert!(r.persists.get() > persists, "state.toml is written");
+
+    keys(r.cx, "alt-v");
+    assert!(!item(r.cx).checked, "unchecked while hidden");
+    keys(r.cx, "end enter");
+    assert!(!hidden(r.cx), "shown again");
+    keys(r.cx, "alt-v");
+    assert!(item(r.cx).checked);
 }

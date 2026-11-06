@@ -1023,7 +1023,7 @@ fn jump_to_type_selects_first_visible(cx: &mut TestAppContext) {
     assert_eq!(selected(&mut r), first_net);
 }
 
-/// crw.2: the P1 sidebar actions work together in one app and persist only durable state.
+/// crw.2: the P1 sidebar actions work together in one app and persist their state.
 #[gpui_kit::test]
 fn sidebar_p1_flow(cx: &mut TestAppContext) {
     use tl_ui_perf::performance::actions::{
@@ -1095,8 +1095,9 @@ fn sidebar_p1_flow(cx: &mut TestAppContext) {
         tl_ui_settings::settings::PerformanceState {
             nav_width: 252,
             selected_device: "disk:sdc".to_owned(),
+            sidebar_hidden: true,
         },
-        "state.toml has no transient sidebar visibility value"
+        "state.toml keeps the hidden sidebar (tasklens-o5853)"
     );
 }
 

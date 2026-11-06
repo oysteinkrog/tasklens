@@ -43,10 +43,11 @@ use std::cell::Cell;
 
 use gpui_kit::component::{ResizableState, h_flex, h_resizable, resizable_panel};
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyView, App, AppContext as _, AsyncApp, ClipboardItem, Context,
-    Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString,
-    Styled as _, Subscription, WeakEntity, Window, div, px,
+    Animation, AnimationExt as _, AnyElement, AnyView, App, AppContext as _, AsyncApp,
+    ClipboardItem, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Point, Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    Subscription, WeakEntity, Window, div, px, radians,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -68,11 +69,13 @@ use tl_ui_base::i18n::tr;
 use tl_ui_base::selector::TlSelector;
 use tl_ui_base::settings_global::{TlSettings, animations_on};
 use tl_ui_base::shell::{ShellApi, ShellPage, StatusChanged, main_window_title};
-use tl_ui_base::theme::metrics;
+use tl_ui_base::theme::{UiMetrics, current, metrics};
 use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::components::icons::{TlIcon, icon};
 use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
 use tl_ui_kit::components::motion::{M_BASE, M_FAST, ease_out_cubic};
 use tl_ui_kit::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 /// The selection after the selected row at `removed_at` of `visible` (the rows before the
 /// removal) goes away: the next row below, else the one above, else `None`.
@@ -108,6 +111,15 @@ const NAV_MAX_W: u16 = 400;
 /// Debug selectors of the two split panels' contents.
 pub const SIDEBAR_PANEL_ID: &str = "perf-sidebar-panel";
 pub const PAGE_PANEL_ID: &str = "perf-page-panel";
+/// Debug selectors of the collapse arrow on the sidebar's right edge and of the expand strip
+/// at the left edge while the sidebar is hidden (tasklens-o5853).
+pub const SIDEBAR_COLLAPSE_ID: &str = "perf-sidebar-collapse";
+pub const SIDEBAR_EXPAND_ID: &str = "perf-sidebar-expand";
+
+/// The width of the expand strip and of the collapse arrow, × ui_scale (tasklens-o5853).
+pub const SIDEBAR_STRIP_W: f32 = 12.;
+/// The height of the collapse arrow on the sidebar's right edge, × ui_scale.
+const COLLAPSE_H: f32 = 32.;
 
 /// The sidebar hide or show animation in progress (`PerfToggleSidebar`).
 #[derive(Clone, Copy)]
@@ -151,7 +163,8 @@ pub struct PerformancePage {
     /// The sidebar and page fade out before the summary opens; the generation of that fade.
     leaving: Option<u32>,
     leave_generation: u32,
-    /// Not persisted (R-090).
+    /// `!state.performance.sidebar_hidden` (tasklens-o5853, owner request 2026-11-06, which
+    /// replaces R-090's "not persisted").
     pub(crate) sidebar_visible: bool,
     anim: Option<SidebarAnim>,
     anim_generation: u32,
@@ -209,8 +222,15 @@ impl PerformancePage {
             if status_bar::placement(cx) != this.status_placement {
                 cx.notify();
             }
+            // Set outside this page: View > Show sidebar while another tab shows, or a reset.
+            if TlSettings::state(cx).performance.sidebar_hidden == this.sidebar_visible {
+                this.sidebar_visible = !this.sidebar_visible;
+                this.anim_generation = this.anim_generation.wrapping_add(1);
+                this.finish_toggle(cx);
+            }
         }));
         let nav_width = TlSettings::state(cx).performance.nav_width;
+        let sidebar_hidden = TlSettings::state(cx).performance.sidebar_hidden;
         let first = sidebar.read(cx).selected().cloned();
         let mut this = Self {
             sidebar,
@@ -219,7 +239,7 @@ impl PerformancePage {
             selected: None,
             page_focus: SmallVec::new(),
             left_page_focus: None,
-            sidebar_visible: true,
+            sidebar_visible: !sidebar_hidden,
             anim: None,
             anim_generation: 0,
             nav_width: nav_width.clamp(NAV_MIN_W, NAV_MAX_W),
@@ -533,15 +553,22 @@ impl PerformancePage {
             .focus(window, cx);
     }
 
-    /// `PerfToggleSidebar` (F9, Ctrl+T): hides or shows the sidebar. The width animates over
-    /// `m_base` unless animations are off. Not persisted (R-090).
+    /// `PerfToggleSidebar` (F9, Ctrl+T, View > Show sidebar).
     fn on_toggle_sidebar(
         &mut self,
         _: &PerfToggleSidebar,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.toggle_sidebar(window, cx);
+    }
+
+    /// Hides or shows the sidebar and saves that as `state.performance.sidebar_hidden`. The
+    /// width animates over `m_base` unless animations are off. The selected card stays selected.
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
+        let hidden = !self.sidebar_visible;
+        TlSettings::update(cx, |d| d.state.performance.sidebar_hidden = hidden);
         // Focus leaves the list before it goes, so F9 still reaches this page, and comes back
         // to it with the list.
         if !self.sidebar_visible && self.sidebar_focus.contains_focused(window, cx) {
@@ -802,6 +829,92 @@ impl PerformancePage {
         self.nav_width = w;
         TlSettings::update(cx, |d| d.state.performance.nav_width = w);
     }
+
+    /// A click target that toggles the sidebar: `id` as element id and debug selector, 12 px
+    /// wide, the toolbar fill with a divider border that `style` places, the hover fill, an
+    /// arrow and a tooltip with the F9 hint (tasklens-o5853). Not a Tab stop: F9, Ctrl+T and
+    /// View > Show sidebar are the keyboard paths.
+    fn sidebar_toggle(
+        &self,
+        id: &'static str,
+        tip: &'static str,
+        style: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        let arrow = icon(TlIcon::ChevronRight, m.icon.xs, theme.text_secondary);
+        // Points left while the arrow hides the sidebar, right while the strip shows it.
+        let arrow = if self.sidebar_visible {
+            arrow.rotate(radians(std::f32::consts::PI))
+        } else {
+            arrow
+        };
+        let hover = theme.tab_hover;
+        let target = div()
+            .id(id)
+            .tl_selector(|| id.into())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(SIDEBAR_STRIP_W * m.ui_scale))
+            .bg(theme.toolbar)
+            .border_color(theme.divider)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            // The cards under the arrow get neither the hover nor the press.
+            .occlude()
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
+            .child(arrow);
+        let target = style(target);
+        let state = HoverTooltip::state(id, window, cx);
+        let text = TlTooltip::text(tr(cx, tip)).action(&PerfToggleSidebar, Some(&self.focus));
+        HoverTooltip::attach(&state, target, DELAY_CONTROL, text.build(), window, cx)
+            .into_any_element()
+    }
+
+    /// The collapse arrow: a 12 × 32 tab on the sidebar's right edge, centred on its height.
+    fn collapse_arrow(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let m = *metrics(cx);
+        let line = UiMetrics::hairline(window);
+        let tab = self.sidebar_toggle(
+            SIDEBAR_COLLAPSE_ID,
+            "perf-sidebar-hide",
+            |el| {
+                el.h(px(COLLAPSE_H * m.ui_scale))
+                    .border_l(line)
+                    .border_t(line)
+                    .border_b(line)
+                    .rounded_l(m.radius_small)
+            },
+            window,
+            cx,
+        );
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .flex()
+            .items_center()
+            .child(tab)
+            .into_any_element()
+    }
+
+    /// The expand strip: 12 px wide with its border, the tab's full height, at the left edge
+    /// while the sidebar is hidden.
+    fn expand_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let line = UiMetrics::hairline(window);
+        self.sidebar_toggle(
+            SIDEBAR_EXPAND_ID,
+            "perf-sidebar-show",
+            |el| el.h_full().border_r(line),
+            window,
+            cx,
+        )
+    }
 }
 
 /// Runs `f` on the device page behind `view`. Each page type `page::build_page` creates has a
@@ -1003,8 +1116,11 @@ impl Render for PerformancePage {
 
         let sidebar = div()
             .tl_selector(|| SIDEBAR_PANEL_ID.into())
+            .relative()
             .size_full()
-            .child(self.sidebar.clone());
+            .child(self.sidebar.clone())
+            .child(self.collapse_arrow(window, cx));
+        let strip = (!self.sidebar_visible).then(|| self.expand_strip(window, cx));
         let page = div()
             .tl_selector(|| PAGE_PANEL_ID.into())
             .size_full()
@@ -1097,6 +1213,7 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_copy_value))
             .on_action(cx.listener(Self::on_copy_device_info))
             .size_full()
+            .children(strip)
             .children(animated)
             .child(split);
         match self.leaving {

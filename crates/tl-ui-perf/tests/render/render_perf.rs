@@ -1,7 +1,10 @@
 //! Performance tab goldens (UI-PRF-058, tasklens-o55.47): the Overview and the CPU page at
 //! 1280 × 800, ui_scale 1.0, in the Default Dark and Default Light themes, compared with
 //! `tests/golden/perf_<page>_<theme>.png`. The Overview is also checked at 1920 × 1200
-//! (UI-PRF-059), in `perf_overview_1920_<theme>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
+//! (UI-PRF-059), in `perf_overview_1920_<theme>.png`. The whole tab, sidebar and Overview, is
+//! checked with the sidebar shown (its collapse arrow on the right edge) and hidden (the expand
+//! strip at the left edge), in `perf_tab_sidebar_<state>_dark.png` (tasklens-o5853).
+//! `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
 //! The Overview timeline labels its hours from CLOCK_REALTIME in the local time zone, so every
 //! test runs with `TZ=UTC` and the timeline clock pinned at [`NOW`] and [`BOOT`]
@@ -25,6 +28,7 @@ use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui_base::app_env::{BootSettings, EngineGlobal};
 use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
@@ -37,7 +41,7 @@ use tl_ui_perf::performance::cpu::CpuPage;
 use tl_ui_perf::performance::memory::MemoryPage;
 use tl_ui_perf::performance::page::PerfSidebar;
 use tl_ui_perf::performance::sidebar::DeviceSidebar;
-use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
+use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow, PerformancePage};
 use tl_ui_settings::settings::{CpuGraphMode, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -74,6 +78,10 @@ enum Page {
     CpuMode(CpuGraphMode),
     /// The Memory page, with a narrow compressed segment on the composition bar.
     Memory,
+    /// The whole Performance tab on the Overview, with the sidebar hidden when `hidden`.
+    Tab {
+        hidden: bool,
+    },
 }
 
 /// The page, with the entities that keep it fed alive.
@@ -238,15 +246,34 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
         // As the load does: the CPU page's old keys convert to its entry.
         settings.clamp();
     }
+    let mut state = UiState::default();
+    if let Page::Tab { hidden } = page {
+        state.performance.selected_device = OVERVIEW_KEY.to_owned();
+        state.performance.sidebar_hidden = hidden;
+    }
     cx.set_global(BootSettings {
         settings,
-        state: UiState::default(),
+        state,
         persist: None,
         startup_toasts: Vec::new(),
     });
     TlSettings::init(cx);
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-    let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+    let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
+    if let Page::Tab { .. } = page {
+        let host = HostContext::from_parts(
+            Some(client),
+            Some(hub.clone()),
+            Some(demand.clone()),
+            None,
+            None,
+        );
+        let tab = cx.new(|cx| PerformancePage::new(&host, cx));
+        return cx.new(|_| Shot {
+            page: tab.clone().into(),
+            _keep: vec![tab.into_any(), hub.into_any(), demand.into_any()],
+        });
+    }
     let sidebar = cx.new(|cx| DeviceSidebar::new(hub.clone(), demand.clone(), cx));
     // The page header reads its value from the sidebar card, as in `PerformancePage`.
     cx.set_global(PerfSidebar(sidebar.downgrade()));
@@ -289,6 +316,7 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
             let page = cx.new(|cx| MemoryPage::new(key, row, hub.clone(), demand.clone(), cx));
             (page.clone().into(), vec![page.into_any()])
         }
+        Page::Tab { .. } => unreachable!("built above"),
     };
     keep.extend([hub.into_any(), demand.into_any(), sidebar.into_any()]);
     cx.new(|_| Shot {
@@ -437,6 +465,31 @@ fn cpu_all_cores_stacked_dark() {
             "perf_cpu_stacked_dark",
             WIDTH,
             480.,
+        )
+    });
+}
+
+/// The tab with the sidebar and its collapse arrow on the right edge (tasklens-o5853).
+#[test]
+fn tab_sidebar_shown_dark() {
+    run_pinned("render_perf::tab_sidebar_shown_dark", || {
+        check(
+            Page::Tab { hidden: false },
+            "Default Dark",
+            "perf_tab_sidebar_shown_dark",
+        )
+    });
+}
+
+/// The tab with the sidebar hidden: the 12 px expand strip and the Overview on the rest of the
+/// width (tasklens-o5853).
+#[test]
+fn tab_sidebar_hidden_dark() {
+    run_pinned("render_perf::tab_sidebar_hidden_dark", || {
+        check(
+            Page::Tab { hidden: true },
+            "Default Dark",
+            "perf_tab_sidebar_hidden_dark",
         )
     });
 }

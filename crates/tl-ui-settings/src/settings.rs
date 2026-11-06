@@ -1802,6 +1802,9 @@ pub struct PerformanceState {
     pub nav_width: u16,
     /// Device key.
     pub selected_device: String,
+    /// The device sidebar is hidden: its collapse arrow, F9, Ctrl+T or View > Show sidebar
+    /// turned it off (tasklens-o5853, owner request 2026-11-06).
+    pub sidebar_hidden: bool,
 }
 
 impl Default for PerformanceState {
@@ -1809,6 +1812,7 @@ impl Default for PerformanceState {
         Self {
             nav_width: 252,
             selected_device: "cpu".to_owned(),
+            sidebar_hidden: false,
         }
     }
 }

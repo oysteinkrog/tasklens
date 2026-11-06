@@ -1,7 +1,10 @@
 //! The View menu of the menu bar (E21-001, UI-SHL-033, UI-SHL-034, APP-017, APP-018).
 //!
 //! The root lists submenus in a fixed order: "Columns", "Process View", "Window", "Appearance",
-//! "Theme", "Graphs". Each appears once its bead adds it. View > Columns acts on the table of the
+//! "Theme", "Graphs". Each appears once its bead adds it. Last, "Show sidebar" (tasklens-o5853)
+//! is a check for the Performance device sidebar: `PerfToggleSidebar`, which the
+//! Performance page handles with its animation; on another tab [`init`]'s fallback flips
+//! `state.performance.sidebar_hidden` and the page follows it. View > Columns acts on the table of the
 //! active tab (PROC-024 to PROC-026, R-065, R-075). Performance and Information have no table, so
 //! "Columns" is disabled there with the reason as tooltip. View > Process View (E21-002,
 //! UI-SHL-035) holds the view mode radios, two process display checks and "Collapse all"; the
@@ -47,6 +50,7 @@ use tl_ui_kit::components::icons::TlIcon;
 use tl_ui_kit::components::menu::{MenuSuffixAction, TlMenu, TlMenuPopup};
 use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
 use tl_ui_kit::components::window_frame::ToggleAlwaysOnTop;
+use tl_ui_perf_core::core::actions::PerfToggleSidebar;
 use tl_ui_perf_core::minigraph::actions::ResetMinigraphLayout;
 use tl_ui_table::table::actions::{
     CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit,
@@ -82,6 +86,13 @@ pub fn init(cx: &mut App) {
     cx.on_action(|a: &CopyTheme, cx| copy_theme(&a.name, cx));
     cx.on_action(|a: &DeleteTheme, cx| delete_theme(&a.name, cx));
     cx.on_action(|_: &ImportTheme, cx| import_theme(cx));
+    // Reached only when no Performance page is in the focus path.
+    cx.on_action(|_: &PerfToggleSidebar, cx| {
+        TlSettings::update(cx, |d| {
+            let hidden = &mut d.state.performance.sidebar_hidden;
+            *hidden = !*hidden;
+        });
+    });
     let following = Rc::new(Cell::new(follow_system(cx)));
     cx.observe_global::<TlSettings>(move |cx| {
         let now = follow_system(cx);
@@ -290,7 +301,18 @@ pub fn build(
             cx,
             move |menu, window, cx| graphs_submenu(&host, menu, window, cx),
         )
+        .check_item(
+            tr(cx, "shell-menu-view-show-sidebar"),
+            show_sidebar_mark(cx),
+            Box::new(PerfToggleSidebar),
+        )
     })
+}
+
+/// The check mark of "Show sidebar": the Performance sidebar is not hidden.
+pub fn show_sidebar_mark(cx: &App) -> bool {
+    cx.try_global::<TlSettings>()
+        .is_none_or(|_| !TlSettings::state(cx).performance.sidebar_hidden)
 }
 
 /// The table of the active tab: Processes, or History while History mode is on, Services,

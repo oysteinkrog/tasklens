@@ -270,6 +270,20 @@ fn state_save_load_roundtrip() {
     );
 }
 
+/// `performance.sidebar_hidden` (tasklens-o5853): false when the key is missing, and a hidden
+/// sidebar survives a save and a load.
+#[test]
+fn sidebar_hidden_state_key() {
+    let old: UiState = toml::from_str("[performance]\nnav_width = 300\n").unwrap();
+    assert!(!old.performance.sidebar_hidden);
+    let mut state = UiState::default();
+    state.performance.sidebar_hidden = true;
+    let text = toml::to_string(&state).unwrap();
+    assert!(text.contains("sidebar_hidden = true"), "{text}");
+    let back: UiState = toml::from_str(&text).unwrap();
+    assert!(back.performance.sidebar_hidden);
+}
+
 #[test]
 fn lowmem_state_key_left_out_when_none_and_clamped() {
     let text = toml::to_string(&UiState::default()).unwrap();
