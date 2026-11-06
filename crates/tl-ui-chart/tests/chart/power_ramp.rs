@@ -363,7 +363,9 @@ fn low_power_paints_lower_half_only(cx: &mut TestAppContext) {
     let bands = ramps(&chart, vcx);
     assert_eq!(bands.len(), 2, "{bands:?}");
     assert!(bands.iter().all(|b| b.bounds.bottom() == px(PLOT_BOTTOM)));
-    let paints = vcx.read_entity(&chart, |v, _| v.path_paints.get());
+    let before = vcx.read_entity(&chart, |v, _| v.path_paints.get());
+    redraw(&chart, vcx);
+    let paints = vcx.read_entity(&chart, |v, _| v.path_paints.get()) - before;
     assert_eq!(paints, 2, "one paint for the fill, one for the line");
 }
 

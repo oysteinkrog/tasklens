@@ -471,6 +471,7 @@ fn check_power(
     harness.set_theme(theme);
     harness.set_scale(1.0);
     let img = harness.render(size(px(CHART_W), px(CHART_H)), root);
+    assert_golden(name, &img);
     // Column 350 is in the newest 40 % of the plot, where the value is about 178 W.
     let warm = power_pixel(&img, 350, 170.0);
     let cool = power_pixel(&img, 350, 15.0);
@@ -482,7 +483,6 @@ fn check_power(
         i32::from(cool[2]) > i32::from(cool[0]) + 20,
         "{name}: the fill near 15 W is cool: {cool:?}"
     );
-    assert_golden(name, &img);
 }
 
 #[test]
