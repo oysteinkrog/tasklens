@@ -17,6 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rustix::fd::AsFd;
 use rustix::fs::{AtFlags, Mode, OFlags, RawDir, StatxFlags};
 use rustix::io::Errno;
+use tl_model::details::Elevated;
 use tl_model::ids::ProcessKey;
 use tl_model::process::{PackageStatus, ProcessExtrasP2};
 
@@ -168,7 +169,7 @@ impl ExtrasP2Reader {
             .filter(|&s| s != NO_SESSION);
         out.security_label = self.read_label(root, dir, bufs);
         if let Some(s) = status {
-            out.elevated = Some(elevated(s));
+            out.elevation = Some(elevation(s));
         }
         out.sandbox = self.sandbox(dir, status, meta.cgroup.as_ref());
         out.sched_policy_text = self.labels.sched(stat.policy);
@@ -453,10 +454,19 @@ impl ExtrasP2Reader {
     }
 }
 
-/// PROC-028 elevation, first match: euid 0; euid differs from ruid; non-zero `CapEff`.
-pub fn elevated(s: &PidStatus) -> bool {
+/// PROC-028 elevation, first match: euid 0 is `Root`; euid differs from ruid is `Setuid`;
+/// non-zero `CapEff` is `Capabilities`; else `No` (the column's "Default").
+pub fn elevation(s: &PidStatus) -> Elevated {
     let (ruid, euid) = (s.uid[0], s.uid[1]);
-    euid == 0 || euid != ruid || s.cap_eff != 0
+    if euid == 0 {
+        Elevated::Root
+    } else if euid != ruid {
+        Elevated::Setuid
+    } else if s.cap_eff != 0 {
+        Elevated::Capabilities
+    } else {
+        Elevated::No
+    }
 }
 
 /// Decodes stat field 7 `tty_nr`: `pts/<n>` for majors 136 to 143, `tty<minor>` for major 4 with
@@ -581,14 +591,18 @@ mod tests {
             uid: [1000; 4],
             ..PidStatus::default()
         };
-        assert!(!elevated(&s));
+        assert_eq!(elevation(&s), Elevated::No);
         s.cap_eff = 1 << 12;
-        assert!(elevated(&s));
+        assert_eq!(elevation(&s), Elevated::Capabilities);
         s.cap_eff = 0;
         s.uid[1] = 0;
-        assert!(elevated(&s));
+        assert_eq!(elevation(&s), Elevated::Root);
         s.uid[1] = 1001;
-        assert!(elevated(&s));
+        assert_eq!(elevation(&s), Elevated::Setuid);
+        s.cap_eff = 1 << 12;
+        assert_eq!(elevation(&s), Elevated::Setuid);
+        s.uid = [1000, 0, 1000, 1000];
+        assert_eq!(elevation(&s), Elevated::Root);
     }
 
     #[test]

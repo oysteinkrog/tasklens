@@ -3674,7 +3674,7 @@ fn extras_p2_basic_fields() {
     assert_eq!(p.cwd.as_deref(), Some("/home/user1"));
     assert_eq!(p.sched_policy_text.as_deref(), Some("Normal"));
     // Uid 1000 everywhere and CapEff 0.
-    assert_eq!(p.elevated, Some(false));
+    assert_eq!(p.elevation, Some(tl_model::details::Elevated::No));
     // The fixture has no /sys/kernel/security/lsm, so no major LSM is active.
     assert_eq!(p.security_label, None);
     assert_eq!(p.power_w, None);

@@ -402,7 +402,7 @@ pub struct ProcessExtrasP2 {
     /// /proc/<pid>/attr/current.
     pub security_label: Option<Arc<str>>,
     /// PROC-028 elevation rule.
-    pub elevated: Option<bool>,
+    pub elevation: Option<crate::details::Elevated>,
     /// PROC-028 sandbox rule.
     pub sandbox: Option<Arc<str>>,
     pub sched_policy_text: Option<Arc<str>>,
@@ -630,7 +630,7 @@ mod tests {
         assert!(p2.elf_machine.is_none());
         assert!(p2.session_id.is_none());
         assert!(p2.security_label.is_none());
-        assert!(p2.elevated.is_none());
+        assert!(p2.elevation.is_none());
         assert!(p2.sandbox.is_none());
         assert!(p2.sched_policy_text.is_none());
         assert!(p2.oom_score.is_none());
