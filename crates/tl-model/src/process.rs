@@ -571,6 +571,16 @@ pub struct AppCgroupSample {
     pub io_write_bps: f32,
     pub rios: u64,
     pub wios: u64,
+    /// Cumulative `rbytes` of `io.stat`, summed over devices. Used for "Disk read bytes" when a
+    /// member is Restricted (PROC-008).
+    pub rbytes: u64,
+    /// Cumulative `wbytes` of `io.stat`, summed over devices.
+    pub wbytes: u64,
+    /// Change of `rios` since the previous sweep of this cgroup. 0 on the first sweep, after a
+    /// resume, and when a counter went down.
+    pub rios_delta: u64,
+    /// Change of `wios` since the previous sweep of this cgroup, with the same zero rules.
+    pub wios_delta: u64,
     pub pids: u32,
     /// `cgroup.events` has `frozen 1`. False when the file was not read.
     pub frozen: bool,
@@ -589,6 +599,10 @@ impl AppCgroupSample {
             io_write_bps: 0.0,
             rios: 0,
             wios: 0,
+            rbytes: 0,
+            wbytes: 0,
+            rios_delta: 0,
+            wios_delta: 0,
             pids: 0,
             frozen: false,
             cgroup,

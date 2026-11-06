@@ -1034,6 +1034,11 @@ pub struct AppUnitSample {
     /// Δ`wbytes` / Δt from `io.stat`.
     pub io_write_bps: f32,
     pub io_validity: Validity,
+    /// Δ`rios` since the previous sweep of this cgroup. 0 without a rate (first sweep, resume,
+    /// a counter went down).
+    pub rios_delta: u64,
+    /// Δ`wios` since the previous sweep, with the same zero rules.
+    pub wios_delta: u64,
 }
 
 impl AppUnitSample {
@@ -1058,6 +1063,10 @@ impl AppUnitSample {
             io_write_bps: self.io_write_bps,
             rios: self.stats.rios,
             wios: self.stats.wios,
+            rbytes: self.stats.rbytes,
+            wbytes: self.stats.wbytes,
+            rios_delta: self.rios_delta,
+            wios_delta: self.wios_delta,
             pids: self
                 .stats
                 .pids_current
@@ -1131,6 +1140,8 @@ struct AppPrev {
     mono_ns: u64,
     rbytes: u64,
     wbytes: u64,
+    rios: u64,
+    wios: u64,
 }
 
 /// The `cpu.stat` `usage_usec` of one cgroup at its last read, and the clock right before the
@@ -1532,19 +1543,26 @@ impl ProcessSampler {
                 ),
             };
 
+            let (mut rios_delta, mut wios_delta) = (0, 0);
             let (io_read_bps, io_write_bps, io_validity) = if stats.io_valid {
                 let cur = AppPrev {
                     t_ns,
                     mono_ns,
                     rbytes: stats.rbytes,
                     wbytes: stats.wbytes,
+                    rios: stats.rios,
+                    wios: stats.wios,
                 };
-                let rates = self
-                    .app_prev
-                    .insert(unit.cgroup_id, cur)
-                    .and_then(|old| app_io_rates(&old, &cur));
+                let old = self.app_prev.insert(unit.cgroup_id, cur);
+                let rates = old.and_then(|old| app_io_rates(&old, &cur).map(|r| (old, r)));
                 match rates {
-                    Some((r, w)) => (r, w, Validity::Valid),
+                    Some((old, (r, w))) => {
+                        if cur.rios >= old.rios && cur.wios >= old.wios {
+                            rios_delta = cur.rios - old.rios;
+                            wios_delta = cur.wios - old.wios;
+                        }
+                        (r, w, Validity::Valid)
+                    }
                     None => (0.0, 0.0, Validity::WarmingUp),
                 }
             } else {
@@ -1576,6 +1594,8 @@ impl ProcessSampler {
                 io_read_bps,
                 io_write_bps,
                 io_validity,
+                rios_delta,
+                wios_delta,
             });
         }
         let units = self.apps.app_units();

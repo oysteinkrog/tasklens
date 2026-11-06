@@ -2848,6 +2848,60 @@ fn sweep_app_member_grouped() {
     );
 }
 
+sweep_clock!(app_io_delta_clock);
+
+#[test]
+fn sweep_app_io_counters_and_deltas() {
+    let (tmp, root) = merged_root();
+    let io_stat = tmp
+        .path()
+        .join("sys/fs/cgroup")
+        .join(FIREFOX_CGROUP)
+        .join("io.stat");
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(app_io_delta_clock::now);
+    let protect = ProtectInputs::default();
+    let mut out = SweepOutput::default();
+    let mut sweep = |n: u64| {
+        app_io_delta_clock::set(n * SEC, n * SEC);
+        s.sweep(&sweep_ctx(false), &no_inputs(&protect), &mut out);
+        let unit = out
+            .apps
+            .iter()
+            .find(|a| a.rel.ends_with("app-firefox@3a1b.service"))
+            .expect("firefox unit sampled");
+        unit.to_model()
+    };
+
+    // First sweep: cumulative values, no deltas.
+    let m = sweep(1);
+    assert_eq!((m.rbytes, m.wbytes), (1_048_576 + 4096, 2_097_152 + 8192));
+    assert_eq!((m.rios, m.wios), (103, 205));
+    assert_eq!((m.rios_delta, m.wios_delta), (0, 0));
+
+    // Second sweep: the counters grew.
+    fs::write(
+        &io_stat,
+        "259:0 rbytes=2000000 wbytes=3000000 rios=150 wios=260 dbytes=0 dios=0\n\
+         8:0 rbytes=4096 wbytes=8192 rios=3 wios=5 dbytes=0 dios=0\n",
+    )
+    .expect("write io.stat");
+    let m = sweep(2);
+    assert_eq!((m.rbytes, m.wbytes), (2_004_096, 3_008_192));
+    assert_eq!((m.rios, m.wios), (153, 265));
+    assert_eq!((m.rios_delta, m.wios_delta), (50, 60));
+
+    // Third sweep: a counter went down, so both deltas are 0.
+    fs::write(
+        &io_stat,
+        "259:0 rbytes=2100000 wbytes=3100000 rios=10 wios=270 dbytes=0 dios=0\n",
+    )
+    .expect("write io.stat");
+    let m = sweep(3);
+    assert_eq!((m.rios, m.wios), (10, 270));
+    assert_eq!((m.rios_delta, m.wios_delta), (0, 0));
+}
+
 sweep_clock!(euid_clock);
 
 #[test]
