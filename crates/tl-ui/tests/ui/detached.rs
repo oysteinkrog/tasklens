@@ -217,9 +217,11 @@ fn detached_window_own_driver(cx: &mut TestAppContext) {
         c.set_state(ChartState::Live, cx);
     });
     draw(&mut vcx);
+    // With pixel pacing on (the default, tasklens-nosaa) the chart waits on the pixel timer
+    // instead of an armed frame.
     assert!(
-        vcx.read_entity(&own, |d, _| d.is_armed()),
-        "the window's driver is armed"
+        vcx.read_entity(&own, |d, _| d.is_armed() || d.has_pixel_timer()),
+        "the window's driver has the chart's request"
     );
     assert_eq!(cx.read_entity(&host_driver, |d, _| d.stats.requested), 0);
     assert_ne!(own, host_driver);
