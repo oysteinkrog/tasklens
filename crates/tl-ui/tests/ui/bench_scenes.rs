@@ -225,6 +225,63 @@ fn bridge_fails_without_samples(cx: &mut TestAppContext) {
     );
 }
 
+#[test]
+fn bench_fixture_runs_unpaced() {
+    assert!(
+        tl_ui_settings::settings::Settings::default()
+            .performance
+            .pixel_paced_scrolling,
+        "the user default is paced"
+    );
+    for scene in BenchScene::ALL {
+        let (settings, _) = tl_ui::bench::scenes::fixture(scene);
+        assert!(!settings.performance.pixel_paced_scrolling, "{scene:?}");
+    }
+}
+
+/// Runs `scene` with the setting at the fixture value: the report says "off" and frames drew.
+fn unpaced_run(cx: &mut TestAppContext, scene: BenchScene, secs: u32) {
+    let report = run_scene(cx, scene, secs, None, None, true)
+        .unwrap_or_else(|e| panic!("{scene:?} runs: {e}"));
+    assert_eq!(report.pacing, "off", "{scene:?} pacing");
+    assert!(report.frames > 0, "{scene:?} drew no frames");
+}
+
+#[gpui_kit::test]
+fn perf_cpu_runs_unpaced(cx: &mut TestAppContext) {
+    unpaced_run(cx, BenchScene::PerfCpu, 1);
+}
+
+#[gpui_kit::test]
+fn perf_overview_runs_unpaced(cx: &mut TestAppContext) {
+    unpaced_run(cx, BenchScene::PerfOverview, 1);
+}
+
+#[gpui_kit::test]
+fn perf_overview_procs_runs_unpaced(cx: &mut TestAppContext) {
+    unpaced_run(cx, BenchScene::PerfOverviewProcs, 1);
+}
+
+#[gpui_kit::test]
+fn table_2000_runs_unpaced(cx: &mut TestAppContext) {
+    unpaced_run(cx, BenchScene::Table2000, 1);
+}
+
+#[gpui_kit::test]
+fn static_runs_unpaced(cx: &mut TestAppContext) {
+    unpaced_run(cx, BenchScene::Static, 1);
+}
+
+#[gpui_kit::test]
+fn perf_overview_static_runs_unpaced(cx: &mut TestAppContext) {
+    unpaced_run(cx, BenchScene::PerfOverviewStatic, 1);
+}
+
+#[gpui_kit::test]
+fn soak_runs_unpaced(cx: &mut TestAppContext) {
+    unpaced_run(cx, BenchScene::Soak, 3);
+}
+
 /// The process keys of `view`'s process rows, in display order.
 fn process_keys(view: &ProcessTableView) -> Vec<ProcessKey> {
     view.rows
@@ -791,7 +848,7 @@ fn hub_sequence(cx: &mut VisualTestContext) -> u64 {
 /// frames. A view replaced or a render count that goes down later fails the test by name.
 ///
 /// This pins the unpaced path (every frame renders). Pixel pacing is on by default since
-/// tasklens-nosaa, so the test turns it off through the setting.
+/// tasklens-nosaa; the bench fixture has it off and the test still sets it itself.
 #[gpui_kit::test]
 fn perf_cpu_frame_renders_on_cpu_page_path(cx: &mut TestAppContext) {
     let (median, report) = cpu_path_medians(cx, false);

@@ -902,6 +902,7 @@ fn history_scrub_scene_runs_headless_5_frames(cx: &mut TestAppContext) {
         .expect("the scene ran");
     assert_eq!(report.scene, "history-scrub");
     assert!(report.frames >= 5, "{} frames", report.frames);
+    assert_eq!(report.pacing, "off");
 
     let text = std::fs::read_to_string(&json).expect("the JSON was written");
     let v: serde_json::Value = serde_json::from_str(&text).expect("JSON");

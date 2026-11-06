@@ -185,7 +185,7 @@ impl fmt::Display for BenchError {
 impl std::error::Error for BenchError {}
 
 /// The fixture settings of `scene` (UI-PRF-053 common fixture): Default Dark, 100% UI scale,
-/// 60 s graph range, kernel overlays on, smooth graphs except in `static` and
+/// 60 s graph range, kernel overlays on, pixel pacing off, smooth graphs except in `static` and
 /// `perf-overview-static`, CPU page selected with the sidebar at 252 px. The Overview card is
 /// hidden, except in the three Overview scenes, which select the Overview page;
 /// `perf-overview-procs` also turns on the Top processes box. `table-2000` shows the Power column after R-006's nine default
@@ -198,6 +198,9 @@ pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
     settings.motion.smooth_graphs = !scene.is_static();
     settings.performance.graph_range_s = 60;
     settings.performance.cpu_kernel = true;
+    // Gate scenes run unpaced, so they do not depend on the user default (on since nosaa).
+    // `TL_PIXEL_PACING=timer` still wins over this setting.
+    settings.performance.pixel_paced_scrolling = false;
     let mut state = UiState::default();
     state.performance.nav_width = 252;
     if scene.overview() {
