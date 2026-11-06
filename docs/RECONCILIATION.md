@@ -2083,6 +2083,7 @@ device_order = []              # device keys (PERF-005)
 device_overrides = {}          # device key -> "show" | "hide"
 curved_lines = false
 network_dynamic_scale = true   # false = link speed
+pixel_paced_scrolling = true   # false = charts redraw every frame (ADR-009, tasklens-nosaa)
 overview_core_smoothing = "medium" # off | low | medium | high (UI-PRF-018, D-024)
 overview_top_processes = false # Overview Top processes box (crw.45)
 status_bar = "overview"        # overview | performance | all_tabs | off (UI-PRF-054, P2)

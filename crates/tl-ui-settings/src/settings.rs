@@ -534,6 +534,9 @@ pub struct PerformanceSettings {
     pub curved_lines: bool,
     /// `false` scales the network graph to the link speed.
     pub network_dynamic_scale: bool,
+    /// Moving charts redraw only when they have moved one physical pixel (ADR-009 "Pixel
+    /// pacing", tasklens-nosaa). `false` redraws them on every compositor frame.
+    pub pixel_paced_scrolling: bool,
     /// Smoothing of the Overview core rows (UI-PRF-018, D-024).
     pub overview_core_smoothing: CoreSmoothing,
     /// Where the machine status bar shows (UI-PRF-054).
@@ -1376,6 +1379,7 @@ impl Default for PerformanceSettings {
             device_overrides: BTreeMap::new(),
             curved_lines: false,
             network_dynamic_scale: true,
+            pixel_paced_scrolling: true,
             overview_core_smoothing: CoreSmoothing::default(),
             status_bar: StatusBarPlacement::default(),
             overview_range: OverviewRange::default(),

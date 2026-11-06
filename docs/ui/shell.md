@@ -970,6 +970,7 @@ x=0, bottom=0
 | Graphs | Graph time range | dropdown | `performance.graph_range_s` | 30 seconds, 1 minute, 5 minutes (P2), 10 minutes (P2) | P2 |
 | Graphs | Curved lines | switch | `performance.curved_lines` | | P2 |
 | Graphs | Scale network graphs dynamically | switch | `performance.network_dynamic_scale` | off = link speed | P2 |
+| Graphs | Save CPU: scroll charts one pixel at a time | switch | `performance.pixel_paced_scrolling` | on by default; note "Off is smoother and uses more CPU"; applies at once (ADR-009, tasklens-nosaa) | P2 |
 | CPU | CPU graph | dropdown | `performance.cpu_graph_mode` | Overall, Per core, All cores overlaid, All cores stacked | P2 |
 | CPU | Kernel times | switch | `performance.cpu_kernel` | | P2 |
 | CPU | Secondary graph | dropdown | `performance.cpu_secondary_graph` | None, Power draw, Clock speed, Temperature | P2 |

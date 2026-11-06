@@ -80,6 +80,7 @@ device_order = []              # device keys (PERF-005)
 device_overrides = {}          # device key -> "show" | "hide"
 curved_lines = false
 network_dynamic_scale = true   # false = link speed
+pixel_paced_scrolling = true   # false = charts redraw every frame (ADR-009, tasklens-nosaa)
 # [performance.overview]        # Overview layout (UI-PRF-018); missing = the default below
 # rows = [
 #   { height = 3.0, boxes = [{ kind = "cpu", width = 2.0 }, { kind = "memory", width = 1.0 }] },

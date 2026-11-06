@@ -11,24 +11,33 @@
 //! No other code requests frames: `Window::request_animation_frame` is not used (ADR-009).
 //! Reduced motion is decided by the charts, which do not request; the driver does not read it.
 //!
-//! Pixel pacing (wlf.31 prototype, off by default): with [`PACING_ENV`] set, a moving chart asks
-//! through [`AnimationDriver::request_paced`] for its next frame only when its plot has moved one
-//! physical pixel: a pixel timer waits for that step and then arms one `on_next_frame`. The frame
-//! itself still comes from the compositor. ADR-009 "Pixel pacing" has the measurements and why
-//! the other design (one `on_next_frame` every frame, notifying only charts that are due) lost.
+//! Pixel pacing (wlf.31, on by default since tasklens-nosaa): a moving chart asks through
+//! [`AnimationDriver::request_paced`] for its next frame only when its plot has moved one physical
+//! pixel: a pixel timer waits for that step and then arms one `on_next_frame`. The frame itself
+//! still comes from the compositor. The setting `performance.pixel_paced_scrolling` turns it on
+//! or off; the driver reads it live, so a change applies on the next frame of every open chart.
+//! [`PACING_ENV`] is a developer override that wins over the setting. ADR-009 "Pixel pacing" has
+//! the measurements and why the other design (one `on_next_frame` every frame, notifying only
+//! charts that are due) lost.
 
 use std::ffi::OsStr;
 use std::mem;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{App, AsyncApp, Context, Entity, EntityId, Global, WeakEntity, Window, WindowId};
+use gpui_kit::{
+    App, AsyncApp, Context, Entity, EntityId, Global, Subscription, WeakEntity, Window, WindowId,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
+
+use crate::settings_global::TlSettings;
 
 /// An armed frame with no callback for this long while visible is a stall (ADR-010).
 pub const STALL_AFTER: Duration = Duration::from_millis(250);
 /// Capacity of `FrameStats.samples` and `PaintLog.records`. Neither grows past it.
 pub const SAMPLE_CAPACITY: usize = 65_536;
-/// Environment variable that turns pixel pacing on: `timer`. Anything else, or unset, is off. Read once per driver. No user setting until the owner has compared it (wlf.31).
+/// Developer override for pixel pacing: `timer` or `off` wins over the setting
+/// `performance.pixel_paced_scrolling`. Anything else, or unset, leaves the setting in charge.
+/// Read once per driver.
 pub const PACING_ENV: &str = "TL_PIXEL_PACING";
 /// A paced chart is notified by a frame that comes at most this long before its pixel step: about
 /// half a frame at 120 Hz to 144 Hz, so the frame nearest the step draws it.
@@ -49,17 +58,29 @@ pub enum Pacing {
 }
 
 impl Pacing {
-    /// `timer`; anything else, or `None`, is `Off`.
-    pub fn parse(value: Option<&OsStr>) -> Self {
+    /// `timer` and `off`; anything else, or `None`, is no override.
+    pub fn parse(value: Option<&OsStr>) -> Option<Self> {
         match value.and_then(OsStr::to_str) {
-            Some("timer") => Self::Timer,
-            _ => Self::Off,
+            Some("timer") => Some(Self::Timer),
+            Some("off") => Some(Self::Off),
+            _ => None,
         }
     }
 
-    /// From [`PACING_ENV`].
-    pub fn from_env() -> Self {
+    /// The override from [`PACING_ENV`].
+    pub fn from_env() -> Option<Self> {
         Self::parse(std::env::var_os(PACING_ENV).as_deref())
+    }
+
+    /// The pacing in force. The override `env` wins. Else `setting` is
+    /// `performance.pixel_paced_scrolling`: `true` is `Timer`, `false` is `Off`. `None` (no
+    /// `TlSettings` global, as in tests that install none) is `Off`.
+    pub fn resolve(env: Option<Self>, setting: Option<bool>) -> Self {
+        match (env, setting) {
+            (Some(pacing), _) => pacing,
+            (None, Some(true)) => Self::Timer,
+            (None, Some(false) | None) => Self::Off,
+        }
     }
 
     /// The bench report name.
@@ -85,8 +106,12 @@ pub struct AnimationDriver {
     /// The stall timer loop is running.
     stall_timer: bool,
     hidden: bool,
-    /// Read from [`PACING_ENV`] in `new`.
+    /// The pacing in force: [`Pacing::resolve`] of `env_pacing` and the setting.
     pacing: Pacing,
+    /// The [`PACING_ENV`] override, read in `new`. While set, the setting is ignored.
+    env_pacing: Option<Pacing>,
+    /// Re-reads `performance.pixel_paced_scrolling` when the settings change.
+    _settings: Subscription,
     /// Paced requesters and the time each is due: one physical pixel after its last paint.
     paced: FxHashMap<EntityId, Instant>,
     /// Timer pacing: the time the pending pixel timer fires and its generation. A timer whose
@@ -168,7 +193,10 @@ struct AnimationDrivers(FxHashMap<WindowId, WeakEntity<AnimationDriver>>);
 impl Global for AnimationDrivers {}
 
 impl AnimationDriver {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let env_pacing = Pacing::from_env();
+        let pacing = Pacing::resolve(env_pacing, Self::pacing_setting(cx));
+        let settings = cx.observe_global::<TlSettings>(Self::on_settings);
         Self {
             requests: FxHashSet::default(),
             callbacks: FxHashMap::default(),
@@ -178,7 +206,9 @@ impl AnimationDriver {
             stall_reported: false,
             stall_timer: false,
             hidden: false,
-            pacing: Pacing::from_env(),
+            pacing,
+            env_pacing,
+            _settings: settings,
             paced: FxHashMap::default(),
             pixel_timer: None,
             pixel_timer_gen: 0,
@@ -286,10 +316,54 @@ impl AnimationDriver {
         self.pixel_timer.is_some()
     }
 
-    /// Tests and the bench set pacing here, never through the environment.
+    /// Tests and the bench set pacing here, never through the environment. It pins the pacing
+    /// like [`PACING_ENV`] does, so a later settings change does not undo it.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_pacing(&mut self, pacing: Pacing) {
+        self.env_pacing = Some(pacing);
         self.pacing = pacing;
+    }
+
+    /// Tests: sets the [`PACING_ENV`] override as if read in `new`, then applies the result.
+    /// `None` hands pacing back to the setting.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub fn set_env_pacing(&mut self, env: Option<Pacing>, cx: &mut Context<Self>) {
+        self.env_pacing = env;
+        let pacing = Pacing::resolve(env, Self::pacing_setting(cx));
+        self.switch_pacing(pacing, cx);
+    }
+
+    /// `performance.pixel_paced_scrolling`, or `None` without the `TlSettings` global.
+    fn pacing_setting(cx: &App) -> Option<bool> {
+        cx.try_global::<TlSettings>()
+            .map(|_| TlSettings::settings(cx).performance.pixel_paced_scrolling)
+    }
+
+    /// The settings changed: follow `performance.pixel_paced_scrolling` unless the override is
+    /// set.
+    fn on_settings(&mut self, cx: &mut Context<Self>) {
+        if self.env_pacing.is_some() {
+            return;
+        }
+        let pacing = Pacing::resolve(None, Self::pacing_setting(cx));
+        self.switch_pacing(pacing, cx);
+    }
+
+    /// Applies a new pacing at once. Timer to off: the pending pixel timer does nothing when it
+    /// fires, and every paced requester is notified now; it repaints and requests again, which
+    /// with pacing off arms the next frame. Off to timer: the next `request_paced` starts the
+    /// pixel timer.
+    fn switch_pacing(&mut self, pacing: Pacing, cx: &mut Context<Self>) {
+        if pacing == self.pacing {
+            return;
+        }
+        self.pacing = pacing;
+        if pacing == Pacing::Off {
+            self.pixel_timer = None;
+            for (id, _) in self.paced.drain() {
+                App::notify(cx, id);
+            }
+        }
     }
 
     /// Bench: returns the stats and resets the counters. Keeps `period_hint_ns` and `sampling`.

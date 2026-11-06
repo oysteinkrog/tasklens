@@ -394,11 +394,133 @@ fn run_vsync(
 #[test]
 fn pacing_parse() {
     use std::ffi::OsStr;
-    assert_eq!(Pacing::parse(Some(OsStr::new("timer"))), Pacing::Timer);
-    assert_eq!(Pacing::parse(Some(OsStr::new("skip"))), Pacing::Off);
-    assert_eq!(Pacing::parse(Some(OsStr::new("on"))), Pacing::Off);
-    assert_eq!(Pacing::parse(None), Pacing::Off);
+    assert_eq!(
+        Pacing::parse(Some(OsStr::new("timer"))),
+        Some(Pacing::Timer)
+    );
+    assert_eq!(Pacing::parse(Some(OsStr::new("off"))), Some(Pacing::Off));
+    assert_eq!(Pacing::parse(Some(OsStr::new("skip"))), None);
+    assert_eq!(Pacing::parse(Some(OsStr::new("on"))), None);
+    assert_eq!(Pacing::parse(None), None);
     assert_eq!(Pacing::Timer.as_str(), "timer");
+}
+
+/// The override wins; else the setting decides; no settings global is off (tasklens-nosaa).
+#[test]
+fn pacing_resolve() {
+    use Pacing::{Off, Timer};
+    assert_eq!(Pacing::resolve(Some(Off), Some(true)), Off);
+    assert_eq!(Pacing::resolve(Some(Timer), Some(false)), Timer);
+    assert_eq!(Pacing::resolve(Some(Timer), None), Timer);
+    assert_eq!(Pacing::resolve(None, Some(true)), Timer);
+    assert_eq!(Pacing::resolve(None, Some(false)), Off);
+    assert_eq!(Pacing::resolve(None, None), Off);
+}
+
+/// Installs `TlSettings` with the default settings, as the app does at start.
+fn install_settings(cx: &mut TestAppContext) {
+    use tl_ui_base::app_env::BootSettings;
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_settings::settings::{Settings, UiState};
+    cx.update(|cx| {
+        cx.set_global(BootSettings {
+            settings: Settings::default(),
+            state: UiState::default(),
+            persist: None,
+            startup_toasts: Vec::new(),
+        });
+        TlSettings::init(cx);
+    });
+}
+
+fn set_pixel_pacing(vcx: &mut VisualTestContext, on: bool) {
+    use tl_ui_base::settings_global::TlSettings;
+    vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| d.settings.performance.pixel_paced_scrolling = on);
+    });
+}
+
+fn pacing(driver: &Entity<AnimationDriver>, vcx: &mut VisualTestContext) -> Pacing {
+    vcx.read_entity(driver, |d, _| d.pacing())
+}
+
+#[gpui_kit::test]
+fn driver_pacing_default_on_with_settings(cx: &mut TestAppContext) {
+    install_settings(cx);
+    let (driver, vcx) = rig(cx);
+    assert_eq!(pacing(&driver, vcx), Pacing::Timer, "a fresh config paces");
+    let paced = Paced::new(vcx, &[30]);
+    assert!(!armed(&driver, vcx), "no frame until the step");
+    assert!(vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+    drop(paced);
+}
+
+/// Unticking the setting moves every paced chart on the next frame; ticking it paces again.
+#[gpui_kit::test]
+fn driver_pacing_setting_toggles_live(cx: &mut TestAppContext) {
+    install_settings(cx);
+    let (driver, vcx) = rig(cx);
+    let mut paced = Paced::new(vcx, &[30]);
+    assert!(vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+    assert!(!armed(&driver, vcx));
+
+    set_pixel_pacing(vcx, false);
+    assert_eq!(pacing(&driver, vcx), Pacing::Off);
+    assert!(!vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+    assert_eq!(
+        paced.notified(),
+        [1],
+        "the waiting chart is notified at once"
+    );
+    paced.repaint(vcx);
+    assert!(armed(&driver, vcx), "its next request arms the next frame");
+    // The stale pixel timer does nothing; every vsync now draws.
+    let frames = run_vsync(&driver, vcx, &mut paced, 7, 70);
+    assert_eq!(frames, 10, "a frame every vsync");
+    assert_eq!(paced.notified(), [11]);
+
+    set_pixel_pacing(vcx, true);
+    assert_eq!(pacing(&driver, vcx), Pacing::Timer);
+    assert!(
+        armed(&driver, vcx),
+        "the frame armed before the switch still comes"
+    );
+    assert_eq!(frame(vcx), 1);
+    paced.repaint(vcx);
+    assert!(!armed(&driver, vcx), "paced again: no frame until the step");
+    assert!(vcx.read_entity(&driver, |d, _| d.has_pixel_timer()));
+    let frames = run_vsync(&driver, vcx, &mut paced, 7, 301);
+    assert!(frames <= 11, "about one frame per 30 ms step, got {frames}");
+}
+
+#[gpui_kit::test]
+fn driver_env_override_wins(cx: &mut TestAppContext) {
+    install_settings(cx);
+    let (driver, vcx) = rig(cx);
+    driver.update(vcx, |d, cx| d.set_env_pacing(Some(Pacing::Off), cx));
+    assert_eq!(
+        pacing(&driver, vcx),
+        Pacing::Off,
+        "the override beats the default"
+    );
+    set_pixel_pacing(vcx, false);
+    set_pixel_pacing(vcx, true);
+    assert_eq!(
+        pacing(&driver, vcx),
+        Pacing::Off,
+        "a settings change does not undo it"
+    );
+
+    driver.update(vcx, |d, cx| d.set_env_pacing(Some(Pacing::Timer), cx));
+    set_pixel_pacing(vcx, false);
+    assert_eq!(pacing(&driver, vcx), Pacing::Timer);
+
+    driver.update(vcx, |d, cx| d.set_env_pacing(None, cx));
+    assert_eq!(
+        pacing(&driver, vcx),
+        Pacing::Off,
+        "no override: the setting decides"
+    );
 }
 
 #[gpui_kit::test]

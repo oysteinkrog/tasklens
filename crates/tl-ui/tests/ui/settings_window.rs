@@ -111,6 +111,7 @@ const E21_P2_KEYS: &[SettingKey] = &[
     SettingKey::PerformanceGraphRangeS,
     SettingKey::PerformanceCurvedLines,
     SettingKey::PerformanceNetworkDynamicScale,
+    SettingKey::PerformancePixelPacedScrolling,
     SettingKey::PerformanceCpuGraphMode,
     SettingKey::PerformanceCpuKernel,
     SettingKey::PerformanceCpuSecondaryGraph,
@@ -868,6 +869,25 @@ fn performance_network_switch_stays_in_window(cx: &mut TestAppContext) {
     assert_eq!(engine.settings().len(), before, "no engine settings sent");
 }
 
+/// The pixel pacing switch is on for a fresh config, has its note and saves (tasklens-nosaa).
+#[gpui_kit::test]
+fn pixel_pacing_switch_saves(cx: &mut TestAppContext) {
+    setup(cx);
+    assert!(cx.update(|cx| TlSettings::settings(cx).performance.pixel_paced_scrolling));
+    let perf = page(cx, PageId::Performance);
+    assert_eq!(
+        perf.description_of(SettingKey::PerformancePixelPacedScrolling)
+            .as_deref(),
+        Some("Off is smoother and uses more CPU")
+    );
+    cx.update(|cx| perf.set_bool(SettingKey::PerformancePixelPacedScrolling, false, cx));
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| TlSettings::settings(cx).performance.pixel_paced_scrolling));
+    cx.update(|cx| perf.set_bool(SettingKey::PerformancePixelPacedScrolling, true, cx));
+    cx.run_until_parked();
+    assert!(cx.update(|cx| TlSettings::settings(cx).performance.pixel_paced_scrolling));
+}
+
 #[gpui_kit::test]
 fn performance_page_keys(cx: &mut TestAppContext) {
     setup(cx);
@@ -877,6 +897,7 @@ fn performance_page_keys(cx: &mut TestAppContext) {
             SettingKey::PerformanceGraphRangeS,
             SettingKey::PerformanceCurvedLines,
             SettingKey::PerformanceNetworkDynamicScale,
+            SettingKey::PerformancePixelPacedScrolling,
             SettingKey::PerformanceCpuGraphMode,
             SettingKey::PerformanceCpuKernel,
             SettingKey::PerformanceCpuSecondaryGraph,

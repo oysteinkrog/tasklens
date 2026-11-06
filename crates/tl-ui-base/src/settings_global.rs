@@ -436,6 +436,7 @@ setting_keys! {
     PerformanceDeviceOverrides => "performance.device_overrides", Performance, Map;
     PerformanceCurvedLines => "performance.curved_lines", Performance, Bool;
     PerformanceNetworkDynamicScale => "performance.network_dynamic_scale", Performance, Bool;
+    PerformancePixelPacedScrolling => "performance.pixel_paced_scrolling", Performance, Bool;
     PerformanceOverviewCoreSmoothing => "performance.overview_core_smoothing", Performance, Str;
     PerformanceStatusBar => "performance.status_bar", Performance, Str;
     PerformanceOverviewRange => "performance.overview_range", Performance, Str;
@@ -511,6 +512,7 @@ fn bool_mut(s: &mut Settings, key: SettingKey) -> Option<&mut bool> {
         K::PerformanceShowDisconnectedFans => &mut p.show_disconnected_fans,
         K::PerformanceCurvedLines => &mut p.curved_lines,
         K::PerformanceNetworkDynamicScale => &mut p.network_dynamic_scale,
+        K::PerformancePixelPacedScrolling => &mut p.pixel_paced_scrolling,
         K::GraphsMinigraphCpu => &mut s.graphs.minigraph_cpu,
         K::GraphsMinigraphMemory => &mut s.graphs.minigraph_memory,
         K::GraphsMinigraphDisk => &mut s.graphs.minigraph_disk,

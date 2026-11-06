@@ -260,10 +260,10 @@ fn settings_set_rejects_map_key(cx: &mut TestAppContext) {
 #[test]
 fn setting_key_all_matches_table_a() {
     let names: Vec<&str> = SettingKey::ALL.iter().map(|k| k.as_str()).collect();
-    assert_eq!(names.len(), 92);
-    assert_eq!(names.iter().collect::<HashSet<_>>().len(), 92);
+    assert_eq!(names.len(), 93);
+    assert_eq!(names.iter().collect::<HashSet<_>>().len(), 93);
     assert_eq!(names[0], "general.start_tab");
-    assert_eq!(names[91], "debug.show_fps");
+    assert_eq!(names[92], "debug.show_fps");
     for key in SettingKey::ALL {
         let prefix = key.as_str().split('.').next().unwrap_or_default();
         assert_eq!(key.section().as_str(), prefix, "{key:?}");
@@ -277,7 +277,7 @@ fn setting_key_all_matches_table_a() {
         .iter()
         .filter(|k| k.kind() == SettingKind::Bool)
         .count();
-    assert_eq!(bools, 56);
+    assert_eq!(bools, 57);
 }
 
 #[gpui_kit::test]

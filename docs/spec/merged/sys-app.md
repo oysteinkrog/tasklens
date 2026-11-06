@@ -1303,6 +1303,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   device_overrides = {}          # device key -> "show" | "hide"
   curved_lines = false
   network_dynamic_scale = true   # false = link speed
+  pixel_paced_scrolling = true   # false = charts redraw every frame (ADR-009, tasklens-nosaa)
   overview_top_processes = false # Overview Top processes box (crw.45)
 
   [fans]                          # per fan key, P3

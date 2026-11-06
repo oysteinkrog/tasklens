@@ -95,6 +95,13 @@ pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
     ] {
         page.switch(graphs.clone(), key, tr(cx, label), None);
     }
+    // On by default (tasklens-nosaa): charts move one pixel at a time to save CPU.
+    page.switch(
+        graphs.clone(),
+        SettingKey::PerformancePixelPacedScrolling,
+        tr(cx, "shell-settings-perf-pixel-pacing"),
+        Some(tr(cx, "shell-settings-perf-pixel-pacing-note")),
+    );
 
     let modes = options(
         cx,
