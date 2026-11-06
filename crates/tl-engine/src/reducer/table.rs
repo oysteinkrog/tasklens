@@ -271,6 +271,10 @@ pub fn sort_key(r: &ProcessRecord, x: &ProcessExtras, col: ColumnId) -> SortKey 
         }
     };
 
+    let c = &x.counters;
+    let io_key = |key: SortKey| if c.io_read { key } else { SortKey::Absent };
+    let io_int = |v: i128| io_key(SortKey::Int(v));
+
     match col {
         // PROC-027 identity and image
         C::Name => SortKey::Text(r.meta.name.clone()),
@@ -313,6 +317,23 @@ pub fn sort_key(r: &ProcessRecord, x: &ProcessExtras, col: ColumnId) -> SortKey 
         C::PageFaults => int(x.page_faults.into()),
         C::PageFaultsDelta => int(x.page_faults_delta.into()),
         C::MajorFaults => int(x.major_faults.into()),
+        C::CommitPeak => int(c.commit_peak_bytes.into()),
+        C::CommitDelta => int(c.commit_delta_bytes.into()),
+        C::PageTables => int(c.page_tables_bytes.into()),
+        C::MajorFaultsDelta => int(c.major_faults_delta.into()),
+        // PROC-031 io-file columns: Absent when /proc/<pid>/io was not readable.
+        C::DiskReadBytes | C::IoReadBytes => io_int(c.read_bytes.into()),
+        C::DiskWriteBytes | C::IoWriteBytes => io_int(c.write_bytes.into()),
+        C::DiskTotalBytes => io_int(i128::from(c.read_bytes) + i128::from(c.write_bytes)),
+        C::DiskReadDelta | C::IoReadDelta => io_int(c.read_bytes_delta.into()),
+        C::DiskWriteDelta | C::IoWriteDelta => io_int(c.write_bytes_delta.into()),
+        C::DiskTotalDelta => {
+            io_int(i128::from(c.read_bytes_delta) + i128::from(c.write_bytes_delta))
+        }
+        C::IoReadRate => io_key(SortKey::float(c.rchar_bps)),
+        C::IoWriteRate => io_key(SortKey::float(c.wchar_bps)),
+        C::IoReadOps => io_int(c.syscr.into()),
+        C::IoWriteOps => io_int(c.syscw.into()),
         C::Swap => checked(F::Swap, int(r.swap_bytes.into())),
         // PROC-031 disk rates
         C::Disk => rate_pair(F::IoRead, F::IoWrite, r.io_read_bps + r.io_write_bps),
@@ -355,30 +376,12 @@ pub fn sort_key(r: &ProcessRecord, x: &ProcessExtras, col: ColumnId) -> SortKey 
         | C::CyclesDelta
         | C::CtxSwitches
         | C::CtxSwitchesDelta
-        | C::CommitPeak
-        | C::CommitDelta
-        | C::PageTables
-        | C::MajorFaultsDelta
         | C::Pss
         | C::Uss
-        | C::DiskReadBytes
-        | C::DiskWriteBytes
-        | C::DiskTotalBytes
-        | C::DiskReadDelta
-        | C::DiskWriteDelta
-        | C::DiskTotalDelta
         | C::DiskReads
         | C::DiskWrites
         | C::DiskReadsDelta
         | C::DiskWritesDelta
-        | C::IoReadBytes
-        | C::IoWriteBytes
-        | C::IoReadDelta
-        | C::IoWriteDelta
-        | C::IoReadRate
-        | C::IoWriteRate
-        | C::IoReadOps
-        | C::IoWriteOps
         | C::GpuMemShared
         | C::GpuEngine
         | C::GpuEncode
@@ -1226,7 +1229,14 @@ pub fn aggregate(
         page_faults_delta: 0,
         major_faults: 0,
         counters: tl_model::process::ProcCounters::default(),
-        cgroup_io: None,
+        cgroup_io: stats.map(|s| tl_model::process::CgroupIo {
+            rbytes: s.rbytes,
+            wbytes: s.wbytes,
+            rios: s.rios,
+            wios: s.wios,
+            rios_delta: s.rios_delta,
+            wios_delta: s.wios_delta,
+        }),
         handles: None,
         desktop_path: if unit.is_none() {
             first.and_then(|r| r.meta.desktop_path.clone())
@@ -1255,6 +1265,11 @@ fn add_extras_sums(
         return;
     }
     let mut handles = Some(0u32);
+    // `ProcCounters::add` ANDs `io_read`, so the sum starts true.
+    let mut counters = tl_model::process::ProcCounters {
+        io_read: true,
+        ..tl_model::process::ProcCounters::default()
+    };
     for &i in members {
         let Some(x) = extras.get(i as usize) else {
             continue;
@@ -1268,9 +1283,11 @@ fn add_extras_sums(
         g.page_faults = g.page_faults.saturating_add(x.page_faults);
         g.page_faults_delta = g.page_faults_delta.saturating_add(x.page_faults_delta);
         g.major_faults = g.major_faults.saturating_add(x.major_faults);
+        counters.add(&x.counters);
         handles = handles.zip(x.handles).map(|(a, b)| a.saturating_add(b));
     }
     g.handles = handles;
+    g.counters = counters;
 }
 
 /// True when every member is frozen. The sweep marks each process of a frozen unit cgroup from
@@ -1316,6 +1333,7 @@ fn add_sums(into: &mut GroupRow, from: &GroupRow) {
         .page_faults_delta
         .saturating_add(from.page_faults_delta);
     into.major_faults = into.major_faults.saturating_add(from.major_faults);
+    into.counters.add(&from.counters);
     into.handles = into
         .handles
         .zip(from.handles)
@@ -1430,6 +1448,26 @@ fn group_sort_key(g: &GroupRow, col: ColumnId) -> SortKey {
         C::PageFaults => int(g.page_faults),
         C::PageFaultsDelta => int(g.page_faults_delta),
         C::MajorFaults => int(g.major_faults),
+        C::CommitDelta => SortKey::Int(g.counters.commit_delta_bytes.into()),
+        C::PageTables => int(g.counters.page_tables_bytes),
+        C::MajorFaultsDelta => int(g.counters.major_faults_delta),
+        C::DiskReadBytes | C::IoReadBytes => int(g.counters.read_bytes),
+        C::DiskWriteBytes | C::IoWriteBytes => int(g.counters.write_bytes),
+        C::DiskTotalBytes => int(g.counters.read_bytes.saturating_add(g.counters.write_bytes)),
+        C::DiskReadDelta | C::IoReadDelta => int(g.counters.read_bytes_delta),
+        C::DiskWriteDelta | C::IoWriteDelta => int(g.counters.write_bytes_delta),
+        C::DiskTotalDelta => int(g
+            .counters
+            .read_bytes_delta
+            .saturating_add(g.counters.write_bytes_delta)),
+        C::IoReadRate => SortKey::float(g.counters.rchar_bps),
+        C::IoWriteRate => SortKey::float(g.counters.wchar_bps),
+        C::IoReadOps => int(g.counters.syscr),
+        C::IoWriteOps => int(g.counters.syscw),
+        C::DiskReads => g.cgroup_io.map_or(SortKey::Absent, |c| int(c.rios)),
+        C::DiskWrites => g.cgroup_io.map_or(SortKey::Absent, |c| int(c.wios)),
+        C::DiskReadsDelta => g.cgroup_io.map_or(SortKey::Absent, |c| int(c.rios_delta)),
+        C::DiskWritesDelta => g.cgroup_io.map_or(SortKey::Absent, |c| int(c.wios_delta)),
         C::Handles => g.handles.map_or(SortKey::Absent, |h| int(h.into())),
         C::Unit => match &g.node {
             NodeId::Unit(u) => SortKey::Text(u.name.clone()),

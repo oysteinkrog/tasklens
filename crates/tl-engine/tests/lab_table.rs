@@ -2232,3 +2232,141 @@ fn group_rows_sum_extras_columns() {
     assert_eq!(g.handles, None);
     assert_eq!(g.commit_bytes, 6 * GIB);
 }
+
+/// Builds a flat or grouped view from records with caller-made extras.
+fn build_x(
+    records: &[ProcessRecord],
+    extras: &[ProcessExtras],
+    app_stats: &[AppCgroupSample],
+    q: &TableQuery,
+) -> ProcessTableView {
+    let system = SystemSnapshot::default();
+    let devices = DeviceCatalog::default();
+    let unit_names = FxHashMap::default();
+    let settings = settings();
+    let input = TableInput {
+        records,
+        extras,
+        app_stats,
+        app_names: &FxHashMap::default(),
+        unit_stats: &[],
+        system: &system,
+        devices: &devices,
+        settings: &settings,
+        unit_names: &unit_names,
+        unit_users: &unit_names,
+        pseudo: None,
+        mem_groups: &FxHashMap::default(),
+    };
+    table::build(&input, q)
+}
+
+#[test]
+fn group_rows_sum_phase2_counters() {
+    let records = pipewire_records();
+    let mut extras: Vec<ProcessExtras> = records.iter().map(extras).collect();
+    for (n, x) in (1u64..).zip(extras.iter_mut()) {
+        x.counters.commit_peak_bytes = GIB * n;
+        x.counters.commit_delta_bytes = -(n as i64);
+        x.counters.page_tables_bytes = 100 * n;
+        x.counters.major_faults_delta = n;
+        x.counters.io_read = true;
+        x.counters.read_bytes = 10 * n;
+        x.counters.write_bytes = 20 * n;
+        x.counters.syscr = 3 * n;
+        x.counters.rchar_bps = n as f32;
+    }
+    let q = query(TableMode::Grouped, "pid", true, "", &headers());
+    let view = build_x(&records, &extras, &[], &q);
+    let g = view
+        .groups
+        .iter()
+        .find(|g| g.kind == GroupRowKind::Unit)
+        .expect("the unit has a row");
+    assert_eq!(g.counters.commit_peak_bytes, 6 * GIB);
+    assert_eq!(g.counters.commit_delta_bytes, -6);
+    assert_eq!(g.counters.page_tables_bytes, 600);
+    assert_eq!(g.counters.major_faults_delta, 6);
+    assert!(g.counters.io_read);
+    assert_eq!(g.counters.read_bytes, 60);
+    assert_eq!(g.counters.write_bytes, 120);
+    assert_eq!(g.counters.syscr, 18);
+    assert_eq!(g.counters.rchar_bps, 6.0);
+    assert_eq!(g.cgroup_io, None);
+
+    extras[1].counters.io_read = false;
+    let view = build_x(&records, &extras, &[], &q);
+    let g = view
+        .groups
+        .iter()
+        .find(|g| g.kind == GroupRowKind::Unit)
+        .expect("the unit has a row");
+    assert!(!g.counters.io_read);
+}
+
+#[test]
+fn app_row_takes_cgroup_io_from_the_sample() {
+    let records = app_pc();
+    let extras: Vec<ProcessExtras> = records.iter().map(extras).collect();
+    let stats = [AppCgroupSample {
+        pids: 2,
+        rbytes: 1000,
+        wbytes: 2000,
+        rios: 30,
+        wios: 40,
+        rios_delta: 3,
+        wios_delta: 4,
+        ..AppCgroupSample::empty(
+            app_key("firefox"),
+            CgroupRef {
+                rel_path: format!("{USER_MANAGER}/app.slice/app-firefox.scope").into(),
+                cgroup_id: 1,
+            },
+            FieldValidity::all(Validity::Valid),
+        )
+    }];
+    let q = query(TableMode::Grouped, "pid", true, "", &[]);
+    let view = build_x(&records, &extras, &stats, &q);
+    let io = |app: &str| {
+        view.groups
+            .iter()
+            .find(|g| g.key == app_key(app))
+            .and_then(|g| g.cgroup_io)
+    };
+    let got = io("firefox").expect("sample present");
+    assert_eq!((got.rbytes, got.wbytes), (1000, 2000));
+    assert_eq!((got.rios, got.wios), (30, 40));
+    assert_eq!((got.rios_delta, got.wios_delta), (3, 4));
+    assert_eq!(io("tool"), None);
+}
+
+#[test]
+fn sort_by_io_read_rate_commit_delta_and_restricted_member() {
+    let records = vec![
+        rec(1, 0, "a", 1.0),
+        rec(2, 0, "b", 1.0),
+        rec(3, 0, "c", 1.0),
+    ];
+    let mut extras: Vec<ProcessExtras> = records.iter().map(extras).collect();
+    for (x, (rate, delta)) in extras
+        .iter_mut()
+        .zip([(5.0f32, -10i64), (9.0, 0), (1.0, 7)])
+    {
+        x.counters.io_read = true;
+        x.counters.rchar_bps = rate;
+        x.counters.commit_delta_bytes = delta;
+        x.counters.read_bytes = 100;
+    }
+    let order = |extras: &[ProcessExtras], col: &str, asc: bool| {
+        let q = query(TableMode::Flat, col, asc, "", &[]);
+        pids(&build_x(&records, extras, &[], &q), &records)
+    };
+    assert_eq!(order(&extras, "io_read_rate", false), [2, 1, 3]);
+    // A negative delta sorts below 0.
+    assert_eq!(order(&extras, "commit_delta", true), [1, 2, 3]);
+    assert_eq!(order(&extras, "commit_delta", false), [3, 2, 1]);
+    // A process without /proc/<pid>/io sorts Absent, last in both directions.
+    extras[1].counters.io_read = false;
+    assert_eq!(order(&extras, "io_read_bytes", false), [1, 3, 2]);
+    assert_eq!(order(&extras, "io_read_bytes", true), [1, 3, 2]);
+}
