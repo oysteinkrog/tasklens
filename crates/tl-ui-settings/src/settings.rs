@@ -541,6 +541,10 @@ pub struct PerformanceSettings {
     pub overview_core_smoothing: CoreSmoothing,
     /// Where the machine status bar shows (UI-PRF-054).
     pub status_bar: StatusBarPlacement,
+    /// Compact view draws the status bar as one thin line, about 20 px, at the top of the
+    /// Performance tab (tasklens-i5cj4, owner choice 2026-11-06). Off, compact view has no status
+    /// line. Normal view follows `status_bar` only.
+    pub compact_status_line: bool,
     /// The range of every Overview chart (UI-PRF-055).
     pub overview_range: OverviewRange,
     /// What a click on the Overview timeline does (UI-PRF-057).
@@ -1382,6 +1386,7 @@ impl Default for PerformanceSettings {
             pixel_paced_scrolling: true,
             overview_core_smoothing: CoreSmoothing::default(),
             status_bar: StatusBarPlacement::default(),
+            compact_status_line: true,
             overview_range: OverviewRange::default(),
             timeline_click: TimelineClick::default(),
             overview_row_unit_px: OVERVIEW_ROW_UNIT_DEFAULT,

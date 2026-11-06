@@ -11,6 +11,12 @@
 //! for `overview` (the Overview page only) and `performance`; the main window draws it under the
 //! tab strip for `all_tabs`. Each host reports whether it shows the bar with
 //! [`StatusBar::set_shown`]; while any host shows it, the bar sends its demand part.
+//!
+//! Compact view (tasklens-i5cj4): while `state.window.compact_view` and
+//! `performance.compact_status_line` are both on, the bar draws as one thin line of
+//! [`THIN_H`] px: the same pill text and chips in the same order, smaller text, no pill or chip
+//! borders, the range picker as a text button, and the compact view exit button at the right
+//! end. The Performance tab draws it at its top whatever `performance.status_bar` says.
 
 pub mod rules;
 
@@ -21,8 +27,8 @@ use std::rc::Rc;
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Context, Div, ElementId, Entity, EntityId,
     EventEmitter, FocusHandle, FontWeight, Global, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Render, SharedString, Stateful, Styled as _,
-    Subscription, Window, canvas, div, px,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
@@ -38,7 +44,10 @@ use self::rules::{
 };
 use super::OVERVIEW_KEY;
 use super::layout::BoxKind;
-use super::range::{STATUS_SWITCH, current_range, range_switch};
+use super::range::{
+    STATUS_SWITCH, SWITCH_KEYS, current_range, history_kept, range_switch, set_range,
+};
+use super::timeline;
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use tl_ui_base::i18n::{Strings, tr};
@@ -46,12 +55,13 @@ use tl_ui_base::selector::TlSelector;
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_base::shell::ShellApi;
 use tl_ui_base::template::Template;
-use tl_ui_base::text::style::{label_style, numeric_style, t_sm};
+use tl_ui_base::text::style::{label_style, numeric_style, t_sm, t_xs};
 use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::actions::ToggleCompactView;
 use tl_ui_kit::components::icons::{TlIcon, icon};
 use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
 use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use tl_ui_perf_core::core::actions::{PerfSelectDevice, PerfStatusOpen};
+use tl_ui_perf_core::core::actions::{PerfSelectDevice, PerfSetOverviewRange, PerfStatusOpen};
 use tl_ui_perf_core::core::{DeviceKey, PAGE_PAD};
 
 /// The bar's debug selector.
@@ -66,6 +76,15 @@ pub const BAR_H: f32 = 64.;
 pub const WRAP_BELOW: f32 = 900.;
 const PILL_H: f32 = 40.;
 const CHIP_H: f32 = 28.;
+/// The height of the thin line in compact view, border included, logical px × ui_scale
+/// (tasklens-i5cj4).
+pub const THIN_H: f32 = 20.;
+/// The debug selector of the range button of the thin line.
+pub const THIN_RANGE_ID: &str = "perf-status-line-range";
+/// The debug selector of the compact view exit button at the right end of the thin line.
+pub const THIN_EXIT_ID: &str = "perf-status-line-exit";
+/// The side of that exit button, logical px × ui_scale.
+const THIN_EXIT_SIZE: f32 = 18.;
 
 /// The debug selector of a chip: `perf-status-chip-cpu-temp`, `perf-status-chip-gpu-temp-2`.
 pub fn chip_id(kind: ChipKind) -> String {
@@ -88,6 +107,14 @@ pub fn placement(cx: &App) -> StatusBarPlacement {
     } else {
         StatusBarPlacement::default()
     }
+}
+
+/// The bar draws as the thin line of compact view: `state.window.compact_view` and
+/// `performance.compact_status_line` are both on (tasklens-i5cj4).
+pub fn thin_line(cx: &App) -> bool {
+    cx.has_global::<TlSettings>()
+        && TlSettings::state(cx).window.compact_view
+        && TlSettings::settings(cx).performance.compact_status_line
 }
 
 /// A place that can draw the bar.
@@ -504,6 +531,8 @@ pub struct StatusBar {
     /// `performance.status_bar` and `performance.overview_range` at the last settings change:
     /// the bar draws the Overview range switch while it is on the Overview (UI-PRF-055).
     shown_range: (StatusBarPlacement, OverviewRange),
+    /// [`thin_line`] at the last settings change.
+    thin: bool,
     _sub: Subscription,
     _settings: Subscription,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -528,8 +557,10 @@ impl StatusBar {
         });
         let settings = cx.observe_global::<TlSettings>(|this: &mut Self, cx| {
             let now = (placement(cx), current_range(cx));
-            if this.shown_range != now {
+            let thin = thin_line(cx);
+            if this.shown_range != now || this.thin != thin {
                 this.shown_range = now;
+                this.thin = thin;
                 cx.notify();
             }
         });
@@ -548,6 +579,7 @@ impl StatusBar {
             focus: cx.focus_handle(),
             narrow: Rc::new(Cell::new(false)),
             shown_range: (placement(cx), current_range(cx)),
+            thin: thin_line(cx),
             _sub: sub,
             _settings: settings,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -681,6 +713,59 @@ impl StatusBar {
     /// Whether any slot shows the bar.
     pub fn is_shown(&self) -> bool {
         self.shown.iter().any(Option::is_some)
+    }
+
+    /// The bar draws as the thin line of compact view.
+    pub fn is_thin(&self) -> bool {
+        self.thin
+    }
+
+    /// `PerfSetOverviewRange` from the range menu of the thin line.
+    fn on_set_range(&mut self, a: &PerfSetOverviewRange, _: &mut Window, cx: &mut Context<Self>) {
+        set_range(a.range, cx);
+    }
+
+    /// The range menu of the thin line: the five Overview ranges as radio items, with the same
+    /// disabled items and tooltips as the range switch (UI-PRF-055, UI-PRF-057, UI-PRF-060).
+    fn open_range_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let current = current_range(cx);
+        let kept = history_kept(Some(&self.hub), cx);
+        let paused = timeline::paused(cx);
+        let now = timeline::now_realtime_ns();
+        let history_off = tr(cx, "perf-overview-range-history-off");
+        let not_kept = tr(cx, "perf-overview-range-not-kept");
+        let rows: SmallVec<[(OverviewRange, SharedString, Option<SharedString>); 5]> =
+            OverviewRange::ALL
+                .into_iter()
+                .zip(SWITCH_KEYS)
+                .map(|(range, key)| {
+                    let stored = kept || !matches!(range, OverviewRange::H24 | OverviewRange::D7);
+                    let servable =
+                        paused.is_none_or(|p| timeline::servable(range, now - p.at_realtime_ns));
+                    let why = if !stored {
+                        Some(history_off.clone())
+                    } else if !servable {
+                        Some(not_kept.clone())
+                    } else {
+                        None
+                    };
+                    (range, tr(cx, key), why)
+                })
+                .collect();
+        let menu = TlMenu::build(window, cx, self.focus.clone(), move |mut menu, _, _| {
+            for (range, label, why) in &rows {
+                menu = match why {
+                    Some(why) => menu.item_disabled(label.clone(), Some(why.clone())),
+                    None => menu.radio_item(
+                        label.clone(),
+                        *range == current,
+                        Box::new(PerfSetOverviewRange { range: *range }),
+                    ),
+                };
+            }
+            menu
+        });
+        open_context_menu_at(at, window, cx, menu);
     }
 
     /// A pill, chip or popup row was clicked.
@@ -868,10 +953,229 @@ fn chip(
     with_tip("perf-status-chip", id, el, c.tooltip.clone(), window, cx).into_any_element()
 }
 
+/// The pill of the thin line: the state glyph and the pill text, no border and no fill.
+fn thin_pill(
+    text: &BarText,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let color = state_color(text.state, theme).unwrap_or(theme.status.success);
+    let glyph = match text.state {
+        MachineState::Calm => TlIcon::CircleCheck,
+        MachineState::Busy | MachineState::Pressure | MachineState::Hot => TlIcon::TriangleAlert,
+        MachineState::Saturated => TlIcon::CircleX,
+    };
+    let mut label = div();
+    *label.text_style() = label_style(m, m.text.xs, FontWeight::SEMIBOLD);
+    let label = label
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(theme.text_primary)
+        .child(text.pill.clone());
+    let el = div()
+        .id(PILL_ID)
+        .tl_selector(|| PILL_ID.into())
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_shrink(1.)
+        .min_w_0()
+        .h_full()
+        .gap(m.sp[2])
+        .child(icon(glyph, m.icon.xs, color))
+        .child(label);
+    let el = opens(el, text.pill_target.clone());
+    with_tip(PILL_ID, "", el, text.pill_tip.clone(), window, cx).into_any_element()
+}
+
+/// A chip of the thin line: the label and the value, no border and no fill.
+fn thin_chip(
+    c: &ChipText,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let id = chip_id(c.kind);
+    let color = tone_color(c.tone, theme);
+    let mut label = div();
+    *label.text_style() = t_xs(m);
+    let label = label
+        .text_color(theme.text_secondary)
+        .child(c.label.clone());
+    let mut value = div();
+    *value.text_style() = numeric_style(m, m.text.xs);
+    let value = value
+        .text_color(color.unwrap_or(theme.text_primary))
+        .child(c.value.clone());
+    let selector = id.clone();
+    let el = div()
+        .id(SharedString::from(id.clone()))
+        .tl_selector(move || selector.clone())
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .whitespace_nowrap()
+        .h_full()
+        .gap(m.sp[2])
+        .child(label)
+        .child(value);
+    let el = opens(el, c.target.clone());
+    with_tip("perf-status-chip", id, el, c.tooltip.clone(), window, cx).into_any_element()
+}
+
+impl StatusBar {
+    /// The thin line of compact view (tasklens-i5cj4): [`THIN_H`] high with its bottom border,
+    /// the pill, the chips cut off at their end, the warning count, the range button and the
+    /// exit button, which is always shown here.
+    fn render_thin(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        let s = m.ui_scale;
+        let pill = thin_pill(&self.text, &m, &theme, window, cx);
+        let chips: SmallVec<[AnyElement; 8]> = self
+            .text
+            .chips
+            .iter()
+            .map(|c| thin_chip(c, &m, &theme, window, cx))
+            .collect();
+        let warnings = (!self.text.warnings.is_empty()).then(|| {
+            let mut label = div();
+            *label.text_style() = t_xs(&m);
+            div()
+                .id(WARNINGS_ID)
+                .tl_selector(|| WARNINGS_ID.into())
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .h_full()
+                .gap(m.sp[2])
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_warnings(ev, window, cx);
+                    }),
+                )
+                .child(icon(TlIcon::TriangleAlert, m.icon.xs, theme.status.danger))
+                .child(
+                    label
+                        .text_color(theme.status.danger)
+                        .child(self.text.warnings.clone()),
+                )
+        });
+        let hover = theme.tab_hover;
+        let range = {
+            let mut label = div();
+            *label.text_style() = t_xs(&m);
+            let current = current_range(cx);
+            let word = OverviewRange::ALL
+                .into_iter()
+                .zip(SWITCH_KEYS)
+                .find(|(r, _)| *r == current)
+                .map(|(_, k)| tr(cx, k))
+                .unwrap_or_default();
+            div()
+                .id(THIN_RANGE_ID)
+                .tl_selector(|| THIN_RANGE_ID.into())
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .h_full()
+                .px(m.sp[2])
+                .gap(m.sp[1])
+                .rounded(m.radius_small)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_range_menu(ev.position, window, cx);
+                    }),
+                )
+                .child(label.text_color(theme.text_secondary).child(word))
+                .child(icon(TlIcon::ChevronDown, m.icon.xs, theme.text_secondary))
+        };
+        let exit = {
+            let target = div()
+                .id(THIN_EXIT_ID)
+                .tl_selector(|| THIN_EXIT_ID.into())
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(THIN_EXIT_SIZE * s))
+                .rounded(m.radius_small)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleCompactView), cx))
+                .child(icon(TlIcon::AppWindow, m.icon.xs, theme.text_secondary));
+            let state = HoverTooltip::state(THIN_EXIT_ID, window, cx);
+            let focus = self.focus.clone();
+            let build = move |_: &mut Window, cx: &mut App| {
+                TlTooltip::text(tr(cx, "perf-compact-exit"))
+                    .action(&ToggleCompactView, Some(&focus))
+                    .view(cx)
+            };
+            HoverTooltip::attach(&state, target, DELAY_CONTROL, build, window, cx)
+        };
+        div()
+            .id(BAR_ID)
+            .tl_selector(|| BAR_ID.into())
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_open))
+            .on_action(cx.listener(Self::on_set_range))
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(m.sp[4])
+            .w_full()
+            .h(px(THIN_H * s))
+            // The page's side padding on the left, as the full bar; the exit button keeps a
+            // small gap to the window edge.
+            .pl(px(PAGE_PAD * s))
+            .pr(m.sp[1])
+            .overflow_hidden()
+            .bg(theme.toolbar)
+            .border_b_1()
+            .border_color(theme.divider)
+            .child(pill)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .items_center()
+                    .gap(m.sp[5])
+                    .overflow_hidden()
+                    .children(chips),
+            )
+            .children(warnings)
+            .child(range)
+            .child(exit)
+            .into_any_element()
+    }
+}
+
 impl Render for StatusBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
+        if self.thin {
+            return self.render_thin(window, cx);
+        }
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let s = m.ui_scale;
@@ -968,6 +1272,7 @@ impl Render for StatusBar {
                 )
                 .child(row().overflow_hidden().children(chips))
                 .child(measure)
+                .into_any_element()
         } else {
             // One row. The chips get the width the pill and the warning button leave and are
             // cut off at its end, so they never wrap and never push the button out of the bar.
@@ -988,6 +1293,7 @@ impl Render for StatusBar {
                 .children(switch)
                 .children(warnings)
                 .child(measure)
+                .into_any_element()
         }
     }
 }

@@ -1064,6 +1064,8 @@ perf-sidebar-hide = Hide sidebar
 perf-sidebar-show = Show sidebar
 # Compact view (tasklens-qdn1r): the hover button and the page menu entry that end it.
 perf-compact-exit = Exit compact view
+# The thin status line of compact view (tasklens-i5cj4): its entry in the compact right-click menu.
+perf-compact-status-line = Show status line
 perf-range-30s = 30 seconds
 perf-range-1m = 1 minute
 perf-range-5m = 5 minutes
@@ -2827,6 +2829,7 @@ shell-menu-view-theme = Theme
 shell-menu-view-graphs = Graphs
 shell-menu-view-show-sidebar = Show sidebar
 shell-menu-view-compact = Compact view
+shell-menu-view-compact-status-line = Show status line in compact view
 shell-menu-columns-select = Select Columns…
 shell-menu-columns-fit = Resize columns to fit content
 shell-menu-columns-resize-behavior = Resize Behavior
@@ -3617,6 +3620,7 @@ shell-settings-perf-status-bar-overview = Overview
 shell-settings-perf-status-bar-performance = Performance tab
 shell-settings-perf-status-bar-all-tabs = Every tab
 shell-settings-perf-status-bar-off = Off
+shell-settings-perf-compact-status-line = Show status line in compact view
 shell-settings-perf-overview-range = Overview time range
 shell-settings-perf-timeline-click = Timeline click
 shell-settings-perf-memory-composition = Show memory composition

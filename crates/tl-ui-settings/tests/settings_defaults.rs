@@ -299,6 +299,20 @@ fn compact_view_state_key() {
     assert!(back.window.compact_view);
 }
 
+/// `performance.compact_status_line` (tasklens-i5cj4): on when the key is missing, and off
+/// survives a save and a load.
+#[test]
+fn compact_status_line_settings_key() {
+    let old: Settings = toml::from_str("[performance]\nstatus_bar = \"off\"\n").unwrap();
+    assert!(old.performance.compact_status_line);
+    let mut settings = Settings::default();
+    settings.performance.compact_status_line = false;
+    let text = toml::to_string(&settings).unwrap();
+    assert!(text.contains("compact_status_line = false"), "{text}");
+    let back: Settings = toml::from_str(&text).unwrap();
+    assert!(!back.performance.compact_status_line);
+}
+
 #[test]
 fn lowmem_state_key_left_out_when_none_and_clamped() {
     let text = toml::to_string(&UiState::default()).unwrap();

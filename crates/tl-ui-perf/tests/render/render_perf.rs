@@ -4,8 +4,10 @@
 //! (UI-PRF-059), in `perf_overview_1920_<theme>.png`. The whole tab, sidebar and Overview, is
 //! checked with the sidebar shown (its collapse arrow on the right edge) and hidden (the expand
 //! strip at the left edge), in `perf_tab_sidebar_<state>_dark.png` (tasklens-o5853). Compact
-//! view (the sidebar and the status bar hidden) is checked with and without the exit button in
-//! the top-right corner, in `perf_tab_compact[_exit]_dark.png` (tasklens-qdn1r).
+//! view without its status line (the sidebar and the status bar hidden) is checked with and
+//! without the exit button in the top-right corner, in `perf_tab_compact[_exit]_dark.png`
+//! (tasklens-qdn1r), and with the thin status line and its exit button in
+//! `perf_tab_compact_line_dark.png` (tasklens-i5cj4).
 //! `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
 //! The Overview timeline labels its hours from CLOCK_REALTIME in the local time zone, so every
@@ -85,9 +87,10 @@ enum Page {
         hidden: bool,
     },
     /// The whole tab on the Overview in compact view, with the exit button drawn when
-    /// `exit_button` (tasklens-qdn1r).
+    /// `exit_button` (tasklens-qdn1r) and the thin status line when `line` (tasklens-i5cj4).
     Compact {
         exit_button: bool,
+        line: bool,
     },
 }
 
@@ -253,6 +256,9 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
         // As the load does: the CPU page's old keys convert to its entry.
         settings.clamp();
     }
+    if let Page::Compact { line, .. } = page {
+        settings.performance.compact_status_line = line;
+    }
     let mut state = UiState::default();
     match page {
         Page::Tab { hidden } => {
@@ -283,7 +289,10 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
             None,
         );
         let tab = cx.new(|cx| PerformancePage::new(&host, cx));
-        if let Page::Compact { exit_button: true } = page {
+        if let Page::Compact {
+            exit_button: true, ..
+        } = page
+        {
             tab.update(cx, |p, cx| p.show_exit_button_for_test(cx));
         }
         return cx.new(|_| Shot {
@@ -511,28 +520,50 @@ fn tab_sidebar_hidden_dark() {
     });
 }
 
-/// Compact view: no sidebar, no status bar, no exit button while the mouse is away
-/// (tasklens-qdn1r).
+/// Compact view with its status line off: no sidebar, no status bar, no exit button while the
+/// mouse is away (tasklens-qdn1r).
 #[test]
 fn tab_compact_dark() {
     run_pinned("render_perf::tab_compact_dark", || {
         check(
-            Page::Compact { exit_button: false },
+            Page::Compact {
+                exit_button: false,
+                line: false,
+            },
             "Default Dark",
             "perf_tab_compact_dark",
         )
     });
 }
 
-/// Compact view with the exit button in the top-right corner, as a mouse move shows it
-/// (tasklens-qdn1r).
+/// Compact view with its status line off and the exit button in the top-right corner, as a
+/// mouse move shows it (tasklens-qdn1r).
 #[test]
 fn tab_compact_exit_dark() {
     run_pinned("render_perf::tab_compact_exit_dark", || {
         check(
-            Page::Compact { exit_button: true },
+            Page::Compact {
+                exit_button: true,
+                line: false,
+            },
             "Default Dark",
             "perf_tab_compact_exit_dark",
+        )
+    });
+}
+
+/// Compact view with its thin status line: the pill, the chips, the range button and the exit
+/// button in one line of 20 px at the top (tasklens-i5cj4).
+#[test]
+fn tab_compact_line_dark() {
+    run_pinned("render_perf::tab_compact_line_dark", || {
+        check(
+            Page::Compact {
+                exit_button: false,
+                line: true,
+            },
+            "Default Dark",
+            "perf_tab_compact_line_dark",
         )
     });
 }

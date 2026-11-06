@@ -354,7 +354,7 @@ macro_rules! setting_keys {
 
         impl SettingKey {
             /// Every key in table (a) order.
-            pub const ALL: [SettingKey; 93] = [$(SettingKey::$key,)*];
+            pub const ALL: [SettingKey; 94] = [$(SettingKey::$key,)*];
 
             /// The dotted name, for example `"motion.animations"`. `Fans` is `"fans"`.
             pub fn as_str(self) -> &'static str {
@@ -439,6 +439,7 @@ setting_keys! {
     PerformancePixelPacedScrolling => "performance.pixel_paced_scrolling", Performance, Bool;
     PerformanceOverviewCoreSmoothing => "performance.overview_core_smoothing", Performance, Str;
     PerformanceStatusBar => "performance.status_bar", Performance, Str;
+    PerformanceCompactStatusLine => "performance.compact_status_line", Performance, Bool;
     PerformanceOverviewRange => "performance.overview_range", Performance, Str;
     PerformanceTimelineClick => "performance.timeline_click", Performance, Str;
     PerformanceMemoryByAppTopN => "performance.memory_by_app.top_n", Performance, Int;
@@ -513,6 +514,7 @@ fn bool_mut(s: &mut Settings, key: SettingKey) -> Option<&mut bool> {
         K::PerformanceCurvedLines => &mut p.curved_lines,
         K::PerformanceNetworkDynamicScale => &mut p.network_dynamic_scale,
         K::PerformancePixelPacedScrolling => &mut p.pixel_paced_scrolling,
+        K::PerformanceCompactStatusLine => &mut p.compact_status_line,
         K::GraphsMinigraphCpu => &mut s.graphs.minigraph_cpu,
         K::GraphsMinigraphMemory => &mut s.graphs.minigraph_memory,
         K::GraphsMinigraphDisk => &mut s.graphs.minigraph_disk,

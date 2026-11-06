@@ -70,11 +70,11 @@ use tl_ui_base::host::HostContext;
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::tr;
 use tl_ui_base::selector::TlSelector;
-use tl_ui_base::settings_global::{TlSettings, animations_on};
+use tl_ui_base::settings_global::{SettingKey, TlSettings, animations_on};
 use tl_ui_base::shell::{ShellApi, ShellPage, StatusChanged, main_window_title};
 use tl_ui_base::theme::{UiMetrics, current, metrics};
 use tl_ui_base::util::clipboard_write;
-use tl_ui_kit::actions::ToggleCompactView;
+use tl_ui_kit::actions::{ToggleCompactView, ToggleSetting};
 use tl_ui_kit::components::icons::{TlIcon, icon};
 use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
 use tl_ui_kit::components::motion::{M_BASE, M_FAST, ease_out_cubic};
@@ -210,6 +210,10 @@ pub struct PerformancePage {
     /// arrow and strip toggle it without saving, the status bar hides, a right-click on the
     /// page offers "Exit compact view" and the exit button shows while the mouse moves.
     compact: bool,
+    /// `performance.compact_status_line` (tasklens-i5cj4). In compact view the status bar draws
+    /// as one thin line at the top with the exit button at its right end, and the hover exit
+    /// button stays away. Off, compact view has no status line and the hover button works.
+    compact_line: bool,
     exit: ExitButton,
     /// `state.performance.nav_width`, clamped to 180..=400.
     nav_width: u16,
@@ -265,6 +269,12 @@ impl PerformancePage {
             if status_bar::placement(cx) != this.status_placement {
                 cx.notify();
             }
+            let compact_line = TlSettings::settings(cx).performance.compact_status_line;
+            if compact_line != this.compact_line {
+                this.compact_line = compact_line;
+                this.hide_exit_button();
+                cx.notify();
+            }
             let compact = TlSettings::state(cx).window.compact_view;
             if compact != this.compact {
                 this.set_compact(compact, cx);
@@ -294,6 +304,7 @@ impl PerformancePage {
             left_page_focus: None,
             sidebar_visible: !sidebar_hidden && !compact,
             compact,
+            compact_line: TlSettings::settings(cx).performance.compact_status_line,
             exit: ExitButton {
                 shown: false,
                 fading: None,
@@ -687,10 +698,16 @@ impl PerformancePage {
         self.compact
     }
 
-    /// The exit button is drawn: compact view is on and the mouse moved in the window less than
-    /// [`COMPACT_EXIT_IDLE`] ago, or the button is fading out.
+    /// The thin status line of compact view is on (tasklens-i5cj4). It holds its own exit
+    /// button, so the hover button is not used.
+    pub fn compact_line_shown(&self) -> bool {
+        self.compact && self.compact_line
+    }
+
+    /// The hover exit button is drawn: compact view is on without its status line, and the mouse
+    /// moved in the window less than [`COMPACT_EXIT_IDLE`] ago, or the button is fading out.
     pub fn exit_button_shown(&self) -> bool {
-        self.compact && self.exit.shown
+        self.compact && !self.compact_line && self.exit.shown
     }
 
     /// The exit button is fading out.
@@ -701,7 +718,7 @@ impl PerformancePage {
     /// Shows the exit button with no idle timer, as a mouse move would, for render tests.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn show_exit_button_for_test(&mut self, cx: &mut Context<Self>) {
-        if self.compact {
+        if self.compact && !self.compact_line {
             self.exit.shown = true;
             cx.notify();
         }
@@ -717,9 +734,10 @@ impl PerformancePage {
     /// Window-wide pointer listeners for the exit button, so a move over the client title bar
     /// counts as much as one over the tab (tasklens-qdn1r). An element's own mouse handlers only
     /// fire while its hitbox is hovered. These run in the capture phase, so no handler that stops
-    /// propagation hides a move from them. Registered only in compact view.
+    /// propagation hides a move from them. Registered only in compact view without its status
+    /// line, which has an exit button of its own (tasklens-i5cj4).
     fn pointer_watch(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        if !self.compact {
+        if !self.compact || self.compact_line {
             return None;
         }
         let this = cx.weak_entity();
@@ -748,7 +766,7 @@ impl PerformancePage {
     /// A mouse move anywhere in the window shows the exit button in compact view and restarts
     /// its idle time. Only the first move after it was hidden or began to fade renders again.
     fn pointer_moved(&mut self, cx: &mut Context<Self>) {
-        if !self.compact {
+        if !self.compact || self.compact_line {
             return;
         }
         self.exit.last_move = cx.background_executor().now();
@@ -911,16 +929,18 @@ impl PerformancePage {
     }
 
     /// Whether the page panel draws the status bar now: the tab shows a page and
-    /// `performance.status_bar` puts the bar above it.
+    /// `performance.status_bar` puts the bar above it. In compact view
+    /// `performance.compact_status_line` alone decides, on every page, and the bar draws as its
+    /// thin line (tasklens-i5cj4).
     fn shows_status_bar(&self) -> bool {
         let overview = self
             .selected
             .as_ref()
             .is_some_and(|k| &*k.0 == overview::OVERVIEW_KEY);
-        // Compact view has no status bar (tasklens-qdn1r; tasklens-i5cj4 adds a thin line).
-        !self.compact
-            && self.page_on()
-            && status_bar::shows_in(Slot::Performance, self.status_placement, overview)
+        if self.compact {
+            return self.compact_line && self.page_on();
+        }
+        self.page_on() && status_bar::shows_in(Slot::Performance, self.status_placement, overview)
     }
 
     /// The machine status bar, for tests and the main window.
@@ -953,6 +973,7 @@ impl PerformancePage {
             .then(|| cx.remove_global::<ClickedBox>().0)
             .flatten();
         let compact = self.compact;
+        let compact_line = self.compact_line;
         let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
             let types = view_types(sidebar.read(cx));
             let ctx = PageMenuCtx {
@@ -971,9 +992,15 @@ impl PerformancePage {
                 slot = Some(page_menu(menu, p, &ctx, window, cx));
             });
             let menu = slot.expect("the menu");
-            // Compact view: a right-click anywhere on the page can end it (tasklens-qdn1r).
+            // Compact view: a right-click anywhere on the page can end it (tasklens-qdn1r) and
+            // turn its status line on or off (tasklens-i5cj4).
             if compact {
                 menu.separator()
+                    .check_item(
+                        tr(cx, "perf-compact-status-line"),
+                        compact_line,
+                        Box::new(ToggleSetting(SettingKey::PerformanceCompactStatusLine)),
+                    )
                     .item(tr(cx, "perf-compact-exit"), Box::new(ToggleCompactView))
             } else {
                 menu

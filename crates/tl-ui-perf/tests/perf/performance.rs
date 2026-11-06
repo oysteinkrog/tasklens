@@ -1825,10 +1825,13 @@ mod tab {
     // Compact view (tasklens-qdn1r).
 
     use gpui_kit::{MouseDownEvent, MouseExitEvent, MouseUpEvent};
+    use tl_ui_base::settings_global::SettingKey;
     use tl_ui_base::settings_global::animations_on;
-    use tl_ui_kit::actions::ToggleCompactView;
+    use tl_ui_kit::actions::{ToggleCompactView, ToggleSetting};
     use tl_ui_kit::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
-    use tl_ui_perf::performance::status_bar::BAR_ID;
+    use tl_ui_perf::performance::status_bar::{
+        BAR_ID, THIN_EXIT_ID, THIN_H, THIN_RANGE_ID, chip_id,
+    };
     use tl_ui_perf::performance::{
         COMPACT_EXIT_ID, COMPACT_EXIT_IDLE, COMPACT_EXIT_INSET, COMPACT_EXIT_SIZE,
     };
@@ -1846,8 +1849,9 @@ mod tab {
     }
 
     /// The tab in compact view, as `ToggleCompactView` in tl-ui flips it: the handler is the
-    /// main window's, so the test registers the same one.
-    fn open_compact(cx: &mut TestAppContext) -> Rig<'_> {
+    /// main window's, so the test registers the same one, and the generic `ToggleSetting`
+    /// handler. `line` is `performance.compact_status_line` (tasklens-i5cj4).
+    fn open_compact(cx: &mut TestAppContext, line: bool) -> Rig<'_> {
         let mut state = UiState::default();
         state.window.compact_view = true;
         cx.update(|cx| {
@@ -1856,8 +1860,20 @@ mod tab {
                     d.state.window.compact_view = !d.state.window.compact_view;
                 });
             });
+            tl_ui_kit::actions::register_global_handlers(cx);
         });
-        open(cx, state, 16, 1280., 800.)
+        let mut r = open(cx, state, 16, 1280., 800.);
+        if !line {
+            set_line(&mut r, false);
+        }
+        r
+    }
+
+    fn set_line(r: &mut Rig, on: bool) {
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.performance.compact_status_line = on)
+        });
+        draw(r.vcx);
     }
 
     fn exit_drawn(r: &mut Rig) -> bool {
@@ -1889,6 +1905,8 @@ mod tab {
         assert!(r.vcx.debug_bounds(BAR_ID).is_some(), "status bar before");
         assert!(sidebar_visible(&mut r));
 
+        // Without its status line, compact view draws no status bar (tasklens-i5cj4).
+        set_line(&mut r, false);
         set_compact(&mut r, true);
         let page = r.page.clone();
         assert!(r.vcx.update(|_, cx| page.read(cx).is_compact()));
@@ -1942,7 +1960,7 @@ mod tab {
     /// goes at once when the pointer leaves the window.
     #[gpui_kit::test]
     fn compact_exit_button_follows_the_mouse(cx: &mut TestAppContext) {
-        let mut r = open_compact(cx);
+        let mut r = open_compact(cx, false);
         assert!(!exit_drawn(&mut r), "no button before the mouse moves");
 
         move_to(&mut r, 600., 400.);
@@ -1991,7 +2009,7 @@ mod tab {
     /// comes back.
     #[gpui_kit::test]
     fn compact_exit_button_click_exits(cx: &mut TestAppContext) {
-        let mut r = open_compact(cx);
+        let mut r = open_compact(cx, false);
         move_to(&mut r, 600., 400.);
         let b = r.vcx.debug_bounds(COMPACT_EXIT_ID).expect("button");
         move_to(&mut r, f32::from(b.center().x), f32::from(b.center().y));
@@ -2038,8 +2056,17 @@ mod tab {
                         .is_some_and(|a| a.partial_eq(&ToggleCompactView)),
                     "runs ToggleCompactView"
                 );
+                let line = &entries[entries.len() - 2];
+                assert_eq!(line.label.as_deref(), Some("Show status line"));
+                assert!(
+                    line.action
+                        .as_ref()
+                        .is_some_and(|a| a
+                            .partial_eq(&ToggleSetting(SettingKey::PerformanceCompactStatusLine))),
+                    "toggles performance.compact_status_line"
+                );
                 assert_eq!(
-                    entries[entries.len() - 2].kind,
+                    entries[entries.len() - 3].kind,
                     MenuEntryKind::Separator,
                     "after a separator"
                 );
@@ -2051,7 +2078,7 @@ mod tab {
     /// In compact view a right-click on the page ends its menu with "Exit compact view".
     #[gpui_kit::test]
     fn compact_page_menu_offers_exit(cx: &mut TestAppContext) {
-        let mut r = open_compact(cx);
+        let mut r = open_compact(cx, true);
         let labels = page_menu(&mut r);
         assert_eq!(
             labels.last().map(|l| l.as_ref()),
@@ -2066,5 +2093,163 @@ mod tab {
             !labels.iter().any(|l| l.as_ref() == "Exit compact view"),
             "{labels:?}"
         );
+    }
+    // The thin status line of compact view (tasklens-i5cj4).
+
+    fn bar_chips(r: &mut Rig) -> Vec<String> {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            page.read(cx)
+                .status_bar()
+                .read(cx)
+                .text()
+                .chips
+                .iter()
+                .map(|c| chip_id(c.kind))
+                .collect()
+        })
+    }
+
+    fn line_check(r: &mut Rig) -> bool {
+        let at = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page").center();
+        r.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        r.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        r.vcx.run_until_parked();
+        let menu: Entity<TlMenuPopup> = r
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("a context menu is open");
+        let checked = r.vcx.update(|window, cx| {
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .find(|e| e.label.as_deref() == Some("Show status line"))
+                .expect("the status line entry")
+                .checked
+        });
+        r.vcx
+            .update(tl_ui_kit::components::menu::close_context_menu);
+        draw(r.vcx);
+        checked
+    }
+
+    /// With the line on, compact view draws the status bar as one line of at most 22 px at the
+    /// top of the tab: the chips of the normal bar in the same order, the range button, and the
+    /// exit button at the right end without a mouse move. The hover button stays away, and the
+    /// line's exit button ends compact view.
+    #[gpui_kit::test]
+    fn compact_status_line_is_thin_with_the_exit_button(cx: &mut TestAppContext) {
+        let mut r = open_compact(cx, true);
+        let bar = r.vcx.debug_bounds(BAR_ID).expect("the status line");
+        assert!(bar.size.height <= px(22.), "{:?}", bar.size);
+        assert_eq!(bar.size.height, px(THIN_H));
+        assert_eq!(bar.top(), px(0.), "at the top of the tab");
+        assert_eq!(bar.right(), px(1280.));
+        let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");
+        assert_eq!(page.top(), bar.bottom(), "the page right under the line");
+        let page_entity = r.page.clone();
+        assert!(
+            r.vcx
+                .update(|_, cx| page_entity.read(cx).status_bar().read(cx).is_thin())
+        );
+
+        // The same chips as the normal bar, left to right in its order, inside the line.
+        let chips = bar_chips(&mut r);
+        assert!(!chips.is_empty());
+        let mut left = px(0.);
+        for id in &chips {
+            let b = r
+                .vcx
+                .debug_bounds(Box::leak(id.clone().into_boxed_str()))
+                .unwrap_or_else(|| panic!("{id} drawn"));
+            assert!(b.left() > left, "{id} after the one before");
+            assert!(
+                b.top() >= bar.top() && b.bottom() <= bar.bottom(),
+                "{id} in the line"
+            );
+            left = b.left();
+        }
+        let range = r.vcx.debug_bounds(THIN_RANGE_ID).expect("range button");
+        let exit = r
+            .vcx
+            .debug_bounds(THIN_EXIT_ID)
+            .expect("exit button, no move needed");
+        assert!(
+            range.right() <= exit.left(),
+            "the range button before the exit button"
+        );
+        assert!(exit.right() <= bar.right() && exit.right() >= bar.right() - px(8.));
+        assert!(exit.top() >= bar.top() && exit.bottom() <= bar.bottom());
+
+        move_to(&mut r, 600., 400.);
+        assert!(!exit_drawn(&mut r), "no hover button while the line shows");
+        assert!(r.vcx.debug_bounds(THIN_EXIT_ID).is_some());
+
+        r.vcx.simulate_click(exit.center(), Modifiers::none());
+        draw(r.vcx);
+        assert!(
+            !r.vcx
+                .update(|_, cx| TlSettings::state(cx).window.compact_view),
+            "compact view off"
+        );
+        assert!(r.vcx.debug_bounds(THIN_EXIT_ID).is_none());
+        // Normal view: the full bar on the CPU page only with the `performance` placement,
+        // which this test does not set, so the default `overview` draws none here.
+        let page_entity = r.page.clone();
+        assert!(
+            !r.vcx
+                .update(|_, cx| page_entity.read(cx).status_bar().read(cx).is_thin())
+        );
+    }
+
+    /// With the line off, compact view draws no status line, the page starts at the top edge,
+    /// and the hover exit button works as before.
+    #[gpui_kit::test]
+    fn compact_status_line_off_starts_the_page_at_the_top(cx: &mut TestAppContext) {
+        let mut r = open_compact(cx, false);
+        assert!(r.vcx.debug_bounds(BAR_ID).is_none(), "no status line");
+        assert!(r.vcx.debug_bounds(THIN_EXIT_ID).is_none());
+        let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");
+        assert_eq!(page.top(), px(0.));
+        move_to(&mut r, 600., 400.);
+        assert!(exit_drawn(&mut r), "the hover button");
+    }
+
+    /// The right-click entry "Show status line" toggles `performance.compact_status_line`, which
+    /// is saved, and the line follows it both ways.
+    #[gpui_kit::test]
+    fn compact_status_line_toggles_from_the_page_menu(cx: &mut TestAppContext) {
+        let mut r = open_compact(cx, true);
+        assert!(line_check(&mut r), "checked while on");
+        r.vcx
+            .dispatch_action(ToggleSetting(SettingKey::PerformanceCompactStatusLine));
+        draw(r.vcx);
+        assert!(
+            !r.vcx
+                .update(|_, cx| TlSettings::settings(cx).performance.compact_status_line),
+            "off"
+        );
+        assert!(r.vcx.debug_bounds(BAR_ID).is_none(), "the line goes");
+        assert_eq!(
+            r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page").top(),
+            px(0.)
+        );
+        assert!(!line_check(&mut r), "unchecked while off");
+        r.vcx
+            .dispatch_action(ToggleSetting(SettingKey::PerformanceCompactStatusLine));
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds(BAR_ID).is_some(), "the line is back");
+        assert!(r.vcx.debug_bounds(THIN_EXIT_ID).is_some());
     }
 }

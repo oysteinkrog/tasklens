@@ -2,6 +2,10 @@
 //! on, which hides the menu bar, the tab strip and the Performance sidebar and shows the
 //! Performance tab. F11, the exit button and the page menu entry turn it off, and the sidebar
 //! comes back as it was. `state.window.compact_view` keeps it across a restart.
+//!
+//! The thin status line of compact view (tasklens-i5cj4): on by default, with its own exit
+//! button; `performance.compact_status_line` turns it off from Settings, the View menu and the
+//! page menu, and the hover exit button then takes over.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -26,11 +30,12 @@ use tl_ui::window::titlebar::TitleBarProbe;
 use tl_ui_base::demand::{DemandAggregator, GlobalDemand};
 use tl_ui_base::hub::{GlobalHub, SnapshotHub};
 use tl_ui_base::i18n::init_strings;
-use tl_ui_base::settings_global::TlSettings;
-use tl_ui_kit::actions::{SelectTab, ToggleCompactView};
+use tl_ui_base::settings_global::{SettingKey, TlSettings};
+use tl_ui_kit::actions::{SelectTab, ToggleCompactView, ToggleSetting};
 use tl_ui_kit::components::kv_grid;
 use tl_ui_kit::components::menu::{TlMenuPopup, open_context_menu};
 use tl_ui_perf::performance::overview::OVERVIEW_KEY;
+use tl_ui_perf::performance::status_bar::{BAR_ID, THIN_EXIT_ID};
 use tl_ui_perf::performance::{COMPACT_EXIT_ID, PAGE_PANEL_ID, PerformancePage};
 use tl_ui_settings::settings::{
     AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
@@ -72,6 +77,8 @@ struct Rig<'a> {
     main: Entity<MainWindow>,
     /// `state.window.compact_view` of every persisted state.
     persisted: Rc<RefCell<Vec<bool>>>,
+    /// `performance.compact_status_line` of every persisted settings file.
+    persisted_line: Rc<RefCell<Vec<bool>>>,
     vcx: &'a mut VisualTestContext,
 }
 
@@ -88,8 +95,15 @@ fn draw(cx: &mut VisualTestContext) {
 /// The main window at 1280 × 800 from `state`, under client decorations when `client`, with
 /// reduced motion so the sidebar and the exit button change at once. The Processes tab is a
 /// fake page and the Overview card is hidden (D-022), so the Performance tab opens on CPU.
+/// Compact view's status line is on, as by default.
 fn open(cx: &mut TestAppContext, state: UiState, client: bool) -> Rig<'_> {
+    open_with(cx, state, client, true)
+}
+
+/// [`open`] with `performance.compact_status_line` set to `line`.
+fn open_with(cx: &mut TestAppContext, state: UiState, client: bool, line: bool) -> Rig<'_> {
     let mut settings = Settings::default();
+    settings.performance.compact_status_line = line;
     // Instant tab switches (E20-021).
     settings.motion.tab_switch_ms = 0;
     settings
@@ -108,7 +122,9 @@ fn open(cx: &mut TestAppContext, state: UiState, client: bool) -> Rig<'_> {
     });
     let client_arc: Arc<dyn EngineClient> = engine;
     let persisted: Rc<RefCell<Vec<bool>>> = Rc::default();
+    let persisted_line: Rc<RefCell<Vec<bool>>> = Rc::default();
     let seen = Rc::clone(&persisted);
+    let seen_line = Rc::clone(&persisted_line);
     cx.update(|cx| {
         gpui_kit::init(cx);
         cx.set_reduce_motion(true);
@@ -125,8 +141,11 @@ fn open(cx: &mut TestAppContext, state: UiState, client: bool) -> Rig<'_> {
         cx.set_global(BootSettings {
             settings,
             state,
-            persist: Some(Box::new(move |_, state| {
-                seen.borrow_mut().push(state.window.compact_view)
+            persist: Some(Box::new(move |settings, state| {
+                seen.borrow_mut().push(state.window.compact_view);
+                seen_line
+                    .borrow_mut()
+                    .push(settings.performance.compact_status_line);
             })),
             startup_toasts: Vec::new(),
         });
@@ -137,6 +156,7 @@ fn open(cx: &mut TestAppContext, state: UiState, client: bool) -> Rig<'_> {
         cx.set_global(GlobalDemand(demand));
         tl_ui_kit::components::toast::init(cx);
         tl_ui_kit::actions::bind_keys_global(cx);
+        tl_ui_kit::actions::register_global_handlers(cx);
         tl_ui_kit::components::menu::bind_keys(cx);
         tl_ui_perf::performance::actions::bind_keys_performance(cx);
         cx.set_global(StartOptions::default());
@@ -161,8 +181,14 @@ fn open(cx: &mut TestAppContext, state: UiState, client: bool) -> Rig<'_> {
     Rig {
         main,
         persisted,
+        persisted_line,
         vcx,
     }
+}
+
+fn line_on(r: &mut Rig) -> bool {
+    r.vcx
+        .update(|_, cx| TlSettings::settings(cx).performance.compact_status_line)
 }
 
 fn compact(r: &mut Rig) -> bool {
@@ -217,7 +243,8 @@ fn assert_normal(r: &mut Rig) {
 }
 
 /// Compact view under client decorations: the title bar without menus, no tab strip, the
-/// Performance tab without its sidebar, its page right of the expand strip and under the bar.
+/// Performance tab without its sidebar, its page right of the expand strip and under the bar,
+/// or under the 20 px status line while that is on.
 fn assert_compact(r: &mut Rig) {
     assert!(compact(r));
     assert_eq!(active(r), Tab::Performance);
@@ -225,8 +252,21 @@ fn assert_compact(r: &mut Rig) {
     assert!(!drawn(r, "TitleBarMenu"), "no menu bar");
     assert!(!drawn(r, "TabStrip"), "no tab strip");
     assert!(!sidebar_visible(r), "no sidebar");
+    let line = if line_on(r) {
+        let bar = r.vcx.debug_bounds(BAR_ID).expect("the status line");
+        assert_eq!(bar.top(), px(34.), "the line right under the title bar");
+        assert!(bar.size.height <= px(22.), "{:?}", bar.size);
+        bar.size.height
+    } else {
+        assert!(!drawn(r, BAR_ID), "no status line");
+        px(0.)
+    };
     let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page panel");
-    assert_eq!(page.top(), px(34.), "right under the title bar");
+    assert_eq!(
+        page.top(),
+        px(34.) + line,
+        "right under the title bar or the line"
+    );
     assert_eq!(page.bottom(), px(800.), "to the bottom");
     assert_eq!(page.left(), px(12.), "right of the expand strip");
     assert_eq!(page.right(), px(1280.));
@@ -278,11 +318,11 @@ fn f11_exits_with_the_previous_sidebar_state(cx: &mut TestAppContext) {
     assert!(!sidebar_visible(&mut r), "hidden, as before");
 }
 
-/// The exit button in the top-right corner: none until the mouse moves, and a click on it
-/// ends compact view.
+/// Without the status line, the exit button in the top-right corner: none until the mouse
+/// moves, and a click on it ends compact view.
 #[gpui_kit::test]
 fn exit_button_ends_compact_view(cx: &mut TestAppContext) {
-    let mut r = open(cx, UiState::default(), true);
+    let mut r = open_with(cx, UiState::default(), true, false);
     press(&mut r, "f11");
     assert_compact(&mut r);
     assert!(!drawn(&mut r, COMPACT_EXIT_ID), "no button before a move");
@@ -297,11 +337,12 @@ fn exit_button_ends_compact_view(cx: &mut TestAppContext) {
     assert!(!drawn(&mut r, COMPACT_EXIT_ID));
 }
 
-/// The exit button follows the mouse over the whole window: a move over the client title bar,
-/// which compact view keeps, shows it, and leaving the window from there hides it.
+/// Without the status line, the exit button follows the mouse over the whole window: a move
+/// over the client title bar, which compact view keeps, shows it, and leaving the window from
+/// there hides it.
 #[gpui_kit::test]
 fn exit_button_shows_on_a_title_bar_move(cx: &mut TestAppContext) {
-    let mut r = open(cx, UiState::default(), true);
+    let mut r = open_with(cx, UiState::default(), true, false);
     press(&mut r, "f11");
     assert_compact(&mut r);
     assert!(!drawn(&mut r, COMPACT_EXIT_ID), "no button before a move");
@@ -372,8 +413,8 @@ fn compact_view_restored_at_start(cx: &mut TestAppContext) {
     assert_normal(&mut r);
 }
 
-/// Under server decorations compact view leaves out the whole menu row: the page starts at the
-/// top of the window.
+/// Under server decorations compact view leaves out the whole menu row: the status line is at
+/// the top of the window, at most 22 px high, with the page under it.
 #[gpui_kit::test]
 fn server_decorations_drop_the_menu_row(cx: &mut TestAppContext) {
     let mut r = open(cx, UiState::default(), false);
@@ -382,10 +423,110 @@ fn server_decorations_drop_the_menu_row(cx: &mut TestAppContext) {
     assert!(compact(&mut r));
     assert!(!drawn(&mut r, "TitleBar"), "no menu row");
     assert!(!drawn(&mut r, "TabStrip"));
+    let bar = r.vcx.debug_bounds(BAR_ID).expect("the status line");
+    assert_eq!(bar.top(), px(0.));
+    assert!(bar.size.height <= px(22.), "{:?}", bar.size);
+    let exit = r.vcx.debug_bounds(THIN_EXIT_ID).expect("its exit button");
+    assert!(
+        exit.right() <= px(1280.) && exit.right() >= px(1272.),
+        "{exit:?}"
+    );
     let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page panel");
-    assert_eq!(page.top(), px(0.));
+    assert_eq!(page.top(), bar.bottom());
     press(&mut r, "f11");
     assert!(drawn(&mut r, "TitleBar"), "back");
+}
+
+/// With the status line off, compact view under server decorations draws no line and the page
+/// starts at the top edge of the window (tasklens-i5cj4).
+#[gpui_kit::test]
+fn status_line_off_page_at_the_top_edge(cx: &mut TestAppContext) {
+    let mut r = open_with(cx, UiState::default(), false, false);
+    press(&mut r, "f11");
+    assert!(compact(&mut r));
+    assert!(!drawn(&mut r, BAR_ID), "no status line");
+    assert!(!drawn(&mut r, THIN_EXIT_ID));
+    let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page panel");
+    assert_eq!(page.top(), px(0.));
+}
+
+/// The line's exit button is drawn without a mouse move, and a click on it ends compact view.
+#[gpui_kit::test]
+fn status_line_exit_button_ends_compact_view(cx: &mut TestAppContext) {
+    let mut r = open(cx, UiState::default(), true);
+    press(&mut r, "f11");
+    assert_compact(&mut r);
+    let b = r
+        .vcx
+        .debug_bounds(THIN_EXIT_ID)
+        .expect("the line's exit button");
+    assert!(!drawn(&mut r, COMPACT_EXIT_ID), "no hover button");
+    r.vcx.simulate_click(b.center(), Modifiers::none());
+    draw(r.vcx);
+    assert_normal(&mut r);
+    assert!(!drawn(&mut r, THIN_EXIT_ID));
+}
+
+/// View > "Show status line in compact view" shows only while compact view is on, checked from
+/// `performance.compact_status_line`, and runs `ToggleSetting` for it. Off, the line goes, the
+/// setting is saved, and a restart keeps compact view without the line (tasklens-i5cj4).
+#[gpui_kit::test]
+fn view_menu_status_line_toggle_is_saved(cx: &mut TestAppContext) {
+    let mut r = open(cx, UiState::default(), true);
+    let label = "Show status line in compact view";
+    assert!(view_item(&mut r, label).is_none(), "absent in normal view");
+    press(&mut r, "escape f11");
+    assert_compact(&mut r);
+    let item = view_item(&mut r, label).expect("present in compact view");
+    assert!(item.checked, "on by default");
+    assert!(item.action.as_ref().is_some_and(|a| a.partial_eq(&ToggleSetting(
+        SettingKey::PerformanceCompactStatusLine
+    ))));
+    // Run it from the open menu: "Show sidebar" is last, this item is above it.
+    press(&mut r, "end up enter");
+    assert!(!line_on(&mut r), "off");
+    assert_eq!(
+        r.persisted_line.borrow().last(),
+        Some(&false),
+        "settings.toml written"
+    );
+    assert_compact(&mut r);
+    assert!(!drawn(&mut r, BAR_ID));
+    let item = view_item(&mut r, label).expect("still listed");
+    assert!(!item.checked, "unchecked while off");
+}
+
+/// The saved choice at start: compact view without its line comes back without it.
+#[gpui_kit::test]
+fn status_line_off_restored_at_start(cx: &mut TestAppContext) {
+    let mut state = UiState::default();
+    state.window.compact_view = true;
+    let mut r = open_with(cx, state, true, false);
+    assert_compact(&mut r);
+    assert!(!drawn(&mut r, BAR_ID));
+    r.vcx
+        .dispatch_action(ToggleSetting(SettingKey::PerformanceCompactStatusLine));
+    draw(r.vcx);
+    assert_compact(&mut r);
+    assert!(drawn(&mut r, BAR_ID), "turned on again");
+}
+
+/// Opens the View menu with Alt+V and returns the item labelled `label`, if any. The menu
+/// stays open.
+fn view_item(r: &mut Rig, label: &str) -> Option<tl_ui_kit::components::menu::MenuEntryInfo> {
+    press(r, "alt-v");
+    let bar = r
+        .vcx
+        .update(|window, cx| menu_bar_for(window.window_handle().window_id(), cx))
+        .expect("menu bar");
+    r.vcx.update(|window, cx| {
+        let popup = bar.read(cx).popup().expect("View open").clone();
+        popup
+            .read(cx)
+            .entries_for_test(window)
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some(label))
+    })
 }
 
 /// A jump or a key that shows another tab ends compact view, so that tab has its tab strip.

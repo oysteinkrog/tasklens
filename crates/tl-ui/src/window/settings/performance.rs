@@ -172,6 +172,13 @@ pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
         tr(cx, "shell-settings-perf-status-bar"),
         &status_bar,
     );
+    // tasklens-i5cj4: the thin status line of compact view.
+    page.switch(
+        overview.clone(),
+        SettingKey::PerformanceCompactStatusLine,
+        tr(cx, "shell-settings-perf-compact-status-line"),
+        None,
+    );
     // UI-PRF-055.
     let range = options(
         cx,
