@@ -974,8 +974,8 @@ mod delegate {
         assert_eq!(SHIPPED_PHASE, 4);
         assert_eq!(process_column(ColumnId::Version).phase, 2);
         assert!(offered.contains(&ColumnId::Version));
-        assert!(!offered.contains(&ColumnId::PageTables));
-        assert!(!d.columns().order.contains(&ColumnId::PageTables));
+        assert!(!offered.contains(&ColumnId::IoReadBytes));
+        assert!(!d.columns().order.contains(&ColumnId::IoReadBytes));
         assert!(offered.contains(&ColumnId::Cpu));
 
         // No GPU: no slot.
@@ -1018,6 +1018,10 @@ mod delegate {
             ColumnId::OomScoreAdj,
             ColumnId::Tty,
             ColumnId::Cwd,
+            ColumnId::CommitPeak,
+            ColumnId::CommitDelta,
+            ColumnId::PageTables,
+            ColumnId::MajorFaultsDelta,
         ];
         for id in listed {
             assert!(offered.contains(&id), "{id:?} not offered");
@@ -1038,10 +1042,6 @@ mod delegate {
     fn no_source_columns_not_offered(cx: &mut TestAppContext) {
         setup(cx);
         let parked = [
-            ColumnId::CommitPeak,
-            ColumnId::CommitDelta,
-            ColumnId::PageTables,
-            ColumnId::MajorFaultsDelta,
             ColumnId::IoReadBytes,
             ColumnId::IoWriteBytes,
             ColumnId::IoReadDelta,

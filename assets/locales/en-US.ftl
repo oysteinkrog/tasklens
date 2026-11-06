@@ -1206,6 +1206,7 @@ processes-column-ws-peak = Working set peak
 processes-column-ws-shared = Working set shared
 processes-column-commit = Commit size
 processes-column-commit-peak = Commit size peak
+processes-column-commit-peak-tooltip = Peak seen by tasklens
 processes-column-commit-delta = Commit size delta
 processes-column-vsize = Virtual size
 processes-column-vsize-peak = Virtual size peak

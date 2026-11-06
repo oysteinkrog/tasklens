@@ -266,6 +266,7 @@ const fn header_tooltip(id: ColumnId) -> Option<&'static str> {
         ColumnId::WsTotal => Some("processes-column-ws-total-tooltip"),
         ColumnId::Network => Some("processes-column-network-tooltip"),
         ColumnId::Handles => Some("processes-column-handles-tooltip"),
+        ColumnId::CommitPeak => Some("processes-column-commit-peak-tooltip"),
         _ => None,
     }
 }
@@ -339,15 +340,15 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::WsPeak, "processes-column-ws-peak", Group::Memory, Kind::MemorySize, Heat::Memory, 1),
     col(Id::WsShared, "processes-column-ws-shared", Group::Memory, Kind::MemorySize, Heat::Memory, 1),
     col(Id::Commit, "processes-column-commit", Group::Memory, Kind::MemorySize, Heat::Memory, 1),
-    col(Id::CommitPeak, "processes-column-commit-peak", Group::Memory, Kind::MemorySize, Heat::Memory, NO_SOURCE),
-    col(Id::CommitDelta, "processes-column-commit-delta", Group::Memory, Kind::MemorySize, Heat::Memory, NO_SOURCE),
+    col(Id::CommitPeak, "processes-column-commit-peak", Group::Memory, Kind::MemorySize, Heat::Memory, 2),
+    col(Id::CommitDelta, "processes-column-commit-delta", Group::Memory, Kind::MemorySize, Heat::Memory, 2),
     col(Id::Vsize, "processes-column-vsize", Group::Memory, Kind::MemorySize, Heat::Memory, 1),
     col(Id::VsizePeak, "processes-column-vsize-peak", Group::Memory, Kind::MemorySize, Heat::Memory, 1),
-    col(Id::PageTables, "processes-column-page-tables", Group::Memory, Kind::MemorySize, Heat::Memory, NO_SOURCE),
+    col(Id::PageTables, "processes-column-page-tables", Group::Memory, Kind::MemorySize, Heat::Memory, 2),
     col(Id::PageFaults, "processes-column-page-faults", Group::Memory, Kind::Count, Heat::None, 1),
     col(Id::PageFaultsDelta, "processes-column-page-faults-delta", Group::Memory, Kind::Count, Heat::None, 1),
     col(Id::MajorFaults, "processes-column-major-faults", Group::Memory, Kind::Count, Heat::None, 2),
-    col(Id::MajorFaultsDelta, "processes-column-major-faults-delta", Group::Memory, Kind::Count, Heat::None, NO_SOURCE),
+    col(Id::MajorFaultsDelta, "processes-column-major-faults-delta", Group::Memory, Kind::Count, Heat::None, 2),
     col(Id::Swap, "processes-column-swap", Group::Memory, Kind::MemorySize, Heat::Memory, 1),
     col(Id::Pss, "processes-column-pss", Group::Memory, Kind::MemorySize, Heat::Memory, 2),
     col(Id::Uss, "processes-column-uss", Group::Memory, Kind::MemorySize, Heat::Memory, 2),
@@ -698,6 +699,8 @@ enum Value<'a> {
     Cmdline(&'a Arc<str>),
     Percent(f32, Validity),
     Bytes(u64, Validity),
+    /// A signed change in bytes: "-1.50 MiB", "+" is not written.
+    BytesSigned(i64, Validity),
     DiskRate(f32, Validity),
     NetRate(f32, Validity),
     Count(u64, Validity),
@@ -856,6 +859,7 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
             (u64::from(p.to_bits()), *v)
         }
         Value::Bytes(n, v) | Value::Count(n, v) => (*n, *v),
+        Value::BytesSigned(n, v) => (*n as u64, *v),
         Value::Duration(n) => (*n, Validity::Valid),
         Value::Id(n) | Value::Time(n) => (*n as u64, Validity::Valid),
         Value::Pid { pid, plus } => (u64::from(*pid) | u64::from(*plus) << 32, Validity::Valid),
@@ -909,6 +913,12 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
         }
         Value::Percent(p, _) => units::percent(s, p),
         Value::Bytes(n, _) => units::bytes(s, n),
+        Value::BytesSigned(n, _) => {
+            if n < 0 {
+                s.push('-');
+            }
+            units::bytes(s, n.unsigned_abs());
+        }
         Value::DiskRate(bps, _) => units::rate_mib_fixed(s, f64::from(bps)),
         Value::NetRate(bps, _) => {
             let unit = match ctx.settings.units.network {
@@ -1191,6 +1201,14 @@ fn record_value<'a>(
         C::WsPeak => extra(&|x| Value::Bytes(x.rss_peak_bytes, Validity::Valid)),
         C::WsShared => extra(&|x| Value::Bytes(x.rss_shared_bytes, Validity::Valid)),
         C::Commit => extra(&|x| Value::Bytes(x.commit_bytes, Validity::Valid)),
+        C::CommitPeak => extra(&|x| Value::Bytes(x.counters.commit_peak_bytes, Validity::Valid)),
+        C::CommitDelta => {
+            extra(&|x| Value::BytesSigned(x.counters.commit_delta_bytes, Validity::Valid))
+        }
+        C::PageTables => extra(&|x| Value::Bytes(x.counters.page_tables_bytes, Validity::Valid)),
+        C::MajorFaultsDelta => {
+            extra(&|x| Value::Count(x.counters.major_faults_delta, Validity::Valid))
+        }
         C::Vsize => extra(&|x| Value::Bytes(x.vsize_bytes, Validity::Valid)),
         C::VsizePeak => extra(&|x| Value::Bytes(x.vsize_peak_bytes, Validity::Valid)),
         C::PageFaults => extra(&|x| Value::Count(x.page_faults, Validity::Valid)),
@@ -1409,6 +1427,13 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
         C::CpuTimeKernel => cpu_time(g.stime_ticks),
         C::CpuTimeUser => cpu_time(g.utime_ticks),
         C::Commit => sum(Value::Bytes(g.commit_bytes, Validity::Valid)),
+        C::CommitPeak => Value::Blank,
+        C::CommitDelta => sum(Value::BytesSigned(
+            g.counters.commit_delta_bytes,
+            Validity::Valid,
+        )),
+        C::PageTables => sum(Value::Bytes(g.counters.page_tables_bytes, Validity::Valid)),
+        C::MajorFaultsDelta => sum(Value::Count(g.counters.major_faults_delta, Validity::Valid)),
         C::PageFaults => sum(Value::Count(g.page_faults, Validity::Valid)),
         C::PageFaultsDelta => sum(Value::Count(g.page_faults_delta, Validity::Valid)),
         C::MajorFaults => sum(Value::Count(g.major_faults, Validity::Valid)),

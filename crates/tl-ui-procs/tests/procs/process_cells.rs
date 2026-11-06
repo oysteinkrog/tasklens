@@ -1079,6 +1079,71 @@ mod values {
         }
     }
 
+    /// tasklens-pdu.79: commit peak, commit delta, page tables and major faults delta.
+    #[test]
+    fn memory_counter_columns_process_and_group_rows() {
+        use tl_model::process::ProcCounters;
+        use tl_ui_procs::pages::processes::cells::PROCESS_COLUMNS;
+        use tl_ui_procs::pages::processes::delegate::SHIPPED_PHASE;
+
+        let cols = [
+            ColumnId::CommitPeak,
+            ColumnId::CommitDelta,
+            ColumnId::PageTables,
+            ColumnId::MajorFaultsDelta,
+        ];
+        for id in cols {
+            let c = PROCESS_COLUMNS.iter().find(|c| c.id == id).unwrap();
+            assert_eq!(c.phase, 2, "{id:?}");
+            assert!(c.phase <= SHIPPED_PHASE, "{id:?}");
+        }
+
+        let counters = ProcCounters {
+            commit_peak_bytes: 3 << 20,
+            commit_delta_bytes: -(3 << 19),
+            page_tables_bytes: 8192,
+            major_faults_delta: 1_234,
+            ..ProcCounters::default()
+        };
+        let mut f = Fixture::new(record(), key_words());
+        f.extras[0].counters = counters;
+        assert_eq!(f.text(ColumnId::CommitPeak), "3.00 MiB");
+        assert_eq!(f.text(ColumnId::CommitDelta), "-1.50 MiB");
+        assert_eq!(f.text(ColumnId::PageTables), "8.00 KiB");
+        assert_eq!(f.text(ColumnId::MajorFaultsDelta), "1,234");
+
+        // A growth has no sign; zero reads "0 B".
+        f.extras[0].counters.commit_delta_bytes = 2048;
+        assert_eq!(f.text(ColumnId::CommitDelta), "2.00 KiB");
+        f.extras[0].counters.commit_delta_bytes = 0;
+        assert_eq!(f.text(ColumnId::CommitDelta), "0 B");
+
+        // Group rows show the sums, and the peak stays blank.
+        let mut g = group(GroupRowKind::App);
+        g.counters = ProcCounters {
+            commit_peak_bytes: 9 << 20,
+            commit_delta_bytes: -(1 << 20),
+            page_tables_bytes: 16384,
+            major_faults_delta: 7,
+            ..ProcCounters::default()
+        };
+        let cell = |id| shown(&f.group_cell(&g, RowKind::Process, id));
+        assert_eq!(cell(ColumnId::CommitPeak), "");
+        assert_eq!(cell(ColumnId::CommitDelta), "-1.00 MiB");
+        assert_eq!(cell(ColumnId::PageTables), "16.00 KiB");
+        assert_eq!(cell(ColumnId::MajorFaultsDelta), "7");
+    }
+
+    #[gpui_kit::test]
+    fn commit_peak_header_tooltip(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            init_strings(cx, "en-US");
+            let key = process_column(ColumnId::CommitPeak).header_tooltip.unwrap();
+            use tl_ui_base::i18n::tr;
+            assert_eq!(tr(cx, key), "Peak seen by tasklens");
+        });
+    }
+
     #[test]
     fn p2_group_rows_stay_blank() {
         let f = p2_fixture(ProcessExtrasP2::default());
