@@ -43,11 +43,12 @@ use std::cell::Cell;
 
 use gpui_kit::component::{ResizableState, h_flex, h_resizable, resizable_panel};
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, AnyView, App, AppContext as _, AsyncApp,
-    ClipboardItem, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Point, Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Subscription, WeakEntity, Window, div, px, radians,
+    Animation, AnimationExt as _, AnyElement, AnyView, App, AppContext as _, AsyncApp, Bounds,
+    ClipboardItem, Context, Div, Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
+    radians,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -886,7 +887,16 @@ impl PerformancePage {
                 .action(&PerfToggleSidebar, Some(&focus))
                 .view(cx)
         };
-        HoverTooltip::attach(&state, target, DELAY_CONTROL, build, window, cx).into_any_element()
+        let target = HoverTooltip::attach(&state, target, DELAY_CONTROL, build, window, cx);
+        // The split's resize handle is the page panel's last child and reaches 4 px left of
+        // the panel, over the arrow's and the strip's right edge. Drawn after the split, the
+        // whole 12 px take the hover and the click. While the width animates the target stays
+        // in the tree, inside the clip box that a deferred hitbox would escape.
+        if self.anim.is_some() {
+            target.into_any_element()
+        } else {
+            AboveSplit(Some(target.into_any_element())).into_any_element()
+        }
     }
 
     /// The collapse arrow: a 12 × 32 tab on the sidebar's right edge, centred on its height.
@@ -930,6 +940,71 @@ impl PerformancePage {
             window,
             cx,
         )
+    }
+}
+
+/// Draws its child after the rest of the window at deferred priority 0, inside the clip it
+/// was laid out in (tasklens-o5853). Layout stays in the tree, as with GPUI's `deferred`.
+/// Menus and tooltips use higher priorities, so they still draw over it.
+struct AboveSplit(Option<AnyElement>);
+
+impl IntoElement for AboveSplit {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for AboveSplit {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let child = self.0.as_mut().expect("laid out once per frame");
+        (child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        _: &mut App,
+    ) {
+        if let Some(child) = self.0.take() {
+            let offset = window.element_offset();
+            let mask = window.content_mask();
+            window.defer_draw(child, offset, 0, Some(mask));
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        _: &mut Window,
+        _: &mut App,
+    ) {
     }
 }
 

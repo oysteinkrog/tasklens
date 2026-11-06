@@ -1486,7 +1486,8 @@ mod tab {
         assert_eq!(sidebar.size.width, px(400.), "500 is clamped to 400");
 
         let boundary = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page").left();
-        let y = px(400.);
+        // Above the collapse arrow, which covers the handle at 384..416.
+        let y = px(200.);
         r.vcx.simulate_mouse_down(
             point(boundary - px(2.), y),
             MouseButton::Left,
@@ -1634,6 +1635,40 @@ mod tab {
             (Some(key(DeviceKey::MEMORY)), Some(key(DeviceKey::MEMORY))),
             "the same card stays selected"
         );
+    }
+
+    /// The arrow's and the strip's rightmost pixel take the click too: the split's resize
+    /// handle reaches 4 px left of the page panel, over both (tasklens-o5853 review).
+    #[gpui_kit::test]
+    fn collapse_arrow_and_expand_strip_right_edge_clicks(cx: &mut TestAppContext) {
+        let mut r = open(cx, UiState::default(), 16, 1280., 800.);
+        let arrow = r.vcx.debug_bounds(SIDEBAR_COLLAPSE_ID).expect("arrow");
+        let boundary = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page").left();
+        assert_eq!(
+            arrow.right(),
+            boundary,
+            "the arrow ends where the handle's band begins"
+        );
+        let at = point(arrow.right() - px(0.5), arrow.center().y);
+        r.vcx.simulate_click(at, Modifiers::none());
+        draw(r.vcx);
+        r.vcx.executor().advance_clock(Duration::from_millis(250));
+        draw(r.vcx);
+        assert!(!sidebar_visible(&mut r), "hidden by the arrow's right edge");
+        assert_eq!(persisted_hidden(&r), Some(true));
+        let width = r
+            .vcx
+            .update(|_, cx| TlSettings::state(cx).performance.nav_width);
+        assert_eq!(width, UiState::default().performance.nav_width, "no resize");
+
+        let strip = r.vcx.debug_bounds(SIDEBAR_EXPAND_ID).expect("strip");
+        let at = point(strip.right() - px(0.5), strip.center().y);
+        r.vcx.simulate_click(at, Modifiers::none());
+        draw(r.vcx);
+        r.vcx.executor().advance_clock(Duration::from_millis(250));
+        draw(r.vcx);
+        assert!(sidebar_visible(&mut r), "shown by the strip's right edge");
+        assert_eq!(persisted_hidden(&r), Some(false));
     }
 
     /// A saved hidden sidebar stays hidden at the next start (tasklens-o5853).
