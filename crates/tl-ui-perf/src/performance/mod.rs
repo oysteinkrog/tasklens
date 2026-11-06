@@ -832,12 +832,14 @@ impl PerformancePage {
 
     /// A click target that toggles the sidebar: `id` as element id and debug selector, 12 px
     /// wide, the toolbar fill with a divider border that `style` places, the hover fill, an
-    /// arrow and a tooltip with the F9 hint (tasklens-o5853). Not a Tab stop: F9, Ctrl+T and
-    /// View > Show sidebar are the keyboard paths.
+    /// arrow that points left when `left`, and a tooltip `tip` with the F9 hint
+    /// (tasklens-o5853). Not a Tab stop: F9, Ctrl+T and View > Show sidebar are the keyboard
+    /// paths.
     fn sidebar_toggle(
         &self,
         id: &'static str,
         tip: &'static str,
+        left: bool,
         style: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -845,8 +847,7 @@ impl PerformancePage {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let arrow = icon(TlIcon::ChevronRight, m.icon.xs, theme.text_secondary);
-        // Points left while the arrow hides the sidebar, right while the strip shows it.
-        let arrow = if self.sidebar_visible {
+        let arrow = if left {
             arrow.rotate(radians(std::f32::consts::PI))
         } else {
             arrow
@@ -870,9 +871,14 @@ impl PerformancePage {
             .child(arrow);
         let target = style(target);
         let state = HoverTooltip::state(id, window, cx);
-        let text = TlTooltip::text(tr(cx, tip)).action(&PerfToggleSidebar, Some(&self.focus));
-        HoverTooltip::attach(&state, target, DELAY_CONTROL, text.build(), window, cx)
-            .into_any_element()
+        let focus = self.focus.clone();
+        // The words are looked up when the tooltip opens, not on each render.
+        let build = move |_: &mut Window, cx: &mut App| {
+            TlTooltip::text(tr(cx, tip))
+                .action(&PerfToggleSidebar, Some(&focus))
+                .view(cx)
+        };
+        HoverTooltip::attach(&state, target, DELAY_CONTROL, build, window, cx).into_any_element()
     }
 
     /// The collapse arrow: a 12 × 32 tab on the sidebar's right edge, centred on its height.
@@ -882,6 +888,7 @@ impl PerformancePage {
         let tab = self.sidebar_toggle(
             SIDEBAR_COLLAPSE_ID,
             "perf-sidebar-hide",
+            true,
             |el| {
                 el.h(px(COLLAPSE_H * m.ui_scale))
                     .border_l(line)
@@ -910,6 +917,7 @@ impl PerformancePage {
         self.sidebar_toggle(
             SIDEBAR_EXPAND_ID,
             "perf-sidebar-show",
+            false,
             |el| el.h_full().border_r(line),
             window,
             cx,
