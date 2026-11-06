@@ -1034,12 +1034,13 @@ mod wired {
             let sidebar = sidebar_entity.read(cx);
             for card in sidebar.cards() {
                 let want = match card.row.kind {
-                    DeviceKind::Overview | DeviceKind::Cpu => Some(theme.graph.cpu_line),
+                    DeviceKind::Cpu => Some(theme.graph.cpu_line),
                     DeviceKind::Memory => Some(theme.graph.mem_line),
                     DeviceKind::Gpu => Some(theme.graph.gpu_line),
                     DeviceKind::Disk => Some(theme.graph.disk_line),
                     DeviceKind::Net => Some(theme.graph.net_line),
-                    DeviceKind::Fan
+                    DeviceKind::Overview
+                    | DeviceKind::Fan
                     | DeviceKind::Battery
                     | DeviceKind::AggregateDisk
                     | DeviceKind::AggregateGpu => None,
