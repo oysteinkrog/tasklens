@@ -16,8 +16,8 @@ use tl_model::actions::{IoPriority, SchedPolicy};
 use tl_model::details::Elevated;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, PseudoKind};
 use tl_model::process::{
-    GroupKind, GroupRow, GroupRowKind, PackageStatus, ProcFlags, ProcState, ProcessExtras,
-    ProcessExtrasP2, ProcessRecord,
+    GroupKind, GroupRow, GroupRowKind, PackageStatus, ProcCounters, ProcFlags, ProcState,
+    ProcessExtras, ProcessExtrasP2, ProcessRecord,
 };
 use tl_model::snapshot::{Snapshot, WindowsSnapshot};
 use tl_model::system::{CpuSet, Metric, ZramTotals};
@@ -267,6 +267,7 @@ const fn header_tooltip(id: ColumnId) -> Option<&'static str> {
         ColumnId::Network => Some("processes-column-network-tooltip"),
         ColumnId::Handles => Some("processes-column-handles-tooltip"),
         ColumnId::CommitPeak => Some("processes-column-commit-peak-tooltip"),
+        ColumnId::IoReadBytes => Some("processes-column-io-read-bytes-tooltip"),
         _ => None,
     }
 }
@@ -352,14 +353,14 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::Swap, "processes-column-swap", Group::Memory, Kind::MemorySize, Heat::Memory, 1),
     col(Id::Pss, "processes-column-pss", Group::Memory, Kind::MemorySize, Heat::Memory, 2),
     col(Id::Uss, "processes-column-uss", Group::Memory, Kind::MemorySize, Heat::Memory, 2),
-    col(Id::IoReadBytes, "processes-column-io-read-bytes", Group::Io, Kind::BytesCumulative, Heat::None, NO_SOURCE),
-    col(Id::IoWriteBytes, "processes-column-io-write-bytes", Group::Io, Kind::BytesCumulative, Heat::None, NO_SOURCE),
-    col(Id::IoReadDelta, "processes-column-io-read-delta", Group::Io, Kind::BytesCumulative, Heat::None, NO_SOURCE),
-    col(Id::IoWriteDelta, "processes-column-io-write-delta", Group::Io, Kind::BytesCumulative, Heat::None, NO_SOURCE),
-    col(Id::IoReadRate, "processes-column-io-read-rate", Group::Io, Kind::DiskRate, Heat::DiskIo, NO_SOURCE),
-    col(Id::IoWriteRate, "processes-column-io-write-rate", Group::Io, Kind::DiskRate, Heat::DiskIo, NO_SOURCE),
-    col(Id::IoReadOps, "processes-column-io-read-ops", Group::Io, Kind::Count, Heat::None, NO_SOURCE),
-    col(Id::IoWriteOps, "processes-column-io-write-ops", Group::Io, Kind::Count, Heat::None, NO_SOURCE),
+    col(Id::IoReadBytes, "processes-column-io-read-bytes", Group::Io, Kind::BytesCumulative, Heat::None, 2),
+    col(Id::IoWriteBytes, "processes-column-io-write-bytes", Group::Io, Kind::BytesCumulative, Heat::None, 2),
+    col(Id::IoReadDelta, "processes-column-io-read-delta", Group::Io, Kind::BytesCumulative, Heat::None, 2),
+    col(Id::IoWriteDelta, "processes-column-io-write-delta", Group::Io, Kind::BytesCumulative, Heat::None, 2),
+    col(Id::IoReadRate, "processes-column-io-read-rate", Group::Io, Kind::DiskRate, Heat::DiskIo, 2),
+    col(Id::IoWriteRate, "processes-column-io-write-rate", Group::Io, Kind::DiskRate, Heat::DiskIo, 2),
+    col(Id::IoReadOps, "processes-column-io-read-ops", Group::Io, Kind::Count, Heat::None, 2),
+    col(Id::IoWriteOps, "processes-column-io-write-ops", Group::Io, Kind::Count, Heat::None, 2),
     col(Id::Disk, "processes-column-disk", Group::Disk, Kind::DiskRate, Heat::DiskIo, 1),
     col(Id::DiskReadRate, "processes-column-disk-read-rate", Group::Disk, Kind::DiskRate, Heat::DiskIo, 1),
     col(Id::DiskWriteRate, "processes-column-disk-write-rate", Group::Disk, Kind::DiskRate, Heat::DiskIo, 1),
@@ -1227,6 +1228,17 @@ fn record_value<'a>(
                 pair(F::IoRead, F::IoWrite),
             )
         }),
+        // PROC-031 I/O counters
+        C::IoReadBytes
+        | C::IoWriteBytes
+        | C::IoReadDelta
+        | C::IoWriteDelta
+        | C::IoReadRate
+        | C::IoWriteRate
+        | C::IoReadOps
+        | C::IoWriteOps => extra(&|x| {
+            io_column(&x.counters, col, v(F::IoRead), v(F::IoWrite)).unwrap_or(Value::Blank)
+        }),
         // PROC-032 network
         C::Network => Value::NetRate(r.net_rx_bps + r.net_tx_bps, pair(F::NetRx, F::NetTx)),
         C::NetSendRate => Value::NetRate(r.net_tx_bps, v(F::NetTx)),
@@ -1344,6 +1356,44 @@ fn pseudo_na<'a>(g: &GroupRow, col: ColumnId, value: Value<'a>) -> Value<'a> {
     }
 }
 
+/// One I/O counter column (PROC-031). `Valid` totals need `io_read`; without it the cell shows
+/// the glyph of the record's validity, never 0. `warm` columns (delta, rate) keep the field
+/// validity (WarmingUp on the first interval) when the counters were read.
+fn io_value<'a>(
+    c: &ProcCounters,
+    validity: Validity,
+    warm: bool,
+    make: impl FnOnce(Validity) -> Value<'a>,
+) -> Value<'a> {
+    if c.io_read {
+        make(if warm { validity } else { Validity::Valid })
+    } else if validity == Validity::Valid {
+        Value::Glyph(Validity::Restricted)
+    } else {
+        Value::Glyph(validity)
+    }
+}
+
+fn io_column<'a>(
+    c: &ProcCounters,
+    col: ColumnId,
+    read: Validity,
+    write: Validity,
+) -> Option<Value<'a>> {
+    use ColumnId as C;
+    Some(match col {
+        C::IoReadBytes => io_value(c, read, false, |v| Value::Bytes(c.rchar, v)),
+        C::IoWriteBytes => io_value(c, write, false, |v| Value::Bytes(c.wchar, v)),
+        C::IoReadDelta => io_value(c, read, true, |v| Value::Bytes(c.rchar_delta, v)),
+        C::IoWriteDelta => io_value(c, write, true, |v| Value::Bytes(c.wchar_delta, v)),
+        C::IoReadRate => io_value(c, read, true, |v| Value::DiskRate(c.rchar_bps, v)),
+        C::IoWriteRate => io_value(c, write, true, |v| Value::DiskRate(c.wchar_bps, v)),
+        C::IoReadOps => io_value(c, read, false, |v| Value::Count(c.syscr, v)),
+        C::IoWriteOps => io_value(c, write, false, |v| Value::Count(c.syscw, v)),
+        _ => return None,
+    })
+}
+
 fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a> {
     use ColumnId as C;
     use ProcessField as F;
@@ -1427,6 +1477,16 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
         C::CpuTimeKernel => cpu_time(g.stime_ticks),
         C::CpuTimeUser => cpu_time(g.utime_ticks),
         C::Commit => sum(Value::Bytes(g.commit_bytes, Validity::Valid)),
+        C::IoReadBytes
+        | C::IoWriteBytes
+        | C::IoReadDelta
+        | C::IoWriteDelta
+        | C::IoReadRate
+        | C::IoWriteRate
+        | C::IoReadOps
+        | C::IoWriteOps => {
+            sum(io_column(&g.counters, col, v(F::IoRead), v(F::IoWrite)).unwrap_or(Value::Blank))
+        }
         C::CommitPeak => Value::Blank,
         C::CommitDelta => sum(Value::BytesSigned(
             g.counters.commit_delta_bytes,

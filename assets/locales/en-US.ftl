@@ -1219,6 +1219,7 @@ processes-column-swap = Swap
 processes-column-pss = PSS
 processes-column-uss = USS
 processes-column-io-read-bytes = I/O read bytes
+processes-column-io-read-bytes-tooltip = Counts all read syscalls, including cache hits, pipes and sockets
 processes-column-io-write-bytes = I/O write bytes
 processes-column-io-read-delta = I/O read bytes delta
 processes-column-io-write-delta = I/O write bytes delta

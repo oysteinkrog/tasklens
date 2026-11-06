@@ -1134,6 +1134,100 @@ mod values {
         assert_eq!(cell(ColumnId::MajorFaultsDelta), "7");
     }
 
+    /// tasklens-pdu.80: the eight I/O counter columns.
+    #[test]
+    fn io_counter_columns_process_and_group_rows() {
+        use tl_model::process::ProcCounters;
+        use tl_ui_procs::pages::processes::cells::PROCESS_COLUMNS;
+
+        let cols = [
+            ColumnId::IoReadBytes,
+            ColumnId::IoWriteBytes,
+            ColumnId::IoReadDelta,
+            ColumnId::IoWriteDelta,
+            ColumnId::IoReadRate,
+            ColumnId::IoWriteRate,
+            ColumnId::IoReadOps,
+            ColumnId::IoWriteOps,
+        ];
+        for id in cols {
+            assert_eq!(
+                PROCESS_COLUMNS.iter().find(|c| c.id == id).unwrap().phase,
+                2
+            );
+        }
+        let counters = ProcCounters {
+            io_read: true,
+            rchar: 3 << 20,
+            wchar: 2048,
+            rchar_delta: 1 << 20,
+            wchar_delta: 512,
+            rchar_bps: (2 << 20) as f32,
+            wchar_bps: (1 << 19) as f32,
+            syscr: 1_234,
+            syscw: 56,
+            ..ProcCounters::default()
+        };
+        let mut f = Fixture::new(record(), key_words());
+        f.extras[0].counters = counters;
+        assert_eq!(f.text(ColumnId::IoReadBytes), "3.00 MiB");
+        assert_eq!(f.text(ColumnId::IoWriteBytes), "2.00 KiB");
+        assert_eq!(f.text(ColumnId::IoReadDelta), "1.00 MiB");
+        assert_eq!(f.text(ColumnId::IoWriteDelta), "512 B");
+        assert_eq!(f.text(ColumnId::IoReadRate), "2.0 MiB/s");
+        assert_eq!(f.text(ColumnId::IoWriteRate), "0.5 MiB/s");
+        assert_eq!(f.text(ColumnId::IoReadOps), "1,234");
+        assert_eq!(f.text(ColumnId::IoWriteOps), "56");
+
+        // A WarmingUp rate keeps the totals valid.
+        f.records[0]
+            .validity
+            .set(ProcessField::IoRead, Validity::WarmingUp);
+        let row = table_row(false, false, 0);
+        let valid = |f: &Fixture, id| f.record_cell(&row, id).validity;
+        assert_eq!(valid(&f, ColumnId::IoReadBytes), Validity::Valid);
+        assert_eq!(valid(&f, ColumnId::IoReadOps), Validity::Valid);
+        assert_eq!(valid(&f, ColumnId::IoReadRate), Validity::WarmingUp);
+        assert_eq!(valid(&f, ColumnId::IoReadDelta), Validity::WarmingUp);
+        assert_eq!(valid(&f, ColumnId::IoWriteRate), Validity::Valid);
+
+        // Not read: the glyph of the validity, never 0.
+        f.records[0]
+            .validity
+            .set(ProcessField::IoRead, Validity::Restricted);
+        f.records[0]
+            .validity
+            .set(ProcessField::IoWrite, Validity::Restricted);
+        f.extras[0].counters.io_read = false;
+        for id in cols {
+            let out = f.record_cell(&row, id);
+            assert_eq!(out.validity, Validity::Restricted, "{id:?}");
+            assert_ne!(f.text(id), "0 B", "{id:?}");
+            assert_ne!(f.text(id), "0", "{id:?}");
+        }
+
+        // Group rows show the sums and follow the group's validity.
+        let mut g = group(GroupRowKind::App);
+        g.counters = ProcCounters {
+            io_read: true,
+            rchar: 5 << 20,
+            syscw: 9,
+            rchar_bps: (4 << 20) as f32,
+            ..ProcCounters::default()
+        };
+        let cell = |id| shown(&f.group_cell(&g, RowKind::Process, id));
+        assert_eq!(cell(ColumnId::IoReadBytes), "5.00 MiB");
+        assert_eq!(cell(ColumnId::IoReadRate), "4.0 MiB/s");
+        assert_eq!(cell(ColumnId::IoWriteOps), "9");
+        g.counters.io_read = false;
+        g.validity.set(ProcessField::IoRead, Validity::Restricted);
+        assert_eq!(
+            f.group_cell(&g, RowKind::Process, ColumnId::IoReadBytes)
+                .validity,
+            Validity::Restricted
+        );
+    }
+
     #[gpui_kit::test]
     fn commit_peak_header_tooltip(cx: &mut TestAppContext) {
         cx.update(|cx| {

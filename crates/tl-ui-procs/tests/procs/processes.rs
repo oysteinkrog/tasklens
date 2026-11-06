@@ -1022,6 +1022,14 @@ mod delegate {
             ColumnId::CommitDelta,
             ColumnId::PageTables,
             ColumnId::MajorFaultsDelta,
+            ColumnId::IoReadBytes,
+            ColumnId::IoWriteBytes,
+            ColumnId::IoReadDelta,
+            ColumnId::IoWriteDelta,
+            ColumnId::IoReadRate,
+            ColumnId::IoWriteRate,
+            ColumnId::IoReadOps,
+            ColumnId::IoWriteOps,
         ];
         for id in listed {
             assert!(offered.contains(&id), "{id:?} not offered");
@@ -1042,14 +1050,6 @@ mod delegate {
     fn no_source_columns_not_offered(cx: &mut TestAppContext) {
         setup(cx);
         let parked = [
-            ColumnId::IoReadBytes,
-            ColumnId::IoWriteBytes,
-            ColumnId::IoReadDelta,
-            ColumnId::IoWriteDelta,
-            ColumnId::IoReadRate,
-            ColumnId::IoWriteRate,
-            ColumnId::IoReadOps,
-            ColumnId::IoWriteOps,
             ColumnId::DiskReadBytes,
             ColumnId::DiskWriteBytes,
             ColumnId::DiskTotalBytes,
