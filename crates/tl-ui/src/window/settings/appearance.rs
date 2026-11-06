@@ -1,6 +1,7 @@
 //! Settings window, Appearance page (E21-020, UI-SHL-062, UI-SHL-006, UI-SHL-080, APP-023,
 //! APP-035, APP-036, APP-040, R-020, R-021, R-077, R-083): theme choice and sync, the size
-//! sliders, the look switches and "Use system title bar".
+//! sliders, the look switches, "Color charts by value" (tasklens-j477q) and "Use system title
+//! bar".
 //!
 //! The Theme dropdown dispatches `ActivateTheme` like the View > Theme rows, so sync turns off
 //! the same way. Its options are the menu's theme rows, read at render. A UI Scale release shows
@@ -108,12 +109,19 @@ pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
         pct,
     )
     .slider(
-        look,
+        look.clone(),
         SettingKey::AppearanceShadowIntensityPct,
         tr(cx, "shell-menu-appearance-shadow-intensity"),
         0..=100,
         5,
         pct,
+    )
+    // On by default (tasklens-j477q): one-series charts and power charts take a value ramp.
+    .switch(
+        look,
+        SettingKey::AppearanceColorChartsByValue,
+        tr(cx, "shell-settings-color-by-value"),
+        Some(tr(cx, "shell-settings-color-by-value-note")),
     )
     .restart_note_toast(cx, tr(cx, "shell-toast-decorations-restart"))
     .str_switch(

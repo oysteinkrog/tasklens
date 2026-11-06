@@ -3660,6 +3660,8 @@ shell-settings-group-theme = Theme
 shell-settings-group-size = Size
 shell-settings-group-look = Look
 shell-settings-decorations = Use system title bar
+shell-settings-color-by-value = Color charts by value
+shell-settings-color-by-value-note = CPU, GPU, disk, memory and power charts turn from calm to hot colors as the value rises
 shell-toast-decorations-restart = Restart tasklens to apply the title bar change
 
 # File menu: Search File Handles... (E21-045)

@@ -88,6 +88,7 @@ const E21_P2_KEYS: &[SettingKey] = &[
     SettingKey::AppearanceHeatColoring,
     SettingKey::AppearanceHeatIntensityPct,
     SettingKey::AppearanceShadowIntensityPct,
+    SettingKey::AppearanceColorChartsByValue,
     SettingKey::MotionAnimations,
     SettingKey::MotionSmoothGraphs,
     SettingKey::MotionSmoothScroll,
@@ -2168,6 +2169,7 @@ fn appearance_keys(cx: &mut TestAppContext) {
             SettingKey::AppearanceHeatColoring,
             SettingKey::AppearanceHeatIntensityPct,
             SettingKey::AppearanceShadowIntensityPct,
+            SettingKey::AppearanceColorChartsByValue,
             SettingKey::AppearanceDecorations
         ]
     );
@@ -2178,6 +2180,28 @@ fn appearance_keys(cx: &mut TestAppContext) {
         .map(|p| p.id())
         .collect();
     assert_eq!(ids[..2], [PageId::General, PageId::Appearance]);
+}
+
+/// "Color charts by value" is on for a fresh config, has its note and saves (tasklens-j477q).
+#[gpui_kit::test]
+fn appearance_color_by_value_switch_saves(cx: &mut TestAppContext) {
+    setup(cx);
+    assert!(cx.update(|cx| TlSettings::settings(cx).appearance.color_charts_by_value));
+    let appearance = page(cx, PageId::Appearance);
+    assert_eq!(
+        appearance
+            .description_of(SettingKey::AppearanceColorChartsByValue)
+            .as_deref(),
+        Some(
+            "CPU, GPU, disk, memory and power charts turn from calm to hot colors as the value rises"
+        )
+    );
+    cx.update(|cx| appearance.set_bool(SettingKey::AppearanceColorChartsByValue, false, cx));
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| TlSettings::settings(cx).appearance.color_charts_by_value));
+    cx.update(|cx| appearance.set_bool(SettingKey::AppearanceColorChartsByValue, true, cx));
+    cx.run_until_parked();
+    assert!(cx.update(|cx| TlSettings::settings(cx).appearance.color_charts_by_value));
 }
 
 #[gpui_kit::test]
