@@ -8,7 +8,6 @@ use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement, Render, Styled,
     TestAppContext, VisualTestContext, Window, div, px,
 };
-use tl_model::actions::SchedPolicy;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey, PseudoKind};
 use tl_model::process::{
     GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessExtrasP2,
@@ -92,83 +91,30 @@ fn record() -> ProcessRecord {
 
 fn extras() -> ProcessExtras {
     ProcessExtras {
-        cpu_kernel_pct: 0.0,
-        cpu_user_pct: 0.0,
-        cpu_relative_pct: 0.0,
-        utime_ticks: 0,
-        stime_ticks: 0,
-        start_boot_ns: 0,
-        rss_peak_bytes: 0,
-        rss_shared_bytes: 0,
-        commit_bytes: 0,
-        vsize_bytes: 0,
-        vsize_peak_bytes: 0,
-        page_faults: 0,
-        page_faults_delta: 0,
-        major_faults: 0,
-        policy: SchedPolicy::Other,
-        rt_prio: 0,
-        affinity: CpuSet::empty(),
-        handles: None,
         exe_name: a("firefox"),
         exe_path: a("/usr/lib/firefox/firefox"),
-        exe_deleted: false,
-        unit: None,
         state_letter: b'S',
-        frozen: false,
-        disk_read_bps: 0.0,
-        disk_write_raw_bps: 0.0,
-        flag_since_ns: 0,
-        pgrp: 0,
-        sid: 0,
-        last_cpu: 0,
-        wine: None,
+        ..ProcessExtras::default()
     }
 }
 
 fn group(node: NodeId, kind: GroupRowKind) -> GroupRow {
     GroupRow {
-        node,
-        key: firefox().key(),
-        kind,
-        class: firefox(),
-        name: a("Firefox"),
-        icon: None,
         members: 1,
         pids: 1,
-        note: None,
         memory_bytes: 100 * MIB,
-        disk_bps: 0.0,
-        net_bps: 0.0,
-        gpu_pct: 0.0,
         cpu_pct: 3.2,
         rss_anon_bytes: 100 * MIB,
         rss_bytes: 200 * MIB,
-        pss_bytes: 0,
-        uss_bytes: 0,
-        swap_bytes: 0,
-        io_read_bps: 0.0,
-        io_write_bps: 0.0,
-        net_rx_bps: 0.0,
-        net_tx_bps: 0.0,
-        gpu_util_pct: 0.0,
-        gpu_mem_bytes: 0,
         threads: 1,
-        cpu_kernel_pct: 0.0,
-        cpu_user_pct: 0.0,
-        cpu_relative_pct: 0.0,
-        utime_ticks: 0,
-        stime_ticks: 0,
-        commit_bytes: 0,
-        page_faults: 0,
-        page_faults_delta: 0,
-        major_faults: 0,
-        handles: None,
-        desktop_path: None,
-        description: None,
-        user: None,
-        frozen: false,
-        validity: FieldValidity::all(Validity::Valid),
+        ..GroupRow::empty(
+            node,
+            firefox().key(),
+            kind,
+            firefox(),
+            a("Firefox"),
+            FieldValidity::all(Validity::Valid),
+        )
     }
 }
 

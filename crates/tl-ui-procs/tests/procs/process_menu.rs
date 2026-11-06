@@ -1153,49 +1153,18 @@ mod end {
 
     fn app_group(members: u32) -> GroupRow {
         GroupRow {
-            node: NodeId::Group(app_key()),
-            key: app_key(),
-            kind: GroupRowKind::App,
-            class: GroupKind::App {
-                app_id: Arc::from("firefox"),
-            },
-            name: Arc::from("Firefox"),
-            icon: None,
             members,
             pids: members,
-            note: None,
-            memory_bytes: 0,
-            disk_bps: 0.0,
-            net_bps: 0.0,
-            gpu_pct: 0.0,
-            cpu_pct: 0.0,
-            rss_anon_bytes: 0,
-            rss_bytes: 0,
-            pss_bytes: 0,
-            uss_bytes: 0,
-            swap_bytes: 0,
-            io_read_bps: 0.0,
-            io_write_bps: 0.0,
-            net_rx_bps: 0.0,
-            net_tx_bps: 0.0,
-            gpu_util_pct: 0.0,
-            gpu_mem_bytes: 0,
-            threads: 0,
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
-            utime_ticks: 0,
-            stime_ticks: 0,
-            commit_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            handles: None,
-            desktop_path: None,
-            description: None,
-            user: None,
-            frozen: false,
-            validity: FieldValidity::all(Validity::Valid),
+            ..GroupRow::empty(
+                NodeId::Group(app_key()),
+                app_key(),
+                GroupRowKind::App,
+                GroupKind::App {
+                    app_id: Arc::from("firefox"),
+                },
+                Arc::from("Firefox"),
+                FieldValidity::all(Validity::Valid),
+            )
         }
     }
 
@@ -1916,17 +1885,9 @@ mod end {
     /// The app.slice sample of the firefox app row.
     fn firefox_sample(frozen: bool) -> AppCgroupSample {
         AppCgroupSample {
-            group: app_key(),
-            anon_bytes: 0,
-            swap_bytes: 0,
-            io_read_bps: 0.0,
-            io_write_bps: 0.0,
-            rios: 0,
-            wios: 0,
             pids: 1,
             frozen,
-            cgroup: app_cgroup(),
-            validity: FieldValidity::all(Validity::Valid),
+            ..AppCgroupSample::empty(app_key(), app_cgroup(), FieldValidity::all(Validity::Valid))
         }
     }
 
@@ -4098,23 +4059,11 @@ mod end {
             page_faults: 120_000,
             page_faults_delta: 40,
             major_faults: 12,
-            policy: SchedPolicy::Other,
-            rt_prio: 0,
-            affinity: CpuSet::default(),
             handles: Some(412),
             exe_name: Arc::from("firefox"),
             exe_path: Arc::from("/usr/lib/firefox/firefox"),
-            exe_deleted: false,
-            unit: None,
             state_letter: b'S',
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
-            flag_since_ns: 0,
-            pgrp: 0,
-            sid: 0,
-            last_cpu: 0,
-            wine: None,
+            ..ProcessExtras::default()
         }
     }
 
