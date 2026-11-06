@@ -1062,6 +1062,8 @@ perf-tip-edit = Select pages
 # The sidebar collapse arrow and expand strip (tasklens-o5853).
 perf-sidebar-hide = Hide sidebar
 perf-sidebar-show = Show sidebar
+# Compact view (tasklens-qdn1r): the hover button and the page menu entry that end it.
+perf-compact-exit = Exit compact view
 perf-range-30s = 30 seconds
 perf-range-1m = 1 minute
 perf-range-5m = 5 minutes
@@ -1758,6 +1760,7 @@ shortcuts-escape-chain = Close topmost dialog or menu; else clear filter and foc
 shortcuts-pause-display = Pause display
 shortcuts-scale = UI scale +5 / −5 / 100
 shortcuts-toggle-mini-window = Performance mini window
+shortcuts-toggle-compact-view = Compact view on or off
 shortcuts-move-focus = Move row selection
 shortcuts-extend-selection = Extend or toggle selection
 shortcuts-select-all = Select all visible rows
@@ -2823,6 +2826,7 @@ shell-menu-view-appearance = Appearance
 shell-menu-view-theme = Theme
 shell-menu-view-graphs = Graphs
 shell-menu-view-show-sidebar = Show sidebar
+shell-menu-view-compact = Compact view
 shell-menu-columns-select = Select Columns…
 shell-menu-columns-fit = Resize columns to fit content
 shell-menu-columns-resize-behavior = Resize Behavior

@@ -2908,6 +2908,7 @@ mod main_window {
             width: 640,
             height: 400,
             maximized: false,
+            compact_view: false,
         };
         match restored_bounds(&small) {
             WindowBounds::Windowed(b) => {
@@ -3228,6 +3229,7 @@ mod main_window {
             width: w,
             height: h,
             maximized,
+            compact_view: false,
         }
     }
 

@@ -89,7 +89,8 @@ use tl_ui_kit::actions::{
     EscapeChain, FocusFilter, GLOBAL_CONTEXT, MinimizeWindow, NextTab, PICKER_CONTEXT, PrevTab,
     Quit, ReconnectHost, RefreshCurrentTab, RemoveHost, SHELL_FILTER_CONTEXT, ScaleDown,
     ScaleReset, ScaleUp, SelectHost, SelectTab, SetViewMode, ShowMainWindow, ShowSystemInformation,
-    StartWindowPick, ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow, ZoomWindow,
+    StartWindowPick, ToggleCompactView, ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow,
+    ZoomWindow,
 };
 use tl_ui_kit::components::banner::{TlBanner, TlBannerKind};
 use tl_ui_kit::components::dialog::CONTEXT as DIALOG_CONTEXT;
@@ -150,9 +151,14 @@ pub const MIN_H: f32 = 500.0;
 const TOAST_GAP: f32 = 8.0;
 /// The toast stack's top edge (UI-SHL-100): the bar height for the decoration kind, the tab
 /// strip and an 8 px gap, × ui_scale. 72 under client decorations and 66 under server ones, at
-/// 100 %.
-fn toast_top(client: bool, s: f32) -> Pixels {
-    bar_height_of(client, s) + px((TAB_STRIP_H + TOAST_GAP) * s)
+/// 100 %. Compact view has no tab strip and no menu row: 42 under client decorations and 8 under
+/// server ones (tasklens-qdn1r).
+fn toast_top(client: bool, compact: bool, s: f32) -> Pixels {
+    match (compact, client) {
+        (false, _) => bar_height_of(client, s) + px((TAB_STRIP_H + TOAST_GAP) * s),
+        (true, true) => bar_height_of(true, s) + px(TOAST_GAP * s),
+        (true, false) => px(TOAST_GAP * s),
+    }
 }
 
 /// The one char of `text`, or `None` when it has none or more than one.
@@ -470,6 +476,14 @@ pub fn init(cx: &mut App) {
         set_view_mode(cx, next);
     });
     cx.on_action(|a: &SetViewMode, cx| set_view_mode(cx, a.0));
+    // F11, View > Compact view, the exit button and the page menu entry (tasklens-qdn1r). The
+    // main window and the Performance page follow the saved value.
+    cx.on_action(|_: &ToggleCompactView, cx| {
+        TlSettings::update(cx, |d| {
+            let compact = &mut d.state.window.compact_view;
+            *compact = !*compact;
+        });
+    });
     cx.set_global(AppRequestHandler(Box::new(handle_app_request)));
     if !cx.has_global::<HelperInstalled>() {
         cx.set_global(HelperInstalled(std::path::Path::new(HELPER_PATH).exists()));
@@ -903,7 +917,8 @@ pub(crate) fn hide_main_to_tray(window: &mut Window, cx: &mut App) {
 }
 
 /// `UiState.window` for `bounds`: logical px rounded to integers. Maximized and fullscreen save
-/// the size they carry with `maximized` set.
+/// the size they carry with `maximized` set. `compact_view` is false; [`MainWindow::write_size`]
+/// keeps the saved value.
 fn size_state(bounds: WindowBounds) -> WindowState {
     let (b, maximized) = match bounds {
         WindowBounds::Windowed(b) => (b, false),
@@ -913,6 +928,7 @@ fn size_state(bounds: WindowBounds) -> WindowState {
         width: f32::from(b.size.width).round() as u32,
         height: f32::from(b.size.height).round() as u32,
         maximized,
+        compact_view: false,
     }
 }
 
@@ -1328,6 +1344,10 @@ pub struct MainWindow {
     machine_status: Option<Entity<StatusBar>>,
     /// `performance.status_bar` at the last settings change.
     status_placement: tl_ui_settings::settings::StatusBarPlacement,
+    /// `state.window.compact_view` (tasklens-qdn1r): no menu bar, tab strip or status bar, and
+    /// the Performance tab shows. Under client decorations the title bar stays without its
+    /// menus; under server decorations the whole menu row goes.
+    compact: bool,
     /// The page container's opacity at the last render.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     page_opacity: f32,
@@ -1369,6 +1389,13 @@ impl MainWindow {
         let built = cx
             .try_global::<ShellState>()
             .map_or_else(|| built_tabs(cx), |state| state.built_tabs.clone());
+        // Compact view shows the Performance tab (tasklens-qdn1r).
+        let compact = TlSettings::state(cx).window.compact_view;
+        let start = if compact && built.contains(&Tab::Performance) {
+            Tab::Performance
+        } else {
+            start
+        };
         HostRegistry::sync(cx);
         let tabs = HostRegistry::tabs(cx);
         let host = tabs[0].host.clone();
@@ -1378,7 +1405,7 @@ impl MainWindow {
         let filter = cx.new(|cx| FilterBox::new(start, host.events().cloned(), window, cx));
         let status = cx.new(StatusChip::new);
         let client = is_client(window, cx);
-        let top = toast_top(client, s);
+        let top = toast_top(client, compact, s);
         let toasts = cx.new(|cx| ToastQueue::new(window, cx, top));
         let anim = cx.new(AnimationDriver::new);
         AnimationDriver::register(&anim, window, cx);
@@ -1452,7 +1479,7 @@ impl MainWindow {
                 return;
             }
             this.style_version = m.style_version;
-            let top = toast_top(this.client, m.ui_scale);
+            let top = toast_top(this.client, this.compact, m.ui_scale);
             this.toasts.update(cx, |queue, cx| queue.set_top(top, cx));
             cx.notify();
         }));
@@ -1493,6 +1520,16 @@ impl MainWindow {
                 }
             }
         }));
+        // Compact view turned on or off: F11, View > Compact view, the exit button or the page
+        // menu entry of the Performance tab (tasklens-qdn1r).
+        subs.push(
+            cx.observe_global_in::<TlSettings>(window, |this: &mut Self, window, cx| {
+                let compact = TlSettings::state(cx).window.compact_view;
+                if compact != this.compact {
+                    this.set_compact(compact, window, cx);
+                }
+            }),
+        );
         // `[[hosts]]` changes add and remove host tabs (UI-SHL-008).
         subs.push(
             cx.observe_global_in::<TlSettings>(window, |this: &mut Self, window, cx| {
@@ -1558,6 +1595,7 @@ impl MainWindow {
             fade: None,
             machine_status,
             status_placement: machine_status::placement(cx),
+            compact,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             page_opacity: 1.0,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -1575,6 +1613,8 @@ impl MainWindow {
         };
         this.sync_fps(cx);
         this.sync_hosts(cx);
+        this.titlebar
+            .update(cx, |bar, cx| bar.set_compact(compact, cx));
         this.switch_to(start, false, window, cx);
         cx.on_next_frame(window, |this, window, cx| {
             this.after_first_frame(window, cx)
@@ -2465,7 +2505,13 @@ impl MainWindow {
     fn write_size(&mut self, cx: &mut Context<Self>) {
         self.save_task = None;
         let state = size_state(self.bounds);
-        TlSettings::update(cx, |d| d.state.window = state);
+        TlSettings::update(cx, |d| {
+            let compact_view = d.state.window.compact_view;
+            d.state.window = WindowState {
+                compact_view,
+                ..state
+            };
+        });
     }
 
     fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
@@ -2494,7 +2540,7 @@ impl MainWindow {
         self.keep_first_row(cx, |cx| apply_metrics(&appearance, cx));
         self.tabstrip
             .update(cx, |strip, cx| strip.invalidate_layout_cache(cx));
-        let top = toast_top(self.client, metrics(cx).ui_scale);
+        let top = toast_top(self.client, self.compact, metrics(cx).ui_scale);
         self.toasts.update(cx, |queue, cx| queue.set_top(top, cx));
         cx.refresh_windows();
     }
@@ -2537,6 +2583,26 @@ impl MainWindow {
     }
 
     /// The tab switch. `write_last` is false only for the start tab.
+    /// Compact view is on (`state.window.compact_view`).
+    pub fn is_compact(&self) -> bool {
+        self.compact
+    }
+
+    /// Applies compact view on or off (tasklens-qdn1r). On: the title bar drops its menus, the
+    /// toasts move up and the Performance tab shows with its selected page. The Performance page
+    /// hides its own sidebar and status bar from the same setting.
+    fn set_compact(&mut self, compact: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.compact = compact;
+        self.titlebar
+            .update(cx, |bar, cx| bar.set_compact(compact, cx));
+        let top = toast_top(self.client, compact, metrics(cx).ui_scale);
+        self.toasts.update(cx, |queue, cx| queue.set_top(top, cx));
+        if compact && self.active != Tab::Performance {
+            self.select_tab(Tab::Performance, window, cx);
+        }
+        cx.notify();
+    }
+
     fn switch_to(
         &mut self,
         tab: Tab,
@@ -2544,6 +2610,16 @@ impl MainWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Compact view belongs to the Performance tab: a jump or a key that shows another tab
+        // ends it, so that tab comes with its tab strip and menus (tasklens-qdn1r).
+        if self.compact && tab != Tab::Performance {
+            self.compact = false;
+            TlSettings::update(cx, |d| d.state.window.compact_view = false);
+            self.titlebar
+                .update(cx, |bar, cx| bar.set_compact(false, cx));
+            let top = toast_top(self.client, false, metrics(cx).ui_scale);
+            self.toasts.update(cx, |queue, cx| queue.set_top(top, cx));
+        }
         if tab != self.active
             && let Some(old) = &self.pages[self.active as usize]
         {
@@ -3023,7 +3099,7 @@ impl Render for MainWindow {
             self.titlebar.update(cx, |_, cx| cx.notify());
             // Deferred: the toast layer may already be drawn in this frame.
             cx.defer_in(window, move |this, _, cx| {
-                let top = toast_top(client, metrics(cx).ui_scale);
+                let top = toast_top(client, this.compact, metrics(cx).ui_scale);
                 this.toasts.update(cx, |queue, cx| queue.set_top(top, cx));
             });
         }
@@ -3091,9 +3167,18 @@ impl Render for MainWindow {
             .flatten()
             .and_then(|p| p.read(cx).summary_view());
         let shell = summary.is_none();
-        // The status bar under the tab strip on every tab (UI-PRF-054).
+        // The status bar under the tab strip on every tab (UI-PRF-054). Compact view has none.
+        let compact = self.compact;
         let bar = self.machine_status.clone().filter(|_| {
-            shell && machine_status::shows_in(Slot::Main, self.status_placement, false)
+            shell && !compact && machine_status::shows_in(Slot::Main, self.status_placement, false)
+        });
+        // Compact view under server decorations: KWin's title bar only, no menu row.
+        let titlebar = (client || !compact).then(|| {
+            AnyView::from(self.titlebar.clone()).cached(
+                StyleRefinement::default()
+                    .w_full()
+                    .h(bar_height_of(client, s)),
+            )
         });
         if let Some(status) = &self.machine_status {
             let handle = bar.is_some().then(|| window.window_handle());
@@ -3141,13 +3226,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::on_escape_chain))
             // Bubble phase: sees only keys that no binding and no focused element used.
             .on_key_down(cx.listener(Self::route_type_to_filter))
-            .child(
-                AnyView::from(self.titlebar.clone()).cached(
-                    StyleRefinement::default()
-                        .w_full()
-                        .h(bar_height_of(client, s)),
-                ),
-            )
+            .children(titlebar)
             .children(summary.map(|view| {
                 div()
                     .tl_selector(|| "MainWindowSummary".into())
@@ -3155,7 +3234,7 @@ impl Render for MainWindow {
                     .min_h_0()
                     .child(view.cached(StyleRefinement::default().size_full()))
             }))
-            .when(shell, |el| {
+            .when(shell && !compact, |el| {
                 el.child(
                     AnyView::from(self.tabstrip.clone())
                         .cached(StyleRefinement::default().w_full().h(px(TAB_STRIP_H * s))),

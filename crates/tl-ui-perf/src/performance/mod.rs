@@ -40,15 +40,16 @@ pub use self::overview::{memory_apps, status_bar};
 
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::{ResizableState, h_flex, h_resizable, resizable_panel};
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, AppContext as _, AsyncApp, Bounds,
     ClipboardItem, Context, Div, Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
-    radians,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, ParentElement as _, Pixels, Point,
+    Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Task, WeakEntity, Window, div, px, radians,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -72,6 +73,7 @@ use tl_ui_base::settings_global::{TlSettings, animations_on};
 use tl_ui_base::shell::{ShellApi, ShellPage, StatusChanged, main_window_title};
 use tl_ui_base::theme::{UiMetrics, current, metrics};
 use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::actions::ToggleCompactView;
 use tl_ui_kit::components::icons::{TlIcon, icon};
 use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
 use tl_ui_kit::components::motion::{M_BASE, M_FAST, ease_out_cubic};
@@ -122,6 +124,39 @@ pub const SIDEBAR_STRIP_W: f32 = 12.;
 /// The height of the collapse arrow on the sidebar's right edge, × ui_scale.
 const COLLAPSE_H: f32 = 32.;
 
+/// Debug selector of the compact view exit button in the tab's top-right corner
+/// (tasklens-qdn1r).
+pub const COMPACT_EXIT_ID: &str = "perf-compact-exit";
+/// The exit button's side and its inset from the top and right edges, × ui_scale.
+pub const COMPACT_EXIT_SIZE: f32 = 28.;
+pub const COMPACT_EXIT_INSET: f32 = 8.;
+/// The exit button fades out after this long without a mouse move over the tab.
+pub const COMPACT_EXIT_IDLE: Duration = Duration::from_secs(2);
+
+/// The compact view exit button (tasklens-qdn1r). It shows on a mouse move over the tab, fades
+/// out over `m_base` after [`COMPACT_EXIT_IDLE`] without one, and goes at once when the pointer
+/// leaves the window. It stays while the pointer rests on it.
+struct ExitButton {
+    shown: bool,
+    /// The generation of the fade-out in progress.
+    fading: Option<u32>,
+    /// Bumped each time the button shows or starts to fade.
+    generation: u32,
+    last_move: Instant,
+    hovered: bool,
+    /// Waits for the idle time, then runs the fade. Dropped, it stops.
+    timer: Option<Task<()>>,
+}
+
+/// What the exit button's timer does next.
+enum ExitStep {
+    /// The pointer moved less than [`COMPACT_EXIT_IDLE`] ago or rests on the button: wait again.
+    Wait(Duration),
+    /// The fade with this generation started; hide the button when it ends.
+    Fading(u32),
+    Done,
+}
+
 /// The sidebar hide or show animation in progress (`PerfToggleSidebar`).
 #[derive(Clone, Copy)]
 struct SidebarAnim {
@@ -169,6 +204,11 @@ pub struct PerformancePage {
     pub(crate) sidebar_visible: bool,
     anim: Option<SidebarAnim>,
     anim_generation: u32,
+    /// `state.window.compact_view` (tasklens-qdn1r). On, the sidebar starts hidden and its
+    /// arrow and strip toggle it without saving, the status bar hides, a right-click on the
+    /// page offers "Exit compact view" and the exit button shows while the mouse moves.
+    compact: bool,
+    exit: ExitButton,
     /// `state.performance.nav_width`, clamped to 180..=400.
     nav_width: u16,
     /// The split's panel sizes. Made new each time the sidebar comes back, so a drag on the
@@ -223,8 +263,16 @@ impl PerformancePage {
             if status_bar::placement(cx) != this.status_placement {
                 cx.notify();
             }
+            let compact = TlSettings::state(cx).window.compact_view;
+            if compact != this.compact {
+                this.set_compact(compact, cx);
+                return;
+            }
             // Set outside this page: View > Show sidebar while another tab shows, or a reset.
-            if TlSettings::state(cx).performance.sidebar_hidden == this.sidebar_visible {
+            // Compact view keeps its own sidebar state.
+            if !this.compact
+                && TlSettings::state(cx).performance.sidebar_hidden == this.sidebar_visible
+            {
                 this.sidebar_visible = !this.sidebar_visible;
                 this.anim_generation = this.anim_generation.wrapping_add(1);
                 this.finish_toggle(cx);
@@ -232,6 +280,8 @@ impl PerformancePage {
         }));
         let nav_width = TlSettings::state(cx).performance.nav_width;
         let sidebar_hidden = TlSettings::state(cx).performance.sidebar_hidden;
+        let compact = TlSettings::state(cx).window.compact_view;
+        let now = cx.background_executor().now();
         let first = sidebar.read(cx).selected().cloned();
         let mut this = Self {
             sidebar,
@@ -240,7 +290,16 @@ impl PerformancePage {
             selected: None,
             page_focus: SmallVec::new(),
             left_page_focus: None,
-            sidebar_visible: !sidebar_hidden,
+            sidebar_visible: !sidebar_hidden && !compact,
+            compact,
+            exit: ExitButton {
+                shown: false,
+                fading: None,
+                generation: 0,
+                last_move: now,
+                hovered: false,
+                timer: None,
+            },
             anim: None,
             anim_generation: 0,
             nav_width: nav_width.clamp(NAV_MIN_W, NAV_MAX_W),
@@ -574,10 +633,14 @@ impl PerformancePage {
 
     /// Hides or shows the sidebar and saves that as `state.performance.sidebar_hidden`. The
     /// width animates over `m_base` unless animations are off. The selected card stays selected.
+    /// In compact view nothing is saved: leaving it brings back the saved state
+    /// (tasklens-qdn1r).
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         let hidden = !self.sidebar_visible;
-        TlSettings::update(cx, |d| d.state.performance.sidebar_hidden = hidden);
+        if !self.compact {
+            TlSettings::update(cx, |d| d.state.performance.sidebar_hidden = hidden);
+        }
         // Focus leaves the list before it goes, so F9 still reaches this page, and comes back
         // to it with the list.
         if !self.sidebar_visible && self.sidebar_focus.contains_focused(window, cx) {
@@ -605,6 +668,173 @@ impl PerformancePage {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Compact view on or off (tasklens-qdn1r). On, the sidebar hides at once; off, it comes
+    /// back as `state.performance.sidebar_hidden` saved it. The selected page stays.
+    fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
+        self.compact = compact;
+        self.sidebar_visible = !compact && !TlSettings::state(cx).performance.sidebar_hidden;
+        self.anim_generation = self.anim_generation.wrapping_add(1);
+        self.hide_exit_button();
+        self.finish_toggle(cx);
+    }
+
+    /// Compact view is on.
+    pub fn is_compact(&self) -> bool {
+        self.compact
+    }
+
+    /// The exit button is drawn: compact view is on and the mouse moved over the tab less than
+    /// [`COMPACT_EXIT_IDLE`] ago, or the button is fading out.
+    pub fn exit_button_shown(&self) -> bool {
+        self.compact && self.exit.shown
+    }
+
+    /// The exit button is fading out.
+    pub fn exit_button_fading(&self) -> bool {
+        self.exit.fading.is_some()
+    }
+
+    /// Shows the exit button with no idle timer, as a mouse move would, for render tests.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub fn show_exit_button_for_test(&mut self, cx: &mut Context<Self>) {
+        if self.compact {
+            self.exit.shown = true;
+            cx.notify();
+        }
+    }
+
+    fn hide_exit_button(&mut self) {
+        self.exit.shown = false;
+        self.exit.fading = None;
+        self.exit.hovered = false;
+        self.exit.timer = None;
+    }
+
+    /// A mouse move over the tab shows the exit button in compact view and restarts its idle
+    /// time. Only the first move after it was hidden or began to fade renders again.
+    fn on_pointer_move(&mut self, _: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.compact {
+            return;
+        }
+        self.exit.last_move = cx.background_executor().now();
+        if self.exit.shown && self.exit.fading.is_none() {
+            return;
+        }
+        self.exit.shown = true;
+        self.exit.fading = None;
+        self.exit.generation = self.exit.generation.wrapping_add(1);
+        self.exit.timer = Some(
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let mut wait = COMPACT_EXIT_IDLE;
+                loop {
+                    cx.background_executor().timer(wait).await;
+                    match this.update(cx, |this, cx| this.exit_step(cx)) {
+                        Ok(ExitStep::Wait(next)) => wait = next,
+                        Ok(ExitStep::Fading(generation)) => {
+                            cx.background_executor().timer(M_BASE).await;
+                            let _ = this.update(cx, |this, cx| {
+                                if this.exit.fading == Some(generation) {
+                                    this.exit.shown = false;
+                                    this.exit.fading = None;
+                                    cx.notify();
+                                }
+                            });
+                            break;
+                        }
+                        Ok(ExitStep::Done) | Err(_) => break,
+                    }
+                }
+            }),
+        );
+        cx.notify();
+    }
+
+    /// The pointer left the window: the exit button goes at once.
+    fn on_pointer_exit(&mut self, _: &MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.exit.shown {
+            self.hide_exit_button();
+            cx.notify();
+        }
+    }
+
+    /// The exit button's timer step: wait while the pointer moved recently or rests on the
+    /// button, else fade it out (or hide it at once with animations off).
+    fn exit_step(&mut self, cx: &mut Context<Self>) -> ExitStep {
+        if !self.exit.shown || self.exit.fading.is_some() {
+            return ExitStep::Done;
+        }
+        if self.exit.hovered {
+            return ExitStep::Wait(COMPACT_EXIT_IDLE);
+        }
+        let idle = cx
+            .background_executor()
+            .now()
+            .saturating_duration_since(self.exit.last_move);
+        if idle < COMPACT_EXIT_IDLE {
+            return ExitStep::Wait(COMPACT_EXIT_IDLE - idle);
+        }
+        cx.notify();
+        if !animations_on(cx) {
+            self.exit.shown = false;
+            return ExitStep::Done;
+        }
+        self.exit.generation = self.exit.generation.wrapping_add(1);
+        self.exit.fading = Some(self.exit.generation);
+        ExitStep::Fading(self.exit.generation)
+    }
+
+    /// The exit button: [`COMPACT_EXIT_SIZE`] square, [`COMPACT_EXIT_INSET`] from the tab's top
+    /// and right edges, the toolbar fill with a divider border, an app-window icon and the
+    /// tooltip "Exit compact view" with the F11 hint. A click runs `ToggleCompactView`. Not a
+    /// Tab stop: F11 is the keyboard path.
+    fn exit_button(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.exit_button_shown() {
+            return None;
+        }
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        let hover = theme.tab_hover;
+        let side = px(COMPACT_EXIT_SIZE * m.ui_scale);
+        let target = div()
+            .id(COMPACT_EXIT_ID)
+            .tl_selector(|| COMPACT_EXIT_ID.into())
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(side)
+            .rounded(m.radius_small)
+            .bg(theme.toolbar)
+            .border(UiMetrics::hairline(window))
+            .border_color(theme.divider)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            // The page under the button gets neither the hover nor the press.
+            .occlude()
+            .on_hover(cx.listener(|this, hovered: &bool, _, _| this.exit.hovered = *hovered))
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleCompactView), cx))
+            .child(icon(TlIcon::AppWindow, m.icon.sm, theme.text_secondary));
+        let state = HoverTooltip::state(COMPACT_EXIT_ID, window, cx);
+        let focus = self.focus.clone();
+        let build = move |_: &mut Window, cx: &mut App| {
+            TlTooltip::text(tr(cx, "perf-compact-exit"))
+                .action(&ToggleCompactView, Some(&focus))
+                .view(cx)
+        };
+        let target = HoverTooltip::attach(&state, target, DELAY_CONTROL, build, window, cx);
+        let inset = px(COMPACT_EXIT_INSET * m.ui_scale);
+        let el = div().absolute().top(inset).right(inset).child(target);
+        Some(match self.exit.fading {
+            Some(generation) => el
+                .with_animation(
+                    ("perf-compact-exit-fade", generation as usize),
+                    Animation::new(M_BASE).with_easing(ease_out_cubic),
+                    |el, t| el.opacity(1. - t),
+                )
+                .into_any_element(),
+            None => el.into_any_element(),
+        })
     }
 
     /// The end state of a toggle: the split panel shows or hides at once.
@@ -654,7 +884,10 @@ impl PerformancePage {
             .selected
             .as_ref()
             .is_some_and(|k| &*k.0 == overview::OVERVIEW_KEY);
-        self.page_on() && status_bar::shows_in(Slot::Performance, self.status_placement, overview)
+        // Compact view has no status bar (tasklens-qdn1r; tasklens-i5cj4 adds a thin line).
+        !self.compact
+            && self.page_on()
+            && status_bar::shows_in(Slot::Performance, self.status_placement, overview)
     }
 
     /// The machine status bar, for tests and the main window.
@@ -686,6 +919,7 @@ impl PerformancePage {
             .has_global::<ClickedBox>()
             .then(|| cx.remove_global::<ClickedBox>().0)
             .flatten();
+        let compact = self.compact;
         let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
             let types = view_types(sidebar.read(cx));
             let ctx = PageMenuCtx {
@@ -703,7 +937,14 @@ impl PerformancePage {
                 let menu = slot.take().expect("one page");
                 slot = Some(page_menu(menu, p, &ctx, window, cx));
             });
-            slot.expect("the menu")
+            let menu = slot.expect("the menu");
+            // Compact view: a right-click anywhere on the page can end it (tasklens-qdn1r).
+            if compact {
+                menu.separator()
+                    .item(tr(cx, "perf-compact-exit"), Box::new(ToggleCompactView))
+            } else {
+                menu
+            }
         });
         open_context_menu_at(at, window, cx, menu);
     }
@@ -1189,6 +1430,10 @@ impl Render for PerformancePage {
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         self.follow_page_focus(window, cx);
+        // Compact view hid the sidebar while it had the keys: they move to this tab.
+        if !self.sidebar_visible && self.sidebar_focus.contains_focused(window, cx) {
+            self.focus.focus(window, cx);
+        }
         self.status_placement = status_bar::placement(cx);
         let show_status = self.shows_status_bar();
         let handle = show_status.then(|| window.window_handle());
@@ -1290,7 +1535,9 @@ impl Render for PerformancePage {
                     .child(page),
             );
 
+        let exit = self.exit_button(window, cx);
         let root = h_flex()
+            .relative()
             .key_context(PERFORMANCE_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle_sidebar))
@@ -1303,10 +1550,14 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_set_overview_range))
             .on_action(cx.listener(Self::on_copy_value))
             .on_action(cx.listener(Self::on_copy_device_info))
+            .on_mouse_move(cx.listener(Self::on_pointer_move))
+            .on_mouse_exit(cx.listener(Self::on_pointer_exit))
             .size_full()
             .children(strip)
             .children(animated)
-            .child(split);
+            .child(split)
+            // Last, so it draws over the page.
+            .children(exit);
         match self.leaving {
             Some(generation) => root
                 .with_animation(

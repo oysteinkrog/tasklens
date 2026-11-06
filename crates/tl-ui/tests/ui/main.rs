@@ -9,6 +9,7 @@ mod bench_run;
 mod bench_scenes;
 mod chart_cpu_grid_hover;
 mod common;
+mod compact_view;
 mod components_words;
 mod connections_shell;
 mod demand;

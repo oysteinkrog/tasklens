@@ -284,6 +284,21 @@ fn sidebar_hidden_state_key() {
     assert!(back.performance.sidebar_hidden);
 }
 
+/// `window.compact_view` (tasklens-qdn1r): false when the key is missing, and compact view
+/// survives a save and a load.
+#[test]
+fn compact_view_state_key() {
+    let old: UiState = toml::from_str("[window]\nwidth = 1600\nheight = 900\n").unwrap();
+    assert!(!old.window.compact_view);
+    assert_eq!(old.window.width, 1600);
+    let mut state = UiState::default();
+    state.window.compact_view = true;
+    let text = toml::to_string(&state).unwrap();
+    assert!(text.contains("compact_view = true"), "{text}");
+    let back: UiState = toml::from_str(&text).unwrap();
+    assert!(back.window.compact_view);
+}
+
 #[test]
 fn lowmem_state_key_left_out_when_none_and_clamped() {
     let text = toml::to_string(&UiState::default()).unwrap();

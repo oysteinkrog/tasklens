@@ -308,6 +308,9 @@ pub struct TitleBarView {
     menu_bar: Option<AnyView>,
     /// Graph summary mode hides the menus (PERF-010).
     menus_hidden: bool,
+    /// Compact view hides the menus too (tasklens-qdn1r). Under server decorations the main
+    /// window leaves the whole menu row out.
+    compact: bool,
     /// The host tabs, just left of the pin; `None` with one host (UI-SHL-008).
     host_tabs: Option<AnyView>,
     model: ToolbarModel,
@@ -389,6 +392,7 @@ impl TitleBarView {
         Self {
             menu_bar,
             menus_hidden: false,
+            compact: false,
             host_tabs: None,
             model,
             content: Box::new(DefaultToolbar),
@@ -434,6 +438,14 @@ impl TitleBarView {
     pub fn set_menus_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
         if self.menus_hidden != hidden {
             self.menus_hidden = hidden;
+            cx.notify();
+        }
+    }
+
+    /// Compact view on or off: the menus hide while it is on. Notifies only when it changed.
+    pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
+        if self.compact != compact {
+            self.compact = compact;
             cx.notify();
         }
     }
@@ -717,7 +729,9 @@ impl TitleBarView {
                     .child(img(AppIcon::Logo.path_str()).size_full()),
             )
             .when_some(
-                self.menu_bar.clone().filter(|_| !self.menus_hidden),
+                self.menu_bar
+                    .clone()
+                    .filter(|_| !self.menus_hidden && !self.compact),
                 |bar, menu| {
                     bar.child(no_drag(
                         div()

@@ -3,7 +3,9 @@
 //! `tests/golden/perf_<page>_<theme>.png`. The Overview is also checked at 1920 × 1200
 //! (UI-PRF-059), in `perf_overview_1920_<theme>.png`. The whole tab, sidebar and Overview, is
 //! checked with the sidebar shown (its collapse arrow on the right edge) and hidden (the expand
-//! strip at the left edge), in `perf_tab_sidebar_<state>_dark.png` (tasklens-o5853).
+//! strip at the left edge), in `perf_tab_sidebar_<state>_dark.png` (tasklens-o5853). Compact
+//! view (the sidebar and the status bar hidden) is checked with and without the exit button in
+//! the top-right corner, in `perf_tab_compact[_exit]_dark.png` (tasklens-qdn1r).
 //! `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
 //! The Overview timeline labels its hours from CLOCK_REALTIME in the local time zone, so every
@@ -81,6 +83,11 @@ enum Page {
     /// The whole Performance tab on the Overview, with the sidebar hidden when `hidden`.
     Tab {
         hidden: bool,
+    },
+    /// The whole tab on the Overview in compact view, with the exit button drawn when
+    /// `exit_button` (tasklens-qdn1r).
+    Compact {
+        exit_button: bool,
     },
 }
 
@@ -247,9 +254,16 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
         settings.clamp();
     }
     let mut state = UiState::default();
-    if let Page::Tab { hidden } = page {
-        state.performance.selected_device = OVERVIEW_KEY.to_owned();
-        state.performance.sidebar_hidden = hidden;
+    match page {
+        Page::Tab { hidden } => {
+            state.performance.selected_device = OVERVIEW_KEY.to_owned();
+            state.performance.sidebar_hidden = hidden;
+        }
+        Page::Compact { .. } => {
+            state.performance.selected_device = OVERVIEW_KEY.to_owned();
+            state.window.compact_view = true;
+        }
+        _ => {}
     }
     cx.set_global(BootSettings {
         settings,
@@ -260,7 +274,7 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
     TlSettings::init(cx);
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
     let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
-    if let Page::Tab { .. } = page {
+    if let Page::Tab { .. } | Page::Compact { .. } = page {
         let host = HostContext::from_parts(
             Some(client),
             Some(hub.clone()),
@@ -269,6 +283,9 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
             None,
         );
         let tab = cx.new(|cx| PerformancePage::new(&host, cx));
+        if let Page::Compact { exit_button: true } = page {
+            tab.update(cx, |p, cx| p.show_exit_button_for_test(cx));
+        }
         return cx.new(|_| Shot {
             page: tab.clone().into(),
             _keep: vec![tab.into_any(), hub.into_any(), demand.into_any()],
@@ -316,7 +333,7 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
             let page = cx.new(|cx| MemoryPage::new(key, row, hub.clone(), demand.clone(), cx));
             (page.clone().into(), vec![page.into_any()])
         }
-        Page::Tab { .. } => unreachable!("built above"),
+        Page::Tab { .. } | Page::Compact { .. } => unreachable!("built above"),
     };
     keep.extend([hub.into_any(), demand.into_any(), sidebar.into_any()]);
     cx.new(|_| Shot {
@@ -490,6 +507,32 @@ fn tab_sidebar_hidden_dark() {
             Page::Tab { hidden: true },
             "Default Dark",
             "perf_tab_sidebar_hidden_dark",
+        )
+    });
+}
+
+/// Compact view: no sidebar, no status bar, no exit button while the mouse is away
+/// (tasklens-qdn1r).
+#[test]
+fn tab_compact_dark() {
+    run_pinned("render_perf::tab_compact_dark", || {
+        check(
+            Page::Compact { exit_button: false },
+            "Default Dark",
+            "perf_tab_compact_dark",
+        )
+    });
+}
+
+/// Compact view with the exit button in the top-right corner, as a mouse move shows it
+/// (tasklens-qdn1r).
+#[test]
+fn tab_compact_exit_dark() {
+    run_pinned("render_perf::tab_compact_exit_dark", || {
+        check(
+            Page::Compact { exit_button: true },
+            "Default Dark",
+            "perf_tab_compact_exit_dark",
         )
     });
 }

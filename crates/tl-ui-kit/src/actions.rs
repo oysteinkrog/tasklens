@@ -59,6 +59,7 @@ gpui_kit::actions!(
         ShowSystemInformation,
         ShowMainWindow,
         ToggleMainWindow,
+        ToggleCompactView,
     ]
 );
 
@@ -257,6 +258,7 @@ pub fn bind_keys_global(cx: &mut App) {
         KeyBinding::new("ctrl--", ScaleDown, global),
         KeyBinding::new("ctrl-0", ScaleReset, global),
         KeyBinding::new("ctrl-shift-m", ToggleMiniWindow, global),
+        KeyBinding::new("f11", ToggleCompactView, global),
         KeyBinding::new("escape", CancelWindowPick, Some(PICKER_CONTEXT)),
         KeyBinding::new("escape", FilterEscape, Some(SHELL_FILTER_CONTEXT)),
         KeyBinding::new("enter", FilterAccept, Some(SHELL_FILTER_CONTEXT)),

@@ -1821,4 +1821,250 @@ mod tab {
         let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");
         assert!(overall.left() >= page.left() && grid.right() <= page.right());
     }
+
+    // Compact view (tasklens-qdn1r).
+
+    use gpui_kit::{MouseDownEvent, MouseExitEvent, MouseUpEvent};
+    use tl_ui_base::settings_global::animations_on;
+    use tl_ui_kit::actions::ToggleCompactView;
+    use tl_ui_kit::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
+    use tl_ui_perf::performance::status_bar::BAR_ID;
+    use tl_ui_perf::performance::{
+        COMPACT_EXIT_ID, COMPACT_EXIT_IDLE, COMPACT_EXIT_INSET, COMPACT_EXIT_SIZE,
+    };
+    use tl_ui_settings::settings::StatusBarPlacement;
+
+    fn set_compact(r: &mut Rig, on: bool) {
+        r.vcx
+            .update(|_, cx| TlSettings::update(cx, |d| d.state.window.compact_view = on));
+        draw(r.vcx);
+    }
+
+    fn saved_hidden(r: &mut Rig) -> bool {
+        r.vcx
+            .update(|_, cx| TlSettings::state(cx).performance.sidebar_hidden)
+    }
+
+    /// The tab in compact view, as `ToggleCompactView` in tl-ui flips it: the handler is the
+    /// main window's, so the test registers the same one.
+    fn open_compact(cx: &mut TestAppContext) -> Rig<'_> {
+        let mut state = UiState::default();
+        state.window.compact_view = true;
+        cx.update(|cx| {
+            cx.on_action(|_: &ToggleCompactView, cx| {
+                TlSettings::update(cx, |d| {
+                    d.state.window.compact_view = !d.state.window.compact_view;
+                });
+            });
+        });
+        open(cx, state, 16, 1280., 800.)
+    }
+
+    fn exit_drawn(r: &mut Rig) -> bool {
+        r.vcx.debug_bounds(COMPACT_EXIT_ID).is_some()
+    }
+
+    fn move_to(r: &mut Rig, x: f32, y: f32) {
+        r.vcx
+            .simulate_mouse_move(point(px(x), px(y)), None, Modifiers::none());
+        draw(r.vcx);
+    }
+
+    fn wait(r: &mut Rig, ms: u64) {
+        r.vcx.executor().advance_clock(Duration::from_millis(ms));
+        draw(r.vcx);
+    }
+
+    /// Compact view hides the sidebar and the status bar without saving the sidebar state. The
+    /// strip and F9 still show the sidebar inside it, and leaving it brings back the saved state.
+    #[gpui_kit::test]
+    fn compact_view_hides_sidebar_and_status_bar(cx: &mut TestAppContext) {
+        let mut r = open(cx, UiState::default(), 16, 1280., 800.);
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.performance.status_bar = StatusBarPlacement::Performance
+            })
+        });
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds(BAR_ID).is_some(), "status bar before");
+        assert!(sidebar_visible(&mut r));
+
+        set_compact(&mut r, true);
+        let page = r.page.clone();
+        assert!(r.vcx.update(|_, cx| page.read(cx).is_compact()));
+        assert!(!sidebar_visible(&mut r), "the sidebar hides");
+        assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_none());
+        page_beside_strip(&mut r);
+        assert!(r.vcx.debug_bounds(BAR_ID).is_none(), "no status bar");
+        assert!(!saved_hidden(&mut r), "the saved state is not touched");
+
+        toggle(&mut r);
+        assert!(sidebar_visible(&mut r), "F9 shows it inside compact view");
+        assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_some());
+        toggle(&mut r);
+        assert!(!sidebar_visible(&mut r), "and hides it again");
+        assert!(!saved_hidden(&mut r), "neither toggle is saved");
+        assert!(
+            r.persisted
+                .borrow()
+                .iter()
+                .all(|s| !s.performance.sidebar_hidden),
+            "no state.toml with a hidden sidebar"
+        );
+
+        set_compact(&mut r, false);
+        assert!(sidebar_visible(&mut r), "the saved shown sidebar returns");
+        assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_some());
+        assert!(r.vcx.debug_bounds(BAR_ID).is_some(), "status bar back");
+    }
+
+    /// Started in compact view with a saved hidden sidebar: the strip shows the sidebar for now,
+    /// and leaving compact view hides it again as it was saved.
+    #[gpui_kit::test]
+    fn compact_view_at_start_keeps_the_saved_sidebar_state(cx: &mut TestAppContext) {
+        let mut state = UiState::default();
+        state.window.compact_view = true;
+        state.performance.sidebar_hidden = true;
+        let mut r = open(cx, state, 16, 1280., 800.);
+        assert!(!sidebar_visible(&mut r), "hidden at start");
+        let strip = r.vcx.debug_bounds(SIDEBAR_EXPAND_ID).expect("strip");
+        r.vcx.simulate_click(strip.center(), Modifiers::none());
+        wait(&mut r, 250);
+        assert!(sidebar_visible(&mut r), "the strip shows it");
+        assert!(saved_hidden(&mut r), "still saved as hidden");
+
+        set_compact(&mut r, false);
+        assert!(!sidebar_visible(&mut r), "hidden again, as saved");
+    }
+
+    /// The exit button: none until the mouse moves over the tab, then 28 × 28 in the top-right
+    /// corner. It stays while the mouse keeps moving, fades out 2 s after the last move, and
+    /// goes at once when the pointer leaves the window.
+    #[gpui_kit::test]
+    fn compact_exit_button_follows_the_mouse(cx: &mut TestAppContext) {
+        let mut r = open_compact(cx);
+        assert!(!exit_drawn(&mut r), "no button before the mouse moves");
+
+        move_to(&mut r, 600., 400.);
+        let b = r.vcx.debug_bounds(COMPACT_EXIT_ID).expect("button");
+        assert_eq!(b.size, size(px(COMPACT_EXIT_SIZE), px(COMPACT_EXIT_SIZE)));
+        assert_eq!(b.top(), px(COMPACT_EXIT_INSET));
+        assert_eq!(b.right(), px(1280. - COMPACT_EXIT_INSET));
+
+        wait(&mut r, 1500);
+        move_to(&mut r, 610., 400.);
+        wait(&mut r, 1500);
+        let page = r.page.clone();
+        assert!(exit_drawn(&mut r), "1.5 s after the last move");
+        assert!(!r.vcx.update(|_, cx| page.read(cx).exit_button_fading()));
+
+        wait(&mut r, 600);
+        let animated = r.vcx.update(|_, cx| animations_on(cx));
+        if animated {
+            assert!(
+                r.vcx.update(|_, cx| page.read(cx).exit_button_fading()),
+                "fading 2.1 s after the last move"
+            );
+            wait(&mut r, 300);
+        }
+        assert!(!exit_drawn(&mut r), "gone after the fade");
+
+        // A move during the fade or after it brings it back.
+        move_to(&mut r, 620., 400.);
+        assert!(exit_drawn(&mut r));
+        r.vcx.simulate_event(MouseExitEvent {
+            position: point(px(620.), px(400.)),
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        draw(r.vcx);
+        assert!(!exit_drawn(&mut r), "the pointer left the window");
+        wait(&mut r, COMPACT_EXIT_IDLE.as_millis() as u64 + 500);
+        assert!(!exit_drawn(&mut r));
+
+        set_compact(&mut r, false);
+        move_to(&mut r, 630., 400.);
+        assert!(!exit_drawn(&mut r), "no button outside compact view");
+    }
+
+    /// Resting on the exit button keeps it; a click on it ends compact view and the sidebar
+    /// comes back.
+    #[gpui_kit::test]
+    fn compact_exit_button_click_exits(cx: &mut TestAppContext) {
+        let mut r = open_compact(cx);
+        move_to(&mut r, 600., 400.);
+        let b = r.vcx.debug_bounds(COMPACT_EXIT_ID).expect("button");
+        move_to(&mut r, f32::from(b.center().x), f32::from(b.center().y));
+        wait(&mut r, 3000);
+        assert!(exit_drawn(&mut r), "kept while the pointer rests on it");
+
+        r.vcx.simulate_click(b.center(), Modifiers::none());
+        draw(r.vcx);
+        let compact = r
+            .vcx
+            .update(|_, cx| TlSettings::state(cx).window.compact_view);
+        assert!(!compact, "compact view off");
+        assert!(sidebar_visible(&mut r), "the sidebar is back");
+        assert!(!exit_drawn(&mut r));
+    }
+
+    fn page_menu(r: &mut Rig) -> Vec<gpui_kit::SharedString> {
+        let at = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page").center();
+        r.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        r.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        r.vcx.run_until_parked();
+        let menu: Entity<TlMenuPopup> = r
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("a context menu is open");
+        r.vcx.update(|window, cx| {
+            let entries = menu.read(cx).entries_for_test(window);
+            let last = entries.last().expect("entries");
+            if last.label.as_deref() == Some("Exit compact view") {
+                assert!(
+                    last.action
+                        .as_ref()
+                        .is_some_and(|a| a.partial_eq(&ToggleCompactView)),
+                    "runs ToggleCompactView"
+                );
+                assert_eq!(
+                    entries[entries.len() - 2].kind,
+                    MenuEntryKind::Separator,
+                    "after a separator"
+                );
+            }
+            entries.into_iter().filter_map(|e| e.label).collect()
+        })
+    }
+
+    /// In compact view a right-click on the page ends its menu with "Exit compact view".
+    #[gpui_kit::test]
+    fn compact_page_menu_offers_exit(cx: &mut TestAppContext) {
+        let mut r = open_compact(cx);
+        let labels = page_menu(&mut r);
+        assert_eq!(
+            labels.last().map(|l| l.as_ref()),
+            Some("Exit compact view"),
+            "{labels:?}"
+        );
+        r.vcx
+            .update(tl_ui_kit::components::menu::close_context_menu);
+        set_compact(&mut r, false);
+        let labels = page_menu(&mut r);
+        assert!(
+            !labels.iter().any(|l| l.as_ref() == "Exit compact view"),
+            "{labels:?}"
+        );
+    }
 }

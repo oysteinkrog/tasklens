@@ -571,13 +571,14 @@ fn set_tab(cx: &mut VisualTestContext, tab: Tab, history: bool) {
 }
 
 /// The View root items in order.
-const VIEW_ROOT: [&str; 7] = [
+const VIEW_ROOT: [&str; 8] = [
     "Columns",
     "Process View",
     "Window",
     "Appearance",
     "Theme",
     "Graphs",
+    "Compact view",
     "Show sidebar",
 ];
 
@@ -605,8 +606,9 @@ fn menubar_alt_keys(cx: &mut TestAppContext) {
     let entries = entries(r.cx);
     assert_eq!(
         entries.len(),
-        7,
-        "Columns, Process View, Window, Appearance, Theme, Graphs, Show sidebar: {entries:?}"
+        8,
+        "Columns, Process View, Window, Appearance, Theme, Graphs, Compact view, Show sidebar: \
+         {entries:?}"
     );
     assert_eq!(entries[0].label(), Some("Columns"));
     assert_eq!(entries[0].selected(), Some(true), "Columns highlighted");
@@ -615,7 +617,8 @@ fn menubar_alt_keys(cx: &mut TestAppContext) {
     assert_eq!(entries[3].label(), Some("Appearance"));
     assert_eq!(entries[4].label(), Some("Theme"));
     assert_eq!(entries[5].label(), Some("Graphs"));
-    assert_eq!(entries[6].label(), Some("Show sidebar"));
+    assert_eq!(entries[6].label(), Some("Compact view"));
+    assert_eq!(entries[7].label(), Some("Show sidebar"));
 }
 
 #[gpui_kit::test]
@@ -1557,9 +1560,10 @@ fn set_gpus(r: &mut Rig<'_>, gpus: usize) {
     r.cx.run_until_parked();
 }
 
-/// Opens View > Graphs from the keyboard (the root item above "Show sidebar").
+/// Opens View > Graphs from the keyboard (the root item above "Compact view" and "Show
+/// sidebar").
 fn open_graphs(cx: &mut VisualTestContext) {
-    keys(cx, "alt-v end up right");
+    keys(cx, "alt-v end up up right");
     assert_eq!(open_menu(cx), Some(MenuId::View));
 }
 
@@ -2067,7 +2071,7 @@ fn builtin_names(cx: &mut VisualTestContext) -> Vec<String> {
 
 /// Opens View > Theme from the keyboard (the item above Graphs).
 fn open_theme(cx: &mut VisualTestContext) {
-    keys(cx, "alt-v end up up right");
+    keys(cx, "alt-v end up up up right");
     assert_eq!(open_menu(cx), Some(MenuId::View));
 }
 

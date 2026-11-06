@@ -11,8 +11,8 @@ use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
 use tl_ui_kit::actions::{
     CancelWindowPick, CloseWindow, EscapeChain, FilterAccept, FilterEscape, FocusFilter, MenuId,
     NextTab, OpenMenu, OpenRunDialog, OpenSettings, OpenShortcuts, PrevTab, Quit,
-    RefreshCurrentTab, ScaleDown, ScaleReset, ScaleUp, SelectTab, SetSetting, ToggleMiniWindow,
-    ToggleSetting, bind_keys_global, register_global_handlers,
+    RefreshCurrentTab, ScaleDown, ScaleReset, ScaleUp, SelectTab, SetSetting, ToggleCompactView,
+    ToggleMiniWindow, ToggleSetting, bind_keys_global, register_global_handlers,
 };
 use tl_ui_kit::components::slider::{
     SliderBigStepDown, SliderBigStepUp, SliderStepDown, SliderStepUp,
@@ -85,6 +85,8 @@ fn keymap_matches_table_b(cx: &mut TestAppContext) {
         ("ctrl--", Box::new(ScaleDown)),
         ("ctrl-0", Box::new(ScaleReset)),
         ("ctrl-shift-m", Box::new(ToggleMiniWindow)),
+        // Compact view (tasklens-qdn1r).
+        ("f11", Box::new(ToggleCompactView)),
     ];
     rows.extend(fixed.into_iter().map(|(k, a)| (k.to_string(), a)));
 

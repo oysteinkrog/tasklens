@@ -288,6 +288,12 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         Heading::Global,
         "shortcuts-toggle-mini-window",
     ),
+    doc(
+        &["tasklens::ToggleCompactView"],
+        GLOBAL,
+        Heading::Global,
+        "shortcuts-toggle-compact-view",
+    ),
     // Tables
     ShortcutDoc {
         only: &[

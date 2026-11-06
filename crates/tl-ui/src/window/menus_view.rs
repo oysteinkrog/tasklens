@@ -1,7 +1,8 @@
 //! The View menu of the menu bar (E21-001, UI-SHL-033, UI-SHL-034, APP-017, APP-018).
 //!
 //! The root lists submenus in a fixed order: "Columns", "Process View", "Window", "Appearance",
-//! "Theme", "Graphs". Each appears once its bead adds it. Last, "Show sidebar" (tasklens-o5853)
+//! "Theme", "Graphs". Each appears once its bead adds it. Then "Compact view" (tasklens-qdn1r), a
+//! check that runs `ToggleCompactView` (F11). Last, "Show sidebar" (tasklens-o5853)
 //! is a check for the Performance device sidebar: `PerfToggleSidebar`, which the
 //! Performance page handles with its animation; on another tab [`init`]'s fallback flips
 //! `state.performance.sidebar_hidden` and the page follows it. View > Columns acts on the table of the
@@ -45,7 +46,9 @@ use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
 use tl_ui_base::theme::share_code::{ShareCodeError, import_text};
 use tl_ui_base::theme::store::{self, ActivateSource, ActivateTheme, ThemeError, ThemeStore};
 use tl_ui_base::theme::{ThemeDef, ThemeEvent};
-use tl_ui_kit::actions::{SetSetting, SetViewMode, ToggleMiniWindow, ToggleSetting};
+use tl_ui_kit::actions::{
+    SetSetting, SetViewMode, ToggleCompactView, ToggleMiniWindow, ToggleSetting,
+};
 use tl_ui_kit::components::icons::TlIcon;
 use tl_ui_kit::components::menu::{MenuSuffixAction, TlMenu, TlMenuPopup};
 use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
@@ -302,11 +305,22 @@ pub fn build(
             move |menu, window, cx| graphs_submenu(&host, menu, window, cx),
         )
         .check_item(
+            tr(cx, "shell-menu-view-compact"),
+            compact_view_mark(cx),
+            Box::new(ToggleCompactView),
+        )
+        .check_item(
             tr(cx, "shell-menu-view-show-sidebar"),
             show_sidebar_mark(cx),
             Box::new(PerfToggleSidebar),
         )
     })
+}
+
+/// The check mark of "Compact view": `state.window.compact_view` (tasklens-qdn1r).
+pub fn compact_view_mark(cx: &App) -> bool {
+    cx.try_global::<TlSettings>()
+        .is_some_and(|_| TlSettings::state(cx).window.compact_view)
 }
 
 /// The check mark of "Show sidebar": the Performance sidebar is not hidden.

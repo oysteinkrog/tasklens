@@ -1713,6 +1713,10 @@ pub struct WindowState {
     /// Logical px, at least 500.
     pub height: u32,
     pub maximized: bool,
+    /// Compact view: the main window hides its menu bar, tab strip and status bar and shows
+    /// the Performance tab without its sidebar. F11 and View > Compact view turn it on and off
+    /// (tasklens-qdn1r, owner request 2026-11-06).
+    pub compact_view: bool,
 }
 
 impl Default for WindowState {
@@ -1721,6 +1725,7 @@ impl Default for WindowState {
             width: 1280,
             height: 800,
             maximized: false,
+            compact_view: false,
         }
     }
 }
@@ -2603,7 +2608,8 @@ mod tests {
             WindowState {
                 width: 1280,
                 height: 800,
-                maximized: false
+                maximized: false,
+                compact_view: false,
             }
         );
         assert_eq!(s.tabs.last_tab, Tab::Processes);
