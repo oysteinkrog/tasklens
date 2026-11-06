@@ -4053,18 +4053,16 @@ fn nvidia_encode_decode_and_engine_fields() {
         gpu_sample(&[(&a, 10.0), (&b, 10.0)]),
     ])
     .expect("no invariant violation");
-    rig.run(vec![
-        gpu_rows_msg(
-            &a,
-            Some(vec![
-                row([8; 16], 1, 10, 30, 5),
-                row([8; 16], 2, 20, 20, 20),
-            ]),
-            None,
-        ),
-        gpu_rows_msg(&b, Some(vec![row([9; 16], 1, 10, 20, 60)]), None),
-    ])
-    .expect("no invariant violation");
+    // One sample carries the rows of every device; a later sample replaces them.
+    let mut msg = gpu_sample(&[(&a, 10.0), (&b, 10.0)]);
+    if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut msg {
+        s.processes = Some(vec![
+            row([8; 16], 1, 10, 30, 5),
+            row([8; 16], 2, 20, 20, 20),
+            row([9; 16], 1, 10, 20, 60),
+        ]);
+    }
+    rig.run(vec![msg]).expect("no invariant violation");
     let snap = rig.latest();
     let p2 = |pid| {
         let i = snap
