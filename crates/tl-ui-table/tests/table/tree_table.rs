@@ -796,6 +796,80 @@ fn plain_rows_build_no_cell_divs() {
     assert_eq!(cell_divs(&table, vcx), built * 4);
 }
 
+/// wlf.46 (GPUI patch): the Name text is shaped once per row per frame during layout. Taffy
+/// measures it several times per row, and because it has an ellipsis, upstream GPUI shaped it
+/// again on each call that had a width, twice per call. The scroll moves less than a row, so
+/// every row keeps its text. Pins the lower text cost of row layout (UI-PRC-023, UI-PRC-032).
+#[test]
+fn name_text_shaped_once_per_row_per_frame() {
+    let mut cx = cosmic_cx();
+    let rows = (0..2000).map(plain).collect();
+    let (table, vcx) = open_table(&mut cx, TDelegate::new(rows), 600., 720.);
+    vcx.update(|_, cx| {
+        let handle = table.read(cx).scroll_handle();
+        ScrollbarHandle::set_offset(&handle, point(px(0.), px(-10.)));
+    });
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    // One frame.
+    let before = gpui_kit::text_measure_shapes();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    let shapes = gpui_kit::text_measure_shapes() - before;
+    let built = vcx.update(|_, cx| table.read(cx).rows_built_last_frame.get()) as usize;
+    assert!(built > 20, "{built} rows built");
+    // One shape per Name text and one per header label (Name, CPU). Upstream GPUI made 290 over
+    // two such frames, against 58 with the patch (measured 2026-11-06).
+    assert_eq!(shapes, built + 2, "{built} rows built");
+}
+
+/// wlf.46: the GPUI text measure keeps a layout only for the same widths and the same text. A
+/// row whose name changes gets the new text measured, a name too long for the column is still
+/// cut to the column, and a short name again is as narrow as before.
+#[test]
+fn changed_name_is_measured_again() {
+    let mut cx = cosmic_cx();
+    let rows = (0..20).map(plain).collect();
+    let (table, vcx) = open_table(&mut cx, TDelegate::new(rows), 600., 200.);
+    let width = |vcx: &mut VisualTestContext| {
+        vcx.debug_bounds("TlNameCell-primary-0-name")
+            .expect("the Name text")
+            .size
+            .width
+    };
+    let set_name = |vcx: &mut VisualTestContext, name: &'static str| {
+        vcx.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                t.delegate.rows[0].name = name;
+                t.delegate.version += 1;
+                t.on_new_version(cx);
+            })
+        });
+        redraw(vcx);
+    };
+    let short = width(vcx);
+    assert!(short > px(0.));
+
+    set_name(vcx, "systemd-journald");
+    let longer = width(vcx);
+    assert!(longer > short, "{longer:?} vs {short:?}");
+
+    set_name(
+        vcx,
+        "gnome-shell-calendar-server-helper-with-a-name-far-too-long-for-the-name-column",
+    );
+    let cut = width(vcx);
+    let column = vcx
+        .debug_bounds("TlNameCell-0-name")
+        .expect("the Name cell")
+        .size
+        .width;
+    assert!(cut > longer, "{cut:?} vs {longer:?}");
+    assert!(cut < column, "cut to the column: {cut:?} vs {column:?}");
+
+    set_name(vcx, "row");
+    assert_eq!(width(vcx), short);
+}
+
 /// rsf.28: `name_weight` sets the Name text's weight. The same name at 500 is wider than at the
 /// default, normal weight, which every other table keeps.
 #[test]
