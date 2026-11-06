@@ -159,10 +159,9 @@ mod tests {
 
     use std::sync::Arc;
 
-    use tl_model::actions::SchedPolicy;
     use tl_model::ids::GroupKey;
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta};
-    use tl_model::system::{CpuSet, Metric};
+    use tl_model::system::Metric;
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
 

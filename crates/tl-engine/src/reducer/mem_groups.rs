@@ -549,10 +549,9 @@ fn rss_anon(r: &ProcessRecord) -> u64 {
 mod tests {
     use tl_collect::parse::stat::CpuTimes;
     use tl_collect::proc::sweep::CpuWindow;
-    use tl_model::actions::SchedPolicy;
     use tl_model::ids::ProcessKey;
     use tl_model::process::{GroupKind, ProcState, ProcessMeta, WineProcess};
-    use tl_model::system::{CpuSet, KernelMemory};
+    use tl_model::system::KernelMemory;
     use tl_model::table::{Manager, UnitRef};
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;

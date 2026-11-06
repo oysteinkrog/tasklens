@@ -293,11 +293,9 @@ fn sum_matching(
 mod tests {
     use super::*;
 
-    use tl_model::actions::SchedPolicy;
     use tl_model::demand::Demand;
     use tl_model::ids::{GroupKey, ProcessKey};
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta};
-    use tl_model::system::CpuSet;
     use tl_model::table::{Manager, UnitRef};
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;
