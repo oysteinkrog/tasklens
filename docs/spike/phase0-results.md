@@ -1020,6 +1020,36 @@ near the 1.9 ms the gate still needs. Under leader rule 1 (2026-11-05) the gate 
 and goes to the owner in tasklens-wlf.2. The next levers named in the plan are
 `BoundsTree::insert` and GPU submit. They are not part of this bead.
 
+#### App memory gate (tasklens-wlf.47, 2026-11-06)
+
+Result: PASS. The RSS gate now measures the app's own memory: `RssAnon` + `RssShmem` from
+`/proc/self/status` (`app_mem_mb`), limit 150 MB (leader decision 2026-11-06, option C).
+After table-2000 the median is 81.87 MB. Total RSS (`rss_mb`, 246 MB), PSS and USS stay in the
+report as information.
+
+Setup:
+
+- Binary: `cargo build --locked --profile perf -p tl-app --features bench` at `d9d28c8df`,
+  copied to `/var/tmp/claude/wlf47/tasklens`. Scripts, reports and logs: `/var/tmp/claude/wlf47/`
+  (`drive.sh`, `run.sh`, `drive.log`, `runs/`).
+- Hidden nested KWin `harness.sh start wlf47` (60 Hz). `TL_BENCH_NESTED=1` and
+  `TL_BENCH_REFRESH_HZ=60`. `TL_PIXEL_PACING` is not set: since 4040f4f72 the bench fixture runs
+  unpaced. Every report has `refresh_hz` 60, `pacing` off, `window_active` true and 0 stalls.
+- Quiet-machine rule as in the wlf.46 rerun above. Each run holds the bench slot lock with `flock -o`.
+- Command per run: `tasklens --bench table-2000 --duration 30 --warmup 5 --json <file>`.
+
+| Run | Start (local) | Load at start (1, 5, 15 min) | Load at end (1 min) | Counts | rss_mb | pss_mb | uss_mb | app_mem_mb | Pacing |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 05:32:22 | 4.01, 7.20, 7.39 | 3.62 | yes | 246.11 | 160.85 | 139.37 | 81.82 | off |
+| 2 | 05:33:40 | 3.19, 6.20, 7.02 | 3.17 | yes | 246.26 | 161.02 | 139.49 | 81.87 | off |
+| 3 | 05:34:19 | 3.08, 5.79, 6.85 | 2.72 | yes | 245.96 | 160.65 | 139.09 | 81.87 | off |
+
+The frame times of these runs (p99 3.99, 3.63 and 4.11 ms) are not part of this gate.
+
+| Gate | Limit | Value | Runs | Result |
+|---|---|---|---|---|
+| App memory after table-2000 | <= 150 MB | 81.87 MB (median) | 3 runs | PASS |
+
 ### Static scene idle CPU (tasklens-wlf.27, 2026-11-04)
 
 Result: FAIL. The rerun on 2026-11-05 at `e44eb654a`, after the wlf.39 fix, used a median
