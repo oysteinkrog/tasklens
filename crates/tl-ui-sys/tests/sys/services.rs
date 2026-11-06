@@ -894,7 +894,6 @@ mod copy {
 
     use super::*;
     use gpui_kit::{ClipboardItem, TestAppContext, VisualTestContext};
-    use tl_model::actions::SchedPolicy;
     use tl_model::ids::ProcessKey;
     use tl_model::process::{
         GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord,
@@ -902,7 +901,6 @@ mod copy {
     use tl_model::snapshot::{
         ProcessSnapshot, ServiceStatus, ServicesSnapshot, Snapshot, StartupType, UnitRecord,
     };
-    use tl_model::system::CpuSet;
     use tl_model::table::{Manager, ServiceColumn, SysNodeId, SysRow, Total, UnitRef, UnitType};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
