@@ -1110,7 +1110,7 @@ mod values {
         assert_eq!(f.text(ColumnId::CommitPeak), "3.00 MiB");
         assert_eq!(f.text(ColumnId::CommitDelta), "-1.50 MiB");
         assert_eq!(f.text(ColumnId::PageTables), "8.00 KiB");
-        assert_eq!(f.text(ColumnId::MajorFaultsDelta), "1,234");
+        assert_eq!(f.text(ColumnId::MajorFaultsDelta), "1\u{2009}234");
 
         // A growth has no sign; zero reads "0 B".
         f.extras[0].counters.commit_delta_bytes = 2048;
