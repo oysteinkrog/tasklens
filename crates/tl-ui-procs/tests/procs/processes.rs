@@ -1067,7 +1067,6 @@ mod delegate {
             ColumnId::Cycles,
             ColumnId::CyclesDelta,
             ColumnId::X11Resources,
-            ColumnId::Container,
         ];
         let mut found: Vec<ColumnId> = PROCESS_COLUMNS
             .iter()

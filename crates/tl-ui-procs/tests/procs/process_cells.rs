@@ -742,6 +742,27 @@ mod values {
     }
 
     #[test]
+    fn p2_container_words() {
+        use tl_model::process::ContainerKind as K;
+        for (k, want) in [
+            (K::Podman, "container (podman)"),
+            (K::Docker, "container (docker)"),
+            (K::Nspawn, "container (systemd-nspawn)"),
+            (K::Other, "container"),
+            (K::Host, ""),
+        ] {
+            let f = p2_en(ProcessExtrasP2 {
+                container: Some(k),
+                ..ProcessExtrasP2::default()
+            });
+            assert_eq!(f.text(ColumnId::Container), want);
+            assert_eq!(glyph(&f, ColumnId::Container), Validity::Valid);
+        }
+        let f = p2_en(ProcessExtrasP2::default());
+        assert_eq!(glyph(&f, ColumnId::Container), Validity::Unsupported);
+    }
+
+    #[test]
     fn p2_power_classes_and_bits() {
         let class = |w: f32| {
             let f = p2_fixture(ProcessExtrasP2 {
@@ -1066,11 +1087,10 @@ mod values {
         assert_eq!(shown(&out), "");
     }
 
-    const PARKED_P4: [ColumnId; 4] = [
+    const PARKED_P4: [ColumnId; 3] = [
         ColumnId::Cycles,
         ColumnId::CyclesDelta,
         ColumnId::X11Resources,
-        ColumnId::Container,
     ];
     const STAT_P4: [ColumnId; 3] = [ColumnId::Pgrp, ColumnId::Sid, ColumnId::LastCpu];
 
@@ -1090,6 +1110,7 @@ mod values {
         for id in STAT_P4 {
             assert!(offered.contains(&id), "{id:?}");
         }
+        assert!(offered.contains(&ColumnId::Container));
         for id in PARKED_P4 {
             assert!(!offered.contains(&id), "{id:?}");
             let col = PROCESS_COLUMNS.iter().find(|c| c.id == id).unwrap();

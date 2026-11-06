@@ -16,8 +16,9 @@ use tl_model::actions::{IoPriority, SchedPolicy};
 use tl_model::details::Elevated;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, PseudoKind};
 use tl_model::process::{
-    CgroupIo, GpuEngineKind, GpuEngineUse, GroupKind, GroupRow, GroupRowKind, PackageStatus,
-    ProcCounters, ProcFlags, ProcState, ProcessExtras, ProcessExtrasP2, ProcessRecord,
+    CgroupIo, ContainerKind, GpuEngineKind, GpuEngineUse, GroupKind, GroupRow, GroupRowKind,
+    PackageStatus, ProcCounters, ProcFlags, ProcState, ProcessExtras, ProcessExtrasP2,
+    ProcessRecord,
 };
 use tl_model::snapshot::{Snapshot, WindowsSnapshot};
 use tl_model::system::{CpuSet, Metric, ZramTotals};
@@ -420,7 +421,7 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::Pgrp, "processes-column-pgrp", Group::Linux, Kind::IntegerId, Heat::None, 4),
     col(Id::Sid, "processes-column-sid", Group::Linux, Kind::IntegerId, Heat::None, 4),
     col(Id::LastCpu, "processes-column-last-cpu", Group::Linux, Kind::IntegerId, Heat::None, 4),
-    col(Id::Container, "processes-column-container", Group::Linux, Kind::Text, Heat::None, NO_SOURCE),
+    col(Id::Container, "processes-column-container", Group::Linux, Kind::Text, Heat::None, 4),
 ];
 
 // ---- Cell values (E22-004) ----
@@ -461,6 +462,8 @@ pub struct CellWords {
     pub power: [Arc<str>; 5],
     /// Package status words (PROC-027), in `PackageStatus` declaration order.
     pub package_status: [Arc<str>; 8],
+    /// Container words (PROC-036), in `ContainerKind` order: Podman, Docker, Nspawn, Other.
+    pub container: [Arc<str>; 4],
     /// GPU engine words (PROC-033): 3D/Compute, Encode, Decode.
     pub gpu_engine: [Arc<str>; 3],
     /// "GPU {$n} - {$engine}".
@@ -559,6 +562,12 @@ impl CellWords {
                 text("processes-package-status-snap"),
                 text("processes-package-status-appimage"),
                 text("processes-package-status-wine"),
+            ],
+            container: [
+                text("processes-container-podman"),
+                text("processes-container-docker"),
+                text("processes-container-nspawn"),
+                text("processes-container-other"),
             ],
             gpu_engine: [
                 text("processes-gpu-engine-3d"),
@@ -1374,6 +1383,16 @@ fn record_value<'a>(
                 } else {
                     Value::Blank
                 }
+            })
+        }),
+        // PROC-036: blank on the host, a word for each container runtime.
+        C::Container => p2(&|x| {
+            x.container.map(|k| match k {
+                ContainerKind::Host => Value::Blank,
+                ContainerKind::Podman => Value::Arc(&ctx.words.container[0]),
+                ContainerKind::Docker => Value::Arc(&ctx.words.container[1]),
+                ContainerKind::Nspawn => Value::Arc(&ctx.words.container[2]),
+                ContainerKind::Other => Value::Arc(&ctx.words.container[3]),
             })
         }),
         C::Power => p2(&|x| x.power_w.map(Value::Power)),
