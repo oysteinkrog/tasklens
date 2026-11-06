@@ -452,11 +452,14 @@ fn power_gpu_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartView>> {
     cx.new(|_| Root { child: chart })
 }
 
-/// The pixel at plot row `watts` of a 200 W axis in column `x`, at `ui_scale` 1.0.
-fn power_pixel(img: &RgbaImage, x: u32, watts: f32) -> [u8; 4] {
+/// The pixel at plot row `watts` of a 200 W axis in logical column `x`. The image is in
+/// device px, so logical px are scaled by the image width over `CHART_W`.
+fn power_pixel(img: &RgbaImage, x: f32, watts: f32) -> [u8; 4] {
+    let k = img.width() as f32 / CHART_W;
     // The plot is the 400 × 200 chart inset by its 1 px outline.
     let y = 1.0 + (1.0 - watts / 200.0) * 198.0;
-    img.get_pixel(x, y.round() as u32).0
+    img.get_pixel((x * k).round() as u32, (y * k).round() as u32)
+        .0
 }
 
 /// Renders a power chart, compares it with its golden and checks the ramp in the pixels: in a
@@ -473,8 +476,8 @@ fn check_power(
     let img = harness.render(size(px(CHART_W), px(CHART_H)), root);
     assert_golden(name, &img);
     // Column 350 is in the newest 40 % of the plot, where the value is about 178 W.
-    let warm = power_pixel(&img, 350, 170.0);
-    let cool = power_pixel(&img, 350, 15.0);
+    let warm = power_pixel(&img, 350.0, 170.0);
+    let cool = power_pixel(&img, 350.0, 15.0);
     assert!(
         i32::from(warm[0]) > i32::from(warm[2]) + 40,
         "{name}: the fill near 170 W is warm: {warm:?}"
