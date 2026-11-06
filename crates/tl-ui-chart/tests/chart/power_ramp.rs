@@ -127,12 +127,12 @@ impl Render for Root {
 }
 
 /// One chart in a window at scale 1, with `series` bound and drawn once.
-fn draw_chart<'a>(
-    cx: &'a mut TestAppContext,
+fn draw_chart(
+    cx: &mut TestAppContext,
     make_spec: impl FnOnce(&GraphPalette) -> ChartSpec,
     fmt: ValueFormat,
     series: SmallVec<[Option<Arc<SeriesView>>; 2]>,
-) -> (Entity<ChartView>, &'a mut VisualTestContext) {
+) -> (Entity<ChartView>, &mut VisualTestContext) {
     init(cx);
     let (root, vcx) = cx.add_window_view(|window, cx| {
         let driver = cx.new(AnimationDriver::new);
