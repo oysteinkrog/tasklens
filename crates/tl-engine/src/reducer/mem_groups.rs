@@ -642,40 +642,14 @@ mod tests {
     fn extras(p: &Proc) -> ProcessExtras {
         let exe = p.exe.unwrap_or("");
         ProcessExtras {
-            cpu_kernel_pct: 0.0,
-            cpu_user_pct: 0.0,
-            cpu_relative_pct: 0.0,
-            utime_ticks: 0,
-            stime_ticks: 0,
-            start_boot_ns: 0,
-            rss_peak_bytes: 0,
-            rss_shared_bytes: 0,
-            commit_bytes: 0,
-            vsize_bytes: 0,
-            vsize_peak_bytes: 0,
-            page_faults: 0,
-            page_faults_delta: 0,
-            major_faults: 0,
-            policy: SchedPolicy::Other,
-            rt_prio: 0,
-            affinity: CpuSet::empty(),
-            handles: None,
             exe_name: Arc::from(p.comm),
             exe_path: Arc::from(exe),
-            exe_deleted: false,
             unit: p.app.map(|(id, _)| UnitRef {
                 manager: Manager::User,
                 name: Arc::from(format!("app-{id}-1.scope")),
             }),
             state_letter: b'S',
-            frozen: false,
-            disk_read_bps: 0.0,
-            disk_write_raw_bps: 0.0,
-            flag_since_ns: 0,
-            pgrp: 0,
-            sid: 0,
-            last_cpu: 0,
-            wine: None,
+            ..ProcessExtras::default()
         }
     }
 
