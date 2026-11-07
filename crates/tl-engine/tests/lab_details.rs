@@ -1093,8 +1093,8 @@ fn engine_reads_pss_for_properties_general_target() {
     stop(fl, ui, handle);
 }
 
-/// tasklens-dwy.16: with an AMD card, a Properties target that uses no GPU gets final GPU values:
-/// VRAM a valid 0, and GPU % `Unsupported`, as AMD has no per-process utilisation.
+/// tasklens-dwy.16, pdu.84: with an AMD card, a Properties target that uses no GPU gets a valid 0
+/// for VRAM and GPU %. DRM fdinfo gives per-process utilization (PROC-033).
 #[test]
 fn engine_gpu_final_for_properties_target_without_gpu_use() {
     let root = FixtureRoot::new(&["owner-desktop", "drm-amd"]);
@@ -1120,6 +1120,7 @@ fn engine_gpu_final_for_properties_target_without_gpu_use() {
         .expect("record of the target");
     assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
     assert_eq!(r.gpu_mem_bytes, 0);
-    assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
+    assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
+    assert!(r.gpu_util_pct.abs() < f32::EPSILON);
     stop(fl, ui, handle);
 }
