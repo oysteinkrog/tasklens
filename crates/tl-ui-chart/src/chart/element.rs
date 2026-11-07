@@ -819,7 +819,8 @@ impl grid::QuadSink for QuadCount {
 
 /// Paints `path` once per ramp band it reaches, each time with its bounds set to that band: the
 /// bounds clip the path and span the band's gradient (tasklens-1vwxr). Calls `on_paint` after
-/// each paint.
+/// each paint. When the path reaches both bands, each paint gets only the triangles that reach
+/// its band ([`split_triangles`]), so a triangle is sent twice only when it crosses the split.
 pub(super) fn paint_ramped(
     window: &mut Window,
     mut path: Path<Pixels>,
@@ -829,10 +830,14 @@ pub(super) fn paint_ramped(
     let [lower, upper] = bands;
     let (low, up) = (lower.reaches(&path.bounds), upper.reaches(&path.bounds));
     if low && up {
-        let mut first = path.clone();
-        first.bounds = lower.bounds;
-        window.paint_path(first, lower.background());
+        let mut above = split_triangles(&mut path, lower.bounds.top());
+        above.bounds = upper.bounds;
+        path.bounds = lower.bounds;
+        window.paint_path(path, lower.background());
         on_paint(lower);
+        window.paint_path(above, upper.background());
+        on_paint(upper);
+        return;
     } else if low {
         path.bounds = lower.bounds;
         window.paint_path(path, lower.background());
@@ -844,6 +849,47 @@ pub(super) fn paint_ramped(
         window.paint_path(path, upper.background());
         on_paint(upper);
     }
+}
+
+/// Splits the triangle list of `path` at the row `split` (window logical px, y down): returns
+/// a path with the triangles that reach above `split` and keeps in `path` the triangles that
+/// reach below it. A triangle that crosses `split` is in both. Each band's bounds clip the rest
+/// of the triangle, so the painted pixels are the same as with the whole path in each band.
+/// GPUI sends every path vertex with its own colour and bounds (104 bytes), so this halves
+/// the upload of a ramped path (tasklens-3uosp). A trailing partial triangle stays in `path`.
+fn split_triangles(path: &mut Path<Pixels>, split: Pixels) -> Path<Pixels> {
+    let mut above = Path::new(path.bounds.origin);
+    let v = &mut path.vertices;
+    let whole = v.len() / 3 * 3;
+    above.vertices.reserve(whole / 2);
+    let mut kept = 0;
+    for i in (0..whole).step_by(3) {
+        let ys = [
+            v[i].xy_position.y,
+            v[i + 1].xy_position.y,
+            v[i + 2].xy_position.y,
+        ];
+        let top = ys[0].min(ys[1]).min(ys[2]);
+        let bottom = ys[0].max(ys[1]).max(ys[2]);
+        if top < split {
+            above.vertices.extend_from_slice(&v[i..i + 3]);
+        }
+        if bottom > split {
+            if kept != i {
+                for k in 0..3 {
+                    v.swap(kept + k, i + k);
+                }
+            }
+            kept += 3;
+        }
+    }
+    // Keep a trailing partial triangle, as GPUI would get it unsplit.
+    let tail = v.len() - whole;
+    for k in 0..tail {
+        v.swap(kept + k, whole + k);
+    }
+    v.truncate(kept + tail);
+    above
 }
 
 /// A newest point from `ChartCache::newest` (chart-local physical px) in window logical px, as
@@ -909,4 +955,70 @@ pub(super) fn translated(
         })
         .collect();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tri(path: &mut Path<Pixels>, ys: [f32; 3]) {
+        for (k, y) in ys.into_iter().enumerate() {
+            path.vertices.push(PathVertex {
+                xy_position: point(px(k as f32), px(y)),
+                st_position: point(0.0, 1.0),
+                content_mask: Default::default(),
+            });
+        }
+    }
+
+    fn rows(path: &Path<Pixels>) -> Vec<[f32; 3]> {
+        path.vertices
+            .chunks(3)
+            .map(|t| {
+                let y = |i: usize| f32::from(t[i].xy_position.y);
+                [y(0), y(1), y(2)]
+            })
+            .collect()
+    }
+
+    /// Above-only triangles go to the upper path, below-only ones stay, a crossing one is in
+    /// both, and a triangle that only touches the split is on its own side (tasklens-3uosp).
+    #[test]
+    fn split_triangles_by_band() {
+        let mut path = Path::new(point(px(0.), px(0.)));
+        tri(&mut path, [0., 10., 20.]); // above
+        tri(&mut path, [60., 70., 80.]); // below
+        tri(&mut path, [40., 50., 60.]); // crosses
+        tri(&mut path, [30., 50., 50.]); // touches from above
+        tri(&mut path, [50., 50., 90.]); // touches from below
+        let above = split_triangles(&mut path, px(50.));
+        assert_eq!(
+            rows(&above),
+            vec![[0., 10., 20.], [40., 50., 60.], [30., 50., 50.]]
+        );
+        assert_eq!(
+            rows(&path),
+            vec![[60., 70., 80.], [40., 50., 60.], [50., 50., 90.]]
+        );
+    }
+
+    /// No triangle is lost or doubled when none crosses; a trailing partial triangle stays.
+    #[test]
+    fn split_triangles_keeps_counts() {
+        let mut path = Path::new(point(px(0.), px(0.)));
+        for i in 0..10 {
+            let y = if i % 2 == 0 { 10. } else { 90. };
+            tri(&mut path, [y, y + 1., y + 2.]);
+        }
+        path.vertices.push(path.vertices[0].clone());
+        let above = split_triangles(&mut path, px(50.));
+        assert_eq!(above.vertices.len(), 15);
+        assert_eq!(path.vertices.len(), 16);
+        assert!(rows(&above).iter().all(|t| t[0] == 10.));
+        assert!(
+            path.vertices[..15]
+                .iter()
+                .all(|v| f32::from(v.xy_position.y) >= 90.)
+        );
+    }
 }
