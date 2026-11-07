@@ -41,7 +41,9 @@ use tl_model::ids::ProcessKey;
 use tl_model::remote_proto::{
     HEADER_LEN, HelloTail, HostSettingsChanges, PROTO, SetHostSettingsReply, Want,
 };
-use tl_remote::client::{ClientConfig, Connection, Connector, LinkStatus, RemoteClient};
+use tl_remote::client::{
+    ClientConfig, Connection, Connector, FailureLog, LinkStatus, RemoteClient,
+};
 use tl_remote::ssh::SshConnector;
 
 /// The `tasklens` binary, which runs `tasklens bridge` on host B.
@@ -287,6 +289,8 @@ fn start_client(connector: impl Connector) -> RemoteClient {
             want: Want { snapshots: true },
         },
         backoff: vec![Duration::from_millis(100), Duration::from_millis(200)],
+        host: Arc::from("hostb"),
+        on_failed: FailureLog::default(),
     };
     let client = RemoteClient::start(connector, config).unwrap();
     client.set_demand(Demand {

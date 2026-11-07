@@ -293,7 +293,7 @@ pub(crate) mod tests {
     use tl_model::request::{IdKind, RequestEnd};
     use tl_model::table::{SysColumnId, SysSortSpec, SysTable};
     use tl_model::time::BootId;
-    use tl_remote::client::{ClientConfig, Connection, LinkStatus, RemoteClient};
+    use tl_remote::client::{ClientConfig, Connection, FailureLog, LinkStatus, RemoteClient};
     use tl_remote::delta::DeltaEncoder;
     use tl_remote::envelope::{FrameReader, FrameWriter};
     use tl_ui::host_settings;
@@ -627,6 +627,8 @@ pub(crate) mod tests {
                 want: Want { snapshots: true },
             },
             backoff: vec![backoff],
+            host: Arc::from("desk"),
+            on_failed: FailureLog::default(),
         };
         Arc::new(RemoteClient::start(connector, config).expect("client"))
     }

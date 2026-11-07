@@ -26,6 +26,11 @@
 //! replayed. The newest demand and table queries are session state, not commands: they are sent
 //! again on each new connection.
 //!
+//! A session that fails before its first snapshot is a failed attempt, not a drop: its status is
+//! `Failed` with the reason, and the backoff keeps growing. When the engine runs another tasklens
+//! version, the reason names both versions (`mismatch_text`). Each new reason goes once to
+//! `ClientConfig::on_failed`, so the app logs it.
+//!
 //! After a drop the client connects again after 1, 2, 4, 8, 16, then every 30 s. Each new
 //! session starts from a complete frame. Its component versions are the new session's, so each
 //! snapshot is stored together with its session's generation, and the hub compares nothing
@@ -52,9 +57,9 @@ use tl_model::command::{Command, CommandError, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::journal::{JournalControl, JournalEvent, JournalHandle, JournalQuery};
 use tl_model::remote_proto::{
-    BootPrefix, ClientMsg, Hello, HelloTail, HostIdentity, HostSettingsChanges, PROTO, ProtoError,
-    ServerBootstrap, ServerMsg, SetHostSettingsReply, StreamId, Welcome, decode_server_bootstrap,
-    encode_hello,
+    APP_VERSION, BootPrefix, ClientMsg, Hello, HelloTail, HostIdentity, HostSettingsChanges, PROTO,
+    ProtoError, RefuseReason, ServerBootstrap, ServerMsg, SetHostSettingsReply, StreamId, Welcome,
+    decode_server_bootstrap, encode_hello, mismatch_text,
 };
 use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::settings::EngineSettings;
@@ -171,6 +176,23 @@ where
     }
 }
 
+/// Gets the reason of a failed attempt, once per new reason. tl-remote does not log, so the app
+/// logs here. The default does nothing.
+#[derive(Clone)]
+pub struct FailureLog(pub Arc<dyn Fn(&str) + Send + Sync>);
+
+impl Default for FailureLog {
+    fn default() -> Self {
+        Self(Arc::new(|_| {}))
+    }
+}
+
+impl std::fmt::Debug for FailureLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FailureLog")
+    }
+}
+
 /// What a `RemoteClient` sends and how it waits.
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
@@ -178,6 +200,18 @@ pub struct ClientConfig {
     pub hello: HelloTail,
     /// Waits before each reconnect; the last repeats. `BACKOFF` in the app. Must not be empty.
     pub backoff: Vec<Duration>,
+    /// The host's name as the window shows it (the tab name). Failure reasons use it.
+    pub host: Arc<str>,
+    /// Gets each new failure reason once.
+    pub on_failed: FailureLog,
+}
+
+/// How one connection ended.
+enum SessionEnd {
+    /// The session's first snapshot was installed, then the stream ended.
+    Up,
+    /// The handshake or the session before its first snapshot failed for this reason.
+    Failed(Arc<str>),
 }
 
 /// Where the client's connection is.
@@ -556,20 +590,32 @@ fn connection_loop(
     stop: &mpsc::Receiver<()>,
 ) {
     let mut attempt = 0usize;
+    // The reason last passed to `on_failed`, so a reason that repeats is logged once.
+    let mut logged: Option<Arc<str>> = None;
     loop {
         if shared.stopped.load(Ordering::Acquire) {
             return;
         }
         set_status(shared, LinkStatus::Connecting);
-        match connector.connect() {
-            Ok(conn) => match run_session(shared, conn, &config.hello) {
-                Ok(()) => {
+        let failed = match connector.connect() {
+            Ok(conn) => match run_session(shared, conn, config) {
+                SessionEnd::Up => {
                     attempt = 0;
+                    logged = None;
                     set_status(shared, LinkStatus::Connecting);
+                    None
                 }
-                Err(reason) => set_status(shared, LinkStatus::Failed(reason)),
+                SessionEnd::Failed(reason) => Some(reason),
             },
-            Err(e) => set_status(shared, LinkStatus::Failed(Arc::from(e.to_string()))),
+            Err(e) => Some(Arc::from(e.to_string())),
+        };
+        if let Some(reason) = failed {
+            set_status(shared, LinkStatus::Failed(Arc::clone(&reason)));
+            // A failure caused by the client's own drop is not news.
+            if !shared.stopped.load(Ordering::Acquire) && logged.as_deref() != Some(&*reason) {
+                (config.on_failed.0)(&reason);
+                logged = Some(reason);
+            }
         }
         let wait = config.backoff[attempt.min(config.backoff.len() - 1)];
         attempt = attempt.saturating_add(1);
@@ -584,9 +630,10 @@ fn set_status(shared: &Shared, status: LinkStatus) {
     lock(&shared.state).status = Some(status);
 }
 
-/// Runs one connection: the handshake, then the session until the stream ends. `Ok` when a
-/// session was opened, `Err` with the reason when the handshake failed.
-fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(), Arc<str>> {
+/// Runs one connection: the handshake, then the session until the stream ends. `Up` when the
+/// session's first snapshot was installed. `Failed` with the reason when the handshake failed or
+/// the session ended before its first snapshot.
+fn run_session(shared: &Shared, conn: Connection, config: &ClientConfig) -> SessionEnd {
     let Connection {
         mut reader,
         mut writer,
@@ -599,37 +646,54 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
     // The client may have dropped before the shutdown was stored.
     if shared.stopped.load(Ordering::Acquire) {
         shutdown();
-        return Err(Arc::from("client closed"));
+        return SessionEnd::Failed(Arc::from("client closed"));
     }
-    let mut frames = FrameReader::new().map_err(|e| Arc::from(e.to_string()))?;
-    let identity = match handshake(&mut reader, &mut writer, &frames, hello) {
-        Ok(identity) => identity,
+    let mut frames = match FrameReader::new() {
+        Ok(frames) => frames,
+        Err(e) => return SessionEnd::Failed(Arc::from(e.to_string())),
+    };
+    let (identity, their_version) = match handshake(
+        &mut reader,
+        &mut writer,
+        &frames,
+        &config.hello,
+        &config.host,
+    ) {
+        Ok(welcome) => welcome,
         Err(reason) => {
             shutdown();
             lock(&shared.state).shutdown = None;
-            return Err(reason);
+            return SessionEnd::Failed(reason);
         }
     };
     let host_name = Arc::clone(&identity.host_name);
     let (session, link_inputs) = open_link(shared, identity);
     spawn_writer(writer, link_inputs, Arc::clone(&shutdown));
 
-    // Ends with the first read, decode or apply error, EOF included.
+    // Ends with the first read, decode or apply error, EOF included. Before the first snapshot
+    // that error is why the attempt failed.
     // 0 until the session's first frame, so that frame must be complete.
     let mut installed_frame = 0u64;
     let mut first = true;
-    while let Ok(raw) = frames.read_frame(&mut reader) {
-        let Ok(msg) = frames.decode_server(&raw) else {
-            break;
+    let ended: SessionError = loop {
+        let raw = match frames.read_frame(&mut reader) {
+            Ok(raw) => raw,
+            Err(EnvelopeError::Proto(ProtoError::Eof)) => break SessionError::Closed,
+            Err(e) => break SessionError::Bad(e.to_string()),
+        };
+        let msg = match frames.decode_server(&raw) {
+            Ok(msg) => msg,
+            Err(e) => break SessionError::Bad(e.to_string()),
         };
         match msg {
             ServerMsg::Snapshot(frame) => {
                 let installed = Arc::clone(&shared.latest.load().snap);
-                let Ok(snap) =
-                    delta::apply(&installed, installed_frame, &frame, installed.sequence + 1)
-                else {
-                    break;
-                };
+                let snap =
+                    match delta::apply(&installed, installed_frame, &frame, installed.sequence + 1)
+                    {
+                        Ok(snap) => snap,
+                        Err(e) => break SessionError::Bad(e.to_string()),
+                    };
                 let first_of_session = std::mem::replace(&mut first, false);
                 // Reported before the store that lets the UI read the snapshot.
                 observe!(
@@ -687,22 +751,43 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
             // `GetHostSettings`.
             ServerMsg::HostSettings(_) => {}
         }
-    }
+    };
     shutdown();
     end_session(shared, &host_name);
     // After its effects: a test waits for this step and then checks that the link is gone and
     // the ends were sent. The next session's steps come from this thread, so they follow it.
     observe!(shared.observer, Observed::SessionEnded(session));
-    Ok(())
+    if !first {
+        return SessionEnd::Up;
+    }
+    let host = &*config.host;
+    SessionEnd::Failed(Arc::from(if &*their_version != APP_VERSION {
+        // Another version that passed the handshake, as 1.5.7 and 1.5.8 did with proto 1.
+        mismatch_text(host, &their_version)
+    } else {
+        match ended {
+            SessionError::Closed => format!("{host} closed the connection"),
+            SessionError::Bad(e) => format!("bad data from {host}: {e}"),
+        }
+    }))
 }
 
-/// Sends `Hello` and reads the server's answer.
+/// Why a session's read loop ended.
+enum SessionError {
+    /// The engine closed the stream between frames.
+    Closed,
+    /// A read, decode or apply error.
+    Bad(String),
+}
+
+/// Sends `Hello` and reads the server's answer: the engine's identity and its app version.
 fn handshake(
     reader: &mut Box<dyn Read + Send>,
     writer: &mut Box<dyn Write + Send>,
     frames: &FrameReader,
     hello: &HelloTail,
-) -> Result<HostIdentity, Arc<str>> {
+    host: &str,
+) -> Result<(HostIdentity, Arc<str>), Arc<str>> {
     let mut out = Vec::new();
     encode_hello(
         &Hello {
@@ -722,15 +807,26 @@ fn handshake(
         EnvelopeError::Proto(ProtoError::Io(e)) => Arc::from(e.to_string()),
         e => Arc::from(e.to_string()),
     })?;
+    // Another version names both versions. The same version on another proto (a test build)
+    // keeps the protocol numbers, which then are the only difference.
+    let other_version = |theirs: &str| (theirs != APP_VERSION).then(|| mismatch_text(host, theirs));
     match decode_server_bootstrap(&frame).map_err(|e| Arc::from(e.to_string()))? {
         ServerBootstrap::Welcome(Welcome {
+            prefix,
             tail: Some(identity),
-            ..
-        }) => Ok(identity),
-        ServerBootstrap::Welcome(Welcome { prefix, .. }) => Err(Arc::from(format!(
-            "the engine runs tasklens {} (protocol {}), this window speaks protocol {PROTO}",
-            prefix.app_version, prefix.proto
-        ))),
+        }) => Ok((identity, prefix.app_version)),
+        ServerBootstrap::Welcome(Welcome { prefix, .. }) => Err(Arc::from(
+            other_version(&prefix.app_version).unwrap_or_else(|| {
+                format!(
+                    "the engine runs tasklens {} (protocol {}), this window speaks protocol \
+                     {PROTO}",
+                    prefix.app_version, prefix.proto
+                )
+            }),
+        )),
+        ServerBootstrap::Refused(refused) if refused.reason == RefuseReason::Proto => {
+            Err(other_version(&refused.prefix.app_version).map_or(refused.text, Arc::from))
+        }
         ServerBootstrap::Refused(refused) => Err(refused.text),
     }
 }

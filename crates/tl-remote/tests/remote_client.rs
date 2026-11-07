@@ -1,7 +1,8 @@
 //! `RemoteClient` against an in-memory server on a Unix socket pair (ADR-018): snapshot install,
 //! wake and `Ack` order, the bounded command queue, a connection lost during requests, a new
 //! engine instance, generation and snapshot read together, action summaries with a full event
-//! queue, journal close, and host settings from the snapshot with their write replies.
+//! queue, journal close, host settings from the snapshot with their write replies, and failed
+//! attempts against an engine of another version (reason, one log line, backoff kept).
 //!
 //! A test waits for the exact step it then asserts on, through the client's `observe` steps or
 //! the channel it reads, never for an earlier step that only usually comes first.
@@ -24,15 +25,16 @@ use tl_model::details::{ScanId, StringScanOpts};
 use tl_model::ids::ProcessKey;
 use tl_model::journal::{JournalAccess, JournalEvent, JournalQuery};
 use tl_model::remote_proto::{
-    BootPrefix, ClientMsg, HelloTail, HostIdentity, HostSettings, HostSettingsChanges, ServerMsg,
-    SetHostSettingsReply, StreamId, Want, Welcome, decode_hello, encode_welcome,
+    APP_VERSION, BootPrefix, ClientMsg, FrameHeader, HelloTail, HostIdentity, HostSettings,
+    HostSettingsChanges, PROTO, RefuseReason, Refused, ServerMsg, SetHostSettingsReply, StreamId,
+    Want, Welcome, decode_hello, encode_refused, encode_welcome, mismatch_text,
 };
 use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::snapshot::Snapshot;
 use tl_model::table::{Manager, TableQuery, UnitRef};
 use tl_model::time::BootId;
 use tl_remote::client::{
-    ACTION_EVENTS, ClientConfig, Connection, LinkStatus, Observed, RemoteClient,
+    ACTION_EVENTS, ClientConfig, Connection, FailureLog, LinkStatus, Observed, RemoteClient,
 };
 use tl_remote::delta::DeltaEncoder;
 use tl_remote::envelope::{FrameReader, FrameWriter};
@@ -90,6 +92,8 @@ fn client() -> (RemoteClient, mpsc::Sender<Connection>) {
             want: Want { snapshots: true },
         },
         backoff: vec![Duration::from_millis(10)],
+        host: Arc::from("home"),
+        on_failed: FailureLog::default(),
     };
     (RemoteClient::start(connector, config).unwrap(), tx)
 }
@@ -784,4 +788,175 @@ fn journal_close_on_handle_drop() {
     drop(server);
     let events = handle.events();
     wait_for("the stream to close", || events.is_closed().then_some(()));
+}
+
+/// A version older than any build with proto 2: 1.1.0 was the first release.
+const OLD: &str = "1.1.0";
+
+/// What a fake engine of another version saw and logged.
+#[derive(Default)]
+struct Attempts {
+    /// When each connection was handed out.
+    connects: Mutex<Vec<Instant>>,
+    /// Each reason passed to `on_failed`.
+    logged: Mutex<Vec<String>>,
+}
+
+/// A client whose every connection goes to a fake engine thread that reads the `Hello`, writes
+/// `answer`, then stops writing and reads until the client closes, so it never closes on bytes
+/// it has not read. Backoff 50 ms, then 200 ms.
+fn client_of(answer: fn() -> Vec<u8>) -> (RemoteClient, Arc<Attempts>) {
+    let attempts = Arc::new(Attempts::default());
+    let seen = Arc::clone(&attempts);
+    let connector = move || {
+        seen.connects.lock().unwrap().push(Instant::now());
+        let (mut ours, theirs) = UnixStream::pair()?;
+        std::thread::spawn(move || {
+            ours.set_read_timeout(Some(TIMEOUT)).unwrap();
+            let frames = FrameReader::new().unwrap();
+            if frames.read_frame(&mut ours).is_err() {
+                return;
+            }
+            let _ = ours.write_all(&answer());
+            let _ = ours.shutdown(std::net::Shutdown::Write);
+            let _ = io::copy(&mut ours, &mut io::sink());
+        });
+        Connection::unix(theirs)
+    };
+    let logged = Arc::clone(&attempts);
+    let config = ClientConfig {
+        hello: HelloTail {
+            pid: 4242,
+            app_id: Arc::from("io.github.oysteinkrog.Tasklens"),
+            bridge: false,
+            want: Want { snapshots: true },
+        },
+        backoff: vec![Duration::from_millis(50), Duration::from_millis(200)],
+        host: Arc::from("home"),
+        on_failed: FailureLog(Arc::new(move |why: &str| {
+            logged.logged.lock().unwrap().push(why.to_owned());
+        })),
+    };
+    (RemoteClient::start(connector, config).unwrap(), attempts)
+}
+
+/// A `Welcome` from an engine on this proto with app version `version`.
+fn welcome_bytes(version: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_welcome(
+        &Welcome {
+            prefix: BootPrefix {
+                proto: PROTO,
+                app_version: Arc::from(version),
+                flags: 0,
+            },
+            tail: Some(HostIdentity {
+                host_name: Arc::from("home"),
+                machine_id: Arc::from("m1"),
+                boot_id: BootId(7),
+                engine_instance: 1,
+            }),
+        },
+        &mut out,
+    )
+    .unwrap();
+    out
+}
+
+/// Waits for `n` connections; then attempt `n - 1` has ended.
+fn wait_connects(attempts: &Attempts, n: usize) -> Vec<Instant> {
+    wait_for(&format!("{n} connections"), || {
+        let connects = attempts.connects.lock().unwrap();
+        (connects.len() >= n).then(|| connects.clone())
+    })
+}
+
+/// Waits for a `Failed` status and returns its reason. `Connected` fails the test.
+fn wait_failed(client: &RemoteClient) -> String {
+    wait_for("a failed attempt", || match client.status() {
+        LinkStatus::Failed(why) => Some(why.to_string()),
+        LinkStatus::Connected => panic!("connected to an engine of another version"),
+        LinkStatus::Connecting => None,
+    })
+}
+
+/// An engine on proto 1 (1.1.0) refuses this window's `Hello`. The tab shows both versions and
+/// which side to update; the reason is logged once over three attempts.
+#[test]
+fn older_engine_refused_names_both_versions() {
+    let (client, attempts) = client_of(|| {
+        let mut out = Vec::new();
+        encode_refused(
+            &Refused {
+                prefix: BootPrefix {
+                    proto: 1,
+                    app_version: Arc::from(OLD),
+                    flags: 0,
+                },
+                reason: RefuseReason::Proto,
+                text: Arc::from("the engine runs tasklens 1.1.0 (protocol 1)"),
+            },
+            &mut out,
+        )
+        .unwrap();
+        out
+    });
+    let want = mismatch_text("home", OLD);
+    assert_eq!(
+        want,
+        format!("home runs tasklens {OLD}; this window is {APP_VERSION}. Update home.")
+    );
+    wait_connects(&attempts, 4);
+    assert_eq!(wait_failed(&client), want);
+    assert_eq!(*attempts.logged.lock().unwrap(), vec![want]);
+    assert!(client.host().is_none());
+}
+
+/// An engine of another version on the same proto, as 1.5.7 and 1.5.8 both sent proto 1: the
+/// handshake passes and the first frame does not decode. That is a failed attempt with both
+/// versions named, never `Connected`.
+#[test]
+fn same_proto_bad_first_frame_is_failed_not_connecting() {
+    let (client, attempts) = client_of(|| {
+        let mut out = welcome_bytes(OLD);
+        // A valid header and a payload that is no `ServerMsg`: the variant number overflows.
+        let junk = [0xffu8; 16];
+        out.extend_from_slice(&FrameHeader::plain(PROTO, junk.len() as u32).to_bytes());
+        out.extend_from_slice(&junk);
+        out
+    });
+    let steps = client.observe();
+    let want = mismatch_text("home", OLD);
+    assert_eq!(wait_failed(&client), want);
+    wait_connects(&attempts, 3);
+    assert_eq!(wait_failed(&client), want);
+    assert_eq!(*attempts.logged.lock().unwrap(), vec![want]);
+    while let Ok(step) = steps.try_recv() {
+        assert!(
+            !matches!(
+                step,
+                Observed::SnapshotInstalled { .. } | Observed::Generation(_)
+            ),
+            "{step:?}"
+        );
+    }
+}
+
+/// A session that ends before its first snapshot does not reset the backoff: after the first
+/// 50 ms wait every wait is 200 ms. The reason says the engine closed the connection.
+#[test]
+fn failed_session_keeps_backoff() {
+    let (client, attempts) = client_of(|| welcome_bytes(APP_VERSION));
+    let connects = wait_connects(&attempts, 4);
+    for gap in [connects[2] - connects[1], connects[3] - connects[2]] {
+        assert!(
+            gap >= Duration::from_millis(200),
+            "reconnected after {gap:?}"
+        );
+    }
+    assert_eq!(wait_failed(&client), "home closed the connection");
+    assert_eq!(
+        *attempts.logged.lock().unwrap(),
+        vec!["home closed the connection".to_owned()]
+    );
 }

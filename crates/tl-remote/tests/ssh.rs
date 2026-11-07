@@ -21,7 +21,7 @@ use tl_model::remote_proto::{
     encode_welcome, read_frame,
 };
 use tl_model::time::BootId;
-use tl_remote::client::{ClientConfig, Connector, LinkStatus, RemoteClient};
+use tl_remote::client::{ClientConfig, Connector, FailureLog, LinkStatus, RemoteClient};
 use tl_remote::ssh::{
     STDERR_BYTES, STDERR_LINES, SshConnector, StderrRing, TargetError, classify, ssh_command,
     ssh_program, validate_target,
@@ -199,6 +199,8 @@ fn first_failure(connector: impl Connector) -> String {
         ClientConfig {
             hello: hello(),
             backoff: vec![Duration::from_secs(60)],
+            host: Arc::from("home"),
+            on_failed: FailureLog::default(),
         },
     )
     .unwrap();

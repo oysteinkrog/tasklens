@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use tl_model::client::EngineClient;
 use tl_model::remote_proto::HelloTail;
-use tl_remote::client::{BACKOFF, ClientConfig, Connector, LinkStatus, RemoteClient};
+use tl_remote::client::{BACKOFF, ClientConfig, Connector, FailureLog, LinkStatus, RemoteClient};
 use tl_remote::ssh::{SSH_PROGRAM_ENV, SshConnector, ssh_program, validate_target};
 use tl_ui::hosts_api::{HostLinkStatus, HostTestResult, HostsApi};
 use tl_ui_settings::settings::{HostEntry, check_hosts};
@@ -79,9 +79,14 @@ impl HostManager {
 
     fn start(&self, entry: &HostEntry) -> Result<Arc<RemoteClient>, String> {
         let connector = (self.make)(entry);
+        let name = entry.name.clone();
         let config = ClientConfig {
             hello: self.hello.clone(),
             backoff: self.backoff.clone(),
+            host: Arc::from(entry.name.as_str()),
+            on_failed: FailureLog(Arc::new(move |why: &str| {
+                warn!(target: "tasklens::engine", host = %name, "can't connect: {why}");
+            })),
         };
         RemoteClient::start(move || connector.connect(), config)
             .map(Arc::new)

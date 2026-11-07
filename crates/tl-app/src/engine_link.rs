@@ -48,7 +48,7 @@ use rustix::io::Errno;
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 use tl_model::client::EngineClient;
 use tl_model::remote_proto::{FrameHeader, HEADER_LEN, HelloTail};
-use tl_remote::client::{BACKOFF, ClientConfig, Connection, LinkStatus, RemoteClient};
+use tl_remote::client::{BACKOFF, ClientConfig, Connection, FailureLog, LinkStatus, RemoteClient};
 use tl_remote::server;
 use tl_ui::engine_link::EngineLinkState;
 use tracing::{info, warn};
@@ -579,6 +579,10 @@ fn remote(env: &LinkEnv, first: Option<Connection>) -> Result<Arc<RemoteClient>,
     let config = ClientConfig {
         hello: env.hello.clone(),
         backoff: BACKOFF.to_vec(),
+        host: Arc::from("the engine service"),
+        on_failed: FailureLog(Arc::new(|why: &str| {
+            warn!(target: "tasklens::engine", "engine service: can't connect: {why}");
+        })),
     };
     RemoteClient::start(connector, config)
         .map(Arc::new)

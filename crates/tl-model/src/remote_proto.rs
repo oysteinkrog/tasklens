@@ -50,10 +50,9 @@ use crate::validity::FieldValidity;
 pub const MAGIC: [u8; 4] = *b"TLR1";
 /// Protocol version. Peers are compatible only when their `proto` values are equal.
 ///
-/// Still 1 after `ActionState::Progress` and `ActionState::Saved` were added (q4x76.14): no
-/// released build speaks this protocol yet (1.1.0 is the first), so there is nothing to stay
-/// compatible with. Bump it for any wire change after the first release.
-pub const PROTO: u16 = 1;
+/// 2 from 1.5.9: 1.1.0 to 1.5.8 all sent 1 with changing wire types (tasklens-j5ss5). Bump it
+/// for every wire change.
+pub const PROTO: u16 = 2;
 /// The app version sent in bootstrap frames.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Magic, proto, flags, encoded length, decoded length.
@@ -392,6 +391,35 @@ impl Refused {
             )),
         }
     }
+}
+
+/// The reason a window shows when the engine of `host` runs tasklens `theirs` and the two
+/// cannot talk: it names both versions and which side to update (UI-SHL-008).
+pub fn mismatch_text(host: &str, theirs: &str) -> String {
+    mismatch_text_between(host, theirs, APP_VERSION)
+}
+
+/// `mismatch_text` with this window's version given, for tests.
+pub fn mismatch_text_between(host: &str, theirs: &str, ours: &str) -> String {
+    let fix = match (numeric_version(theirs), numeric_version(ours)) {
+        (Some(t), Some(o)) if t < o => format!("Update {host}."),
+        (Some(t), Some(o)) if t > o => "Update this PC.".to_owned(),
+        _ => "Install the same version on both.".to_owned(),
+    };
+    format!("{host} runs tasklens {theirs}; this window is {ours}. {fix}")
+}
+
+/// `a.b.c` with three decimal numbers, or `None`.
+fn numeric_version(v: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = v.split('.').map(|p| {
+        if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) {
+            p.parse::<u64>().ok()
+        } else {
+            None
+        }
+    });
+    let version = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(version)
 }
 
 /// The first frame a client reads.
@@ -1498,6 +1526,40 @@ mod tests {
             4, 0, b'f', b'u', b'l', b'l',
         ];
         assert_eq!(bytes, expected);
+    }
+
+    /// 1.1.0 to 1.5.8 sent proto 1 with changing wire types, so this build must not send 1.
+    #[test]
+    fn proto_is_2_from_1_5_9() {
+        assert_eq!(PROTO, 2);
+    }
+
+    #[test]
+    fn mismatch_text_names_both_versions_and_the_side_to_update() {
+        assert_eq!(
+            mismatch_text_between("home", "1.5.7", "1.5.8"),
+            "home runs tasklens 1.5.7; this window is 1.5.8. Update home."
+        );
+        assert_eq!(
+            mismatch_text_between("home", "1.10.0", "1.9.3"),
+            "home runs tasklens 1.10.0; this window is 1.9.3. Update this PC."
+        );
+        assert_eq!(
+            mismatch_text_between("home", "1.6.0-dev", "1.5.8"),
+            "home runs tasklens 1.6.0-dev; this window is 1.5.8. Install the same version on both."
+        );
+        assert_eq!(
+            mismatch_text_between("home", "1.5", "1.5.8"),
+            "home runs tasklens 1.5; this window is 1.5.8. Install the same version on both."
+        );
+        assert_eq!(
+            mismatch_text_between("home", "1.5.8.1", "1.5.8"),
+            "home runs tasklens 1.5.8.1; this window is 1.5.8. Install the same version on both."
+        );
+        assert!(
+            mismatch_text("office", "0.0.1")
+                .ends_with(&format!("this window is {APP_VERSION}. Update office."))
+        );
     }
 
     /// A `Hello` from another proto, with a tail this version cannot read, still gives a readable
