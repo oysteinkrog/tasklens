@@ -679,6 +679,9 @@ pub struct ProcessExtrasP2 {
     pub io_priority: Option<IoPriority>,
     /// PROC-036 Container. `None` means not read.
     pub container: Option<ContainerKind>,
+    /// PROC-035 X11 resources: the sum of `XResQueryClientResources` counts over the process's X
+    /// clients. `None`: not an X11 client, column hidden, or no X display.
+    pub x11_resources: Option<u32>,
 }
 
 /// PROC-036 container kind. `Host` is a process in the same PID namespace as tasklens.
@@ -1020,6 +1023,7 @@ mod tests {
         assert!(p2.gpu_decode_pct.is_none());
         assert!(p2.gpu_engine.is_none());
         assert!(p2.container.is_none());
+        assert!(p2.x11_resources.is_none());
     }
 
     #[test]
