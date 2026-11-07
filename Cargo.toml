@@ -32,7 +32,7 @@ exclude = ["third_party"]
 
 [workspace.package]
 edition = "2024"
-version = "1.5.2"
+version = "1.5.8"
 publish = false
 
 [workspace.dependencies]
