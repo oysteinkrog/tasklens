@@ -254,6 +254,7 @@ const fn sortable(id: ColumnId) -> bool {
             | ColumnId::CyclesDelta
             | ColumnId::CtxSwitches
             | ColumnId::CtxSwitchesDelta
+            | ColumnId::X11Resources
     )
 }
 
@@ -406,7 +407,7 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::Handles, "processes-column-handles", Group::Objects, Kind::Count, Heat::None, 1),
     col(Id::Threads, "processes-column-threads", Group::Objects, Kind::Count, Heat::None, 1),
     col(Id::Windows, "processes-column-windows", Group::Objects, Kind::Count, Heat::None, 3),
-    col(Id::X11Resources, "processes-column-x11-resources", Group::Objects, Kind::Count, Heat::None, NO_SOURCE),
+    col(Id::X11Resources, "processes-column-x11-resources", Group::Objects, Kind::Count, Heat::None, 4),
     col(Id::State, "processes-column-state", Group::Linux, Kind::Text, Heat::None, 1),
     col(Id::Nice, "processes-column-nice", Group::Linux, Kind::IntegerId, Heat::None, 1),
     col(Id::SchedPolicy, "processes-column-sched-policy", Group::Linux, Kind::Text, Heat::None, 2),
@@ -1372,6 +1373,11 @@ fn record_value<'a>(
         C::GpuMemShared => p2(&|x| {
             x.gpu_mem_shared_bytes
                 .map(|n| Value::Bytes(n, Validity::Valid))
+        }),
+        // PROC-035: a process with no X11 client (a Wayland client) has `None`, which shows `n/a`.
+        C::X11Resources => p2(&|x| {
+            x.x11_resources
+                .map(|n| Value::Count(n.into(), Validity::Valid))
         }),
         C::GpuEncode => p2(&|x| x.gpu_encode_pct.map(|p| Value::Percent(p, Validity::Valid))),
         C::GpuDecode => p2(&|x| x.gpu_decode_pct.map(|p| Value::Percent(p, Validity::Valid))),

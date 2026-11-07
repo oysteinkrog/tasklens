@@ -11,13 +11,14 @@ use tl_ui_procs::pages::processes::cells::{
 use tl_ui_settings::settings::ColumnTables;
 use tl_ui_table::table::columns::ColumnAlign;
 
-const UNSORTABLE: [ColumnId; 6] = [
+const UNSORTABLE: [ColumnId; 7] = [
     ColumnId::Pss,
     ColumnId::Uss,
     ColumnId::Cycles,
     ColumnId::CyclesDelta,
     ColumnId::CtxSwitches,
     ColumnId::CtxSwitchesDelta,
+    ColumnId::X11Resources,
 ];
 
 #[test]
@@ -742,6 +743,19 @@ mod values {
     }
 
     #[test]
+    fn p2_x11_resources() {
+        let f = p2_en(ProcessExtrasP2 {
+            x11_resources: Some(42),
+            ..ProcessExtrasP2::default()
+        });
+        assert_eq!(f.text(ColumnId::X11Resources), "42");
+        assert_eq!(glyph(&f, ColumnId::X11Resources), Validity::Valid);
+        // A Wayland client, or no X display: n/a.
+        let f = p2_en(ProcessExtrasP2::default());
+        assert_eq!(glyph(&f, ColumnId::X11Resources), Validity::Unsupported);
+    }
+
+    #[test]
     fn p2_container_words() {
         use tl_model::process::ContainerKind as K;
         for (k, want) in [
@@ -1087,15 +1101,11 @@ mod values {
         assert_eq!(shown(&out), "");
     }
 
-    const PARKED_P4: [ColumnId; 3] = [
-        ColumnId::Cycles,
-        ColumnId::CyclesDelta,
-        ColumnId::X11Resources,
-    ];
+    const PARKED_P4: [ColumnId; 2] = [ColumnId::Cycles, ColumnId::CyclesDelta];
     const STAT_P4: [ColumnId; 3] = [ColumnId::Pgrp, ColumnId::Sid, ColumnId::LastCpu];
 
-    /// pgrp, sid and last_cpu are offered; the four columns without an engine source are not
-    /// (tasklens-pdu.47).
+    /// pgrp, sid, last_cpu and X11 resources (pdu.88) are offered; the columns without an
+    /// engine source are not (tasklens-pdu.47).
     #[test]
     fn phase_4_columns_offered() {
         use tl_ui_procs::pages::processes::cells::{NO_SOURCE, PROCESS_COLUMNS};
@@ -1111,6 +1121,7 @@ mod values {
             assert!(offered.contains(&id), "{id:?}");
         }
         assert!(offered.contains(&ColumnId::Container));
+        assert!(offered.contains(&ColumnId::X11Resources));
         for id in PARKED_P4 {
             assert!(!offered.contains(&id), "{id:?}");
             let col = PROCESS_COLUMNS.iter().find(|c| c.id == id).unwrap();

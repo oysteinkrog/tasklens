@@ -1063,11 +1063,7 @@ mod delegate {
     #[gpui_kit::test]
     fn no_source_columns_not_offered(cx: &mut TestAppContext) {
         setup(cx);
-        let parked = [
-            ColumnId::Cycles,
-            ColumnId::CyclesDelta,
-            ColumnId::X11Resources,
-        ];
+        let parked = [ColumnId::Cycles, ColumnId::CyclesDelta];
         let mut found: Vec<ColumnId> = PROCESS_COLUMNS
             .iter()
             .filter(|c| c.phase == NO_SOURCE)
