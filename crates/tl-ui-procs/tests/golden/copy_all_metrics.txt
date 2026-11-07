@@ -19,11 +19,15 @@ Working set total: 1.08 GiB
 Working set peak: 1.27 GiB
 Working set shared: 292.00 MiB
 Commit size: 1.46 GiB
+Commit size peak: 0 B
+Commit size delta: 0 B
 Virtual size: 2.93 GiB
 Virtual size peak: 3.12 GiB
+Page tables: 0 B
 Page faults: 120 000
 Page faults delta: 40
 Major faults: 12
+Major faults delta: 0
 Swap: 0 B
 PSS: 0 B
 USS: 0 B

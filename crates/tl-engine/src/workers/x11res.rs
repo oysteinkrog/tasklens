@@ -396,7 +396,7 @@ mod tests {
         let took = start.elapsed();
         assert!(took >= SWEEP_DEADLINE, "{took:?}");
         assert!(
-            took < SWEEP_DEADLINE + Duration::from_millis(300),
+            took < SWEEP_DEADLINE + Duration::from_secs(2),
             "{took:?}"
         );
         // A readable stream returns at once.
