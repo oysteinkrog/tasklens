@@ -856,40 +856,93 @@ pub(super) fn paint_ramped(
 /// reach below it. A triangle that crosses `split` is in both. Each band's bounds clip the rest
 /// of the triangle, so the painted pixels are the same as with the whole path in each band.
 /// GPUI sends every path vertex with its own colour and bounds (104 bytes), so this halves
-/// the upload of a ramped path (tasklens-3uosp). A trailing partial triangle stays in `path`.
+/// the upload of a ramped path (tasklens-3uosp).
+///
+/// A fill column that reaches from above `split` down to a flat bottom below it
+/// ([`full_column`]) crosses `split` with both triangles. The upper band gets the column; the
+/// lower band gets only its part below `split`, a rectangle, and adjacent columns share one
+/// rectangle. A trailing partial triangle stays in `path`.
 fn split_triangles(path: &mut Path<Pixels>, split: Pixels) -> Path<Pixels> {
-    let mut above = Path::new(path.bounds.origin);
-    let v = &mut path.vertices;
+    let v = std::mem::take(&mut path.vertices);
     let whole = v.len() / 3 * 3;
-    above.vertices.reserve(whole / 2);
-    let mut kept = 0;
-    for i in (0..whole).step_by(3) {
+    let mut above = Path::new(path.bounds.origin);
+    above.vertices.reserve(whole / 2 + 6);
+    let mut below = Vec::with_capacity(whole / 2 + 6);
+    // The rectangle of the current run of full columns: left x, right x, bottom y, s and t.
+    let mut run: Option<(Pixels, Pixels, Pixels, Point<f32>)> = None;
+    let rect = |below: &mut Vec<PathVertex<Pixels>>, (x0, x1, bottom, st)| {
+        for (x, y) in [
+            (x0, split),
+            (x1, split),
+            (x1, bottom),
+            (x0, split),
+            (x1, bottom),
+            (x0, bottom),
+        ] {
+            below.push(PathVertex {
+                xy_position: point(x, y),
+                st_position: st,
+                content_mask: Default::default(),
+            });
+        }
+    };
+    let mut i = 0;
+    while i < whole {
+        if let Some((x0, x1, bottom)) = v.get(i..i + 6).and_then(|p| full_column(p, split)) {
+            above.vertices.extend_from_slice(&v[i..i + 6]);
+            let st = v[i].st_position;
+            match run.as_mut() {
+                Some((_, right, b, s)) if *right == x0 && *b == bottom && *s == st => *right = x1,
+                _ => {
+                    if let Some(r) = run.take() {
+                        rect(&mut below, r);
+                    }
+                    run = Some((x0, x1, bottom, st));
+                }
+            }
+            i += 6;
+            continue;
+        }
         let ys = [
             v[i].xy_position.y,
             v[i + 1].xy_position.y,
             v[i + 2].xy_position.y,
         ];
-        let top = ys[0].min(ys[1]).min(ys[2]);
-        let bottom = ys[0].max(ys[1]).max(ys[2]);
-        if top < split {
+        if ys[0].min(ys[1]).min(ys[2]) < split {
             above.vertices.extend_from_slice(&v[i..i + 3]);
         }
-        if bottom > split {
-            if kept != i {
-                for k in 0..3 {
-                    v.swap(kept + k, i + k);
-                }
-            }
-            kept += 3;
+        if ys[0].max(ys[1]).max(ys[2]) > split {
+            below.extend_from_slice(&v[i..i + 3]);
         }
+        i += 3;
     }
-    // Keep a trailing partial triangle, as GPUI would get it unsplit.
-    let tail = v.len() - whole;
-    for k in 0..tail {
-        v.swap(kept + k, whole + k);
+    if let Some(r) = run.take() {
+        rect(&mut below, r);
     }
-    v.truncate(kept + tail);
+    below.extend_from_slice(&v[whole..]);
+    path.vertices = below;
     above
+}
+
+/// `(left x, right x, bottom y)` when `pair` is one fill segment as `FillMesh::band` emits it,
+/// `(t0, t1, b1), (t0, b1, b0)`, with vertical sides, a flat bottom below `split`, a top that
+/// is above `split` at both ends and one s and t for all six vertices. Its part below `split`
+/// is then the rectangle from `split` to the bottom.
+fn full_column(pair: &[PathVertex<Pixels>], split: Pixels) -> Option<(Pixels, Pixels, Pixels)> {
+    let p = |i: usize| pair[i].xy_position;
+    let (t0, t1, b1, b0) = (p(0), p(1), p(2), p(5));
+    let st = pair[0].st_position;
+    let column = p(3) == t0
+        && p(4) == b1
+        && pair.iter().all(|v| v.st_position == st)
+        && t0.x < t1.x
+        && b0.x == t0.x
+        && b1.x == t1.x
+        && b0.y == b1.y
+        && t0.y < split
+        && t1.y < split
+        && b1.y > split;
+    column.then_some((t0.x, t1.x, b1.y))
 }
 
 /// A newest point from `ChartCache::newest` (chart-local physical px) in window logical px, as
@@ -1020,5 +1073,49 @@ mod tests {
                 .iter()
                 .all(|v| f32::from(v.xy_position.y) >= 90.)
         );
+    }
+
+    /// One fill segment as `FillMesh::band` emits it, top `t0` to `t1`, bottom at `b`.
+    fn column(path: &mut Path<Pixels>, x0: f32, x1: f32, t0: f32, t1: f32, b: f32) {
+        let v = |x: f32, y: f32| PathVertex {
+            xy_position: point(px(x), px(y)),
+            st_position: point(0.0, 1.0),
+            content_mask: Default::default(),
+        };
+        for (x, y) in [(x0, t0), (x1, t1), (x1, b), (x0, t0), (x1, b), (x0, b)] {
+            path.vertices.push(v(x, y));
+        }
+    }
+
+    /// Adjacent fill columns that cross the split give the lower band one rectangle; a column
+    /// whose top crosses the split inside it, and a column below the split, keep their
+    /// triangles (tasklens-3uosp).
+    #[test]
+    fn split_triangles_merges_full_columns() {
+        let mut path = Path::new(point(px(0.), px(0.)));
+        column(&mut path, 0., 1., 20., 30., 100.);
+        column(&mut path, 1., 2., 30., 10., 100.);
+        column(&mut path, 2., 3., 10., 40., 100.);
+        column(&mut path, 3., 4., 40., 60., 100.); // top crosses the split
+        column(&mut path, 4., 5., 60., 70., 100.); // below the split
+        column(&mut path, 5., 6., 30., 20., 100.); // a new run
+        let above = split_triangles(&mut path, px(50.));
+        // The four columns that reach above, all six vertices each.
+        assert_eq!(above.vertices.len(), 3 * 6 + 6 + 6);
+        let tris = rows(&path);
+        let xs: Vec<[f32; 3]> = path
+            .vertices
+            .chunks(3)
+            .map(|t| {
+                let x = |i: usize| f32::from(t[i].xy_position.x);
+                [x(0), x(1), x(2)]
+            })
+            .collect();
+        // Crossing column (2 triangles), lower column (2), then the two rectangles.
+        assert_eq!(tris.len(), 2 + 2 + 2 + 2);
+        assert_eq!(&tris[4..6], &[[50., 50., 100.], [50., 100., 100.]]);
+        assert_eq!(&xs[4..6], &[[0., 3., 3.], [0., 3., 0.]]);
+        assert_eq!(&tris[6..8], &[[50., 50., 100.], [50., 100., 100.]]);
+        assert_eq!(&xs[6..8], &[[5., 6., 6.], [5., 6., 5.]]);
     }
 }
