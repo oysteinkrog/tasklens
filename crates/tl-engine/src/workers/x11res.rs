@@ -164,6 +164,7 @@ fn connect_local(path: &str) -> io::Result<UnixStream> {
         Ok(UnixStream::from(fd))
     };
     SocketAddrUnix::new_abstract_name(path.as_bytes())
+        .map_err(io::Error::from)
         .and_then(|a| try_addr(&a))
         .or_else(|_| try_addr(&SocketAddrUnix::new(path)?))
 }
