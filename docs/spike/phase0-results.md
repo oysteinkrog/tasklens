@@ -2330,6 +2330,83 @@ Reading:
   measured).
 - Follow-up bead: tasklens-3uosp (P1) asks for an A/B build at three commits to find the cost.
 
+### Static cost of the value ramp, and the triangle split (tasklens-3uosp, 2026-11-07)
+
+Result: the +41% `static` cost comes from the value ramp of tasklens-j477q, which is on by
+default. The commits from wlf.45 to just before tasklens-1vwxr add nothing. Three commits
+in `tl-ui-chart` cut `static` from 22.73% to 17.08% of one core in the same session.
+That is still FAIL: wlf.45 measured 16.01% in that session, so the fix is +6.7%, and the
+limit is 16.83%. `perf-cpu` process CPU passes (68.14%, +1.7% on 66.99%), but its frame
+times got worse (below).
+
+Setup as in tasklens-68ksq: hidden nested KWin, 1920 x 1200, 60 Hz, session `r3uo`,
+`tasklens --bench <scene> --duration 30 --warmup 5`, bench slot lock, quiet rule
+(1- and 5-minute load at most 8 at start, 1-minute load at most 8 at end). Binaries:
+`cargo build --locked --profile perf -p tl-app --features bench` in a worktree at each
+commit. The variants ran interleaved, one run of each per round. Reports and scripts:
+`/var/tmp/claude/3uosp/`.
+
+| Binary | Commit | Session 1, `static` runs | Median |
+|---|---|---|---|
+| wlf.45 | `22395d383` | 16.36, 16.61, 16.46 | 16.46% |
+| before tasklens-1vwxr | `2b0e5861e` | 16.09, 16.42, 16.49 | 16.42% |
+| HEAD | `724fc367a` | 22.77, 23.36, 22.85 | 22.85% |
+| HEAD, fixture with `color_charts_by_value = false` | `724fc367a` + 1 line | 16.92, 16.66, 16.59 | 16.66% |
+| HEAD + first split (`565882710`) | `724fc367a` + split | 18.01, 18.91, 18.36 | 18.36% |
+
+Session 1 ran from 04:45 to 04:55, load at start 5.5 to 6.9.
+
+Cause, measured with a bpftrace probe on libc `__memcpy_avx_unaligned_erms` (callers of
+copies of 256 bytes or more) and with perf:
+- The libc copy loop that held 52% of the 68ksq profile is
+  `wgpu_core::Queue::write_buffer`. Over 15 s of `static` it copied 3.33 GB, about 22 MB
+  per frame. GPUI's wgpu renderer writes every path vertex as a 104-byte
+  `PathRasterizationVertex`, which carries the path's whole `Background` and bounds.
+- A ramped path is painted once per ramp band (the gradient takes two stops, the ramp has
+  three colours). Before the fix both paints sent every vertex, so the CPU grid and the
+  CPU chart doubled their path upload.
+
+Fix, in `crates/tl-ui-chart/src/chart/element.rs`:
+- `565882710`: each band gets only the triangles that reach it. A triangle that crosses
+  the split goes to both.
+- `5fb751940`: a fill column that reaches from above the split down to the baseline gives
+  the lower band a rectangle, shared by adjacent columns, instead of its two triangles.
+- `09ae632c7`: the lower band is compacted in the path's own buffer and the upper band is
+  reserved once, so no buffer grows and copies while it fills.
+- The band bounds still clip, so the pixels do not change: the ramp render goldens pass at
+  2/255 per channel.
+
+Session 3 (06:18 to 06:31, load at start 3.5 to 5.8), with the final fix `09ae632c7`:
+
+| Scene | Binary | Runs | Median | Frame CPU p50, p99 | Missed (long) per run |
+|---|---|---|---|---|---|
+| `static` | HEAD + fix | 17.08, 16.93, 17.29 | 17.08% | | 0 |
+| `static` | wlf.45 | 16.03, 16.01, 14.81 | 16.01% | | 0 |
+| `static` | HEAD | 22.94, 22.30, 22.73 | 22.73% | | 0 |
+| `perf-cpu` | HEAD + fix | 68.14, 68.07, 71.82 | 68.14% | 11.78, 17.73 ms | 116 (6), 59 (3), 92 (2) |
+| `perf-cpu` | HEAD | 68.74, 66.79, 67.57 | 67.57% | 10.95, 15.34 ms | 10, 13, 10 (0) |
+| `perf-cpu` | HEAD, ramp off | 67.08, 66.70, 67.27 | 67.08% | 10.85, 16.27 ms | 36, 25, 33 (0) |
+
+Reading:
+- `static`: the fix removes about 85% of the ramp cost (22.73% to 17.08%). The rest is
+  the split pass itself, triangles that cross the split, and more path paints per frame.
+- `perf-cpu`: process CPU is within the 5% rule, but frame CPU p50 rose about 0.8 ms and
+  p99 about 2.4 ms against HEAD, and missed frames rose from 10 to 13 per run to 59 to
+  116. In a perf profile, `split_triangles` takes 5.1% of the samples. At about 57 frames
+  per second, that pass costs more than the upload it saves. HEAD with the ramp off also
+  missed more frames than HEAD (25 to 36), so missed frames do not follow total CPU here.
+- Absolute numbers move between sessions: wlf.45 measured 16.46% in session 1, 16.01% in
+  session 3 and a median of 14.33% over 7 runs in a noisy session 2 between them.
+  Compare variants within one session.
+- Not attributed: about 0.85 GB per 15 s of copies come from one caller that bpftrace
+  could not name (no symbol at that address).
+
+Open question for the leader (tasklens-3uosp stays open): the remaining static cost and the
+perf-cpu frame time regression both come from GPUI sending 104 bytes per path vertex.
+Moving the colour and bounds out of the vertex record would cut the 22 MB per frame for
+every chart. That needs a patch to `gpui-pre-wgpu` 0.3.7, which is a crates.io dependency,
+not one of the vendored crates in `third_party/`.
+
 ## Decision
 
 All values are from the hidden nested KWin session at 60 Hz, the real target (owner, 2026-11-05).
