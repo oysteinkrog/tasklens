@@ -280,11 +280,28 @@ fn xauthority_path(desktop: &DesktopSession) -> Option<std::path::PathBuf> {
     })
 }
 
+/// The Xauthority file's bytes, or `None` unless it is a regular file of at most [`XAUTH_MAX`]
+/// bytes. The open does not block: `O_NONBLOCK` makes a FIFO open return at once (there is no
+/// writer to wait for), and the type check then refuses it, so a FIFO, socket or device at
+/// `XAUTHORITY` can never hang the sweep. Reading a regular file of this size does not wait.
 fn read_capped(path: &std::path::Path) -> Option<Vec<u8>> {
+    use rustix::fs::{FileType, Mode, OFlags};
     use std::io::Read as _;
+
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let stat = rustix::fs::fstat(&fd).ok()?;
+    let size = u64::try_from(stat.st_size).ok()?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile || size > XAUTH_MAX {
+        return None;
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
+    // `take` keeps the cap if the file grows after the fstat.
+    std::fs::File::from(fd)
         .take(XAUTH_MAX)
         .read_to_end(&mut bytes)
         .ok()?;
@@ -389,6 +406,57 @@ mod tests {
         let stream = TimedStream::new(stream);
         stream.set_deadline(Instant::now() + SWEEP_DEADLINE);
         stream.poll(PollMode::Readable).unwrap();
+    }
+
+    /// A temp dir under `target/tmp`, removed on drop.
+    fn scratch() -> tempfile::TempDir {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+        std::fs::create_dir_all(&base).expect("create target/tmp");
+        tempfile::Builder::new()
+            .prefix("x11res-")
+            .tempdir_in(base)
+            .expect("tempdir")
+    }
+
+    /// `read_capped` on another thread, so a regression fails the test instead of hanging it.
+    fn read_within_1s(path: std::path::PathBuf) -> Option<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_capped(&path));
+        });
+        rx.recv_timeout(Duration::from_secs(1))
+            .expect("read_capped blocked")
+    }
+
+    #[test]
+    fn xauthority_fifo_is_refused_without_blocking() {
+        let dir = scratch();
+        let fifo = dir.path().join("Xauthority");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .expect("mkfifo");
+        assert_eq!(read_within_1s(fifo), None);
+    }
+
+    #[test]
+    fn xauthority_reads_only_small_regular_files() {
+        let dir = scratch();
+        let file = dir.path().join("Xauthority");
+        let bytes = entry(FAMILY_LOCAL, "0", MIT_COOKIE, b"cookie");
+        std::fs::write(&file, &bytes).unwrap();
+        assert_eq!(read_within_1s(file.clone()), Some(bytes));
+        // Too large: refused, not cut short.
+        let size = usize::try_from(XAUTH_MAX).unwrap() + 1;
+        std::fs::write(&file, vec![0u8; size]).unwrap();
+        assert_eq!(read_within_1s(file), None);
+        // A directory and a missing path.
+        assert_eq!(read_within_1s(dir.path().to_path_buf()), None);
+        assert_eq!(read_within_1s(dir.path().join("missing")), None);
     }
 
     #[test]
