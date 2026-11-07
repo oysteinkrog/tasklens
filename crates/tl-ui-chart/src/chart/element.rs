@@ -862,47 +862,38 @@ pub(super) fn paint_ramped(
 /// ([`full_column`]) crosses `split` with both triangles. The upper band gets the column; the
 /// lower band gets only its part below `split`, a rectangle, and adjacent columns share one
 /// rectangle. A trailing partial triangle stays in `path`.
+///
+/// `path` keeps its buffer: the lower band is compacted in place (a rectangle is written only
+/// after the columns it replaces were read), and the upper band is reserved once at the full
+/// size, so no buffer grows and is copied while it fills.
 fn split_triangles(path: &mut Path<Pixels>, split: Pixels) -> Path<Pixels> {
-    let v = std::mem::take(&mut path.vertices);
+    let v = &mut path.vertices;
     let whole = v.len() / 3 * 3;
     let mut above = Path::new(path.bounds.origin);
-    above.vertices.reserve(whole / 2 + 6);
-    let mut below = Vec::with_capacity(whole / 2 + 6);
-    // The rectangle of the current run of full columns: left x, right x, bottom y, s and t.
-    let mut run: Option<(Pixels, Pixels, Pixels, Point<f32>)> = None;
-    let rect = |below: &mut Vec<PathVertex<Pixels>>, (x0, x1, bottom, st)| {
-        for (x, y) in [
-            (x0, split),
-            (x1, split),
-            (x1, bottom),
-            (x0, split),
-            (x1, bottom),
-            (x0, bottom),
-        ] {
-            below.push(PathVertex {
-                xy_position: point(x, y),
-                st_position: st,
-                content_mask: Default::default(),
-            });
-        }
-    };
+    above.vertices.reserve_exact(whole);
+    let mut kept = 0;
+    let mut run: Option<Run> = None;
     let mut i = 0;
     while i < whole {
         if let Some((x0, x1, bottom)) = v.get(i..i + 6).and_then(|p| full_column(p, split)) {
             above.vertices.extend_from_slice(&v[i..i + 6]);
             let st = v[i].st_position;
             match run.as_mut() {
-                Some((_, right, b, s)) if *right == x0 && *b == bottom && *s == st => *right = x1,
+                Some(r) if r.right == x0 && r.bottom == bottom && r.st == st => r.right = x1,
                 _ => {
-                    if let Some(r) = run.take() {
-                        rect(&mut below, r);
-                    }
-                    run = Some((x0, x1, bottom, st));
+                    flush_run(v, &mut kept, run.take(), split);
+                    run = Some(Run {
+                        left: x0,
+                        right: x1,
+                        bottom,
+                        st,
+                    });
                 }
             }
             i += 6;
             continue;
         }
+        flush_run(v, &mut kept, run.take(), split);
         let ys = [
             v[i].xy_position.y,
             v[i + 1].xy_position.y,
@@ -912,16 +903,61 @@ fn split_triangles(path: &mut Path<Pixels>, split: Pixels) -> Path<Pixels> {
             above.vertices.extend_from_slice(&v[i..i + 3]);
         }
         if ys[0].max(ys[1]).max(ys[2]) > split {
-            below.extend_from_slice(&v[i..i + 3]);
+            if kept != i {
+                for k in 0..3 {
+                    v[kept + k] = v[i + k].clone();
+                }
+            }
+            kept += 3;
         }
         i += 3;
     }
-    if let Some(r) = run.take() {
-        rect(&mut below, r);
+    flush_run(v, &mut kept, run.take(), split);
+    let tail = v.len() - whole;
+    for k in 0..tail {
+        v[kept + k] = v[whole + k].clone();
     }
-    below.extend_from_slice(&v[whole..]);
-    path.vertices = below;
+    v.truncate(kept + tail);
     above
+}
+
+/// A run of adjacent full fill columns: their part below the split is one rectangle.
+struct Run {
+    left: Pixels,
+    right: Pixels,
+    bottom: Pixels,
+    st: Point<f32>,
+}
+
+/// Writes the rectangle of `run` (two triangles) at `kept` and moves `kept` past it. The run's
+/// columns were read and skipped, at least six vertices, so this never overwrites a vertex that
+/// is still to be read.
+fn flush_run(v: &mut [PathVertex<Pixels>], kept: &mut usize, run: Option<Run>, split: Pixels) {
+    let Some(Run {
+        left,
+        right,
+        bottom,
+        st,
+    }) = run
+    else {
+        return;
+    };
+    let corners = [
+        (left, split),
+        (right, split),
+        (right, bottom),
+        (left, split),
+        (right, bottom),
+        (left, bottom),
+    ];
+    for (k, (x, y)) in corners.into_iter().enumerate() {
+        v[*kept + k] = PathVertex {
+            xy_position: point(x, y),
+            st_position: st,
+            content_mask: Default::default(),
+        };
+    }
+    *kept += 6;
 }
 
 /// `(left x, right x, bottom y)` when `pair` is one fill segment as `FillMesh::band` emits it,
@@ -1111,10 +1147,13 @@ mod tests {
                 [x(0), x(1), x(2)]
             })
             .collect();
-        // Crossing column (2 triangles), lower column (2), then the two rectangles.
+        // The first run's rectangle, the crossing column (2 triangles), the lower column (2),
+        // then the second run's rectangle.
         assert_eq!(tris.len(), 2 + 2 + 2 + 2);
-        assert_eq!(&tris[4..6], &[[50., 50., 100.], [50., 100., 100.]]);
-        assert_eq!(&xs[4..6], &[[0., 3., 3.], [0., 3., 0.]]);
+        assert_eq!(&tris[0..2], &[[50., 50., 100.], [50., 100., 100.]]);
+        assert_eq!(&xs[0..2], &[[0., 3., 3.], [0., 3., 0.]]);
+        assert_eq!(&tris[2..4], &[[40., 60., 100.], [40., 100., 100.]]);
+        assert_eq!(&tris[4..6], &[[60., 70., 100.], [60., 100., 100.]]);
         assert_eq!(&tris[6..8], &[[50., 50., 100.], [50., 100., 100.]]);
         assert_eq!(&xs[6..8], &[[5., 6., 6.], [5., 6., 5.]]);
     }
