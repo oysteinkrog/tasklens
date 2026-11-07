@@ -475,7 +475,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 
 ### PROC-029 Columns: CPU and scheduling
 - Was: v1 PROC-018; v1 PROC-019; r2 PROC-019
-- Source: TS 2.1 table, L28351-28353, L28361-28362, L28388-28395, L28455-28460, [CL 0.8.21] | MC `client.rs:880-889` | R-007, R-044
+- Source: TS 2.1 table, L28351-28353, L28361-28362, L28388-28395, L28455-28460, [CL 0.8.21] | MC `client.rs:880-889` | R-007, R-044, R-144
 
 | Label | ID | Linux source | App/unit row | Verdict | Phase |
 |---|---|---|---|---|---|
@@ -488,18 +488,19 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 | CPU time user | cpu_time_user | utime | Σ | BUILD | P1 |
 | Priority | priority | class from policy (stat field 41) and nice (field 19): SCHED_FIFO or SCHED_RR "Realtime (rt N)"; SCHED_IDLE "Idle"; nice -20..-11 "High", -10..-1 "Above normal", 0 "Normal", 1..9 "Below normal", 10..19 "Low"; SCHED_BATCH appends " (batch)". Tooltip "nice N" | blank | ADAPT | P1 |
 | Affinity | affinity | status `Cpus_allowed_list` of the leader thread, for example "0-7,16-23"; "All" when it equals the online set | blank | ADAPT | P1 |
-| Cycles | cycles | `perf_event_open(PERF_COUNT_HW_CPU_CYCLES, exclude_kernel=1, inherit=1)` per thread, visible rows of own processes only, global cap 256 counters; past the cap, for other UIDs, or with `perf_event_paranoid` above 2: `n/a` | Σ | ADAPT | P4 |
-| Cycles delta | cycles_delta | Δ of Cycles per interval | Σ | ADAPT | P4 |
+| Cycles | cycles | `perf_event_open(PERF_COUNT_HW_CPU_CYCLES, exclude_kernel=1, inherit=1)` per thread, visible rows of own processes only, global cap 256 counters; past the cap, for other UIDs, or with `perf_event_paranoid` above 2: `n/a` | Σ | ADAPT | not in v1 (R-144) |
+| Cycles delta | cycles_delta | Δ of Cycles per interval | Σ | ADAPT | not in v1 (R-144) |
 | Context switches | ctx_switches | Σ over `/proc/<pid>/task/*/status` `voluntary_ctxt_switches + nonvoluntary_ctxt_switches`, visible rows only | Σ | ADAPT | P2 |
 | Context switches delta | ctx_switches_delta | Δ per interval, visible rows only | Σ | ADAPT | P2 |
 
 - Behaviour:
   - There is no "scale CPU to core count" setting. The two columns `cpu` and `cpu_relative` cover both views (R-044). MC's toggle is not built.
   - Cycles, Cycles delta, Context switches and Context switches delta cannot be sorted (PROC-047).
+  - Cycles and Cycles delta are not in v1 (R-144). The column registry keeps both at `NO_SOURCE`, so the column picker does not offer them. The `perf_event_open` source in the table is the design for a later release.
 - Linux data/mechanism: as in the table; CPU math per ADR-008.
 - Verdict: see the table
 - Phase: see the table
-- Privilege: none, except Cycles for other UIDs (`n/a`).
+- Privilege: none in v1. Cycles, when built, shows `n/a` for other UIDs.
 
 ### PROC-030 Columns: memory
 - Was: v1 PROC-020; r2 PROC-020; add amend PROC-020
@@ -1826,7 +1827,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 | PROC-026 | Header context menu | BUILD | P1 |
 | PROC-027 | Columns: identity, image and package | BUILD/ADAPT | P1-P2 |
 | PROC-028 | Columns: ownership, session and security | BUILD/ADAPT | P1-P2 |
-| PROC-029 | Columns: CPU and scheduling | BUILD/ADAPT | P1, P2, P4 |
+| PROC-029 | Columns: CPU and scheduling | BUILD/ADAPT | P1, P2 |
 | PROC-030 | Columns: memory | BUILD/ADAPT, 1 DROP | P1-P2 |
 | PROC-031 | Columns: I/O and disk | BUILD/ADAPT, 1 DROP | P1, P2, P4 |
 | PROC-032 | Column: network | ADAPT | P1, P4 |
