@@ -8055,6 +8055,7 @@ dependencies = [
  "tl-ops",
  "tracing",
  "ureq",
+ "x11rb",
  "zbus",
 ]
 

@@ -27,6 +27,8 @@ thiserror     = { workspace = true }
 tracing       = { workspace = true }
 # The public IP fetch only (`workers/public_ip.rs`, R-131).
 ureq          = { workspace = true }
+# XRes counts for the X11 resources column only (`workers/x11res.rs`, PROC-035).
+x11rb         = { workspace = true }
 
 [dev-dependencies]
 asupersync = { workspace = true, features = ["proc-macros", "test-internals"] }

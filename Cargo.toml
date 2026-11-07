@@ -62,6 +62,9 @@ netlink-sys = { version = "0.9.0", default-features = false }
 # Engine service (ADR-018)
 sd-notify = "0.5.0"
 
+# X11 resources column (PROC-035, pdu.88). GPUI already pulls in this version; we add only `res`.
+x11rb = { version = "=0.13.2", default-features = false, features = ["res"] }   # tl-engine XRes only
+
 # Data and encoding
 serde    = { version = "1.0.228", features = ["derive", "rc"] }   # rc: Arc values on the engine protocol (ADR-018)
 serde_json = "1"

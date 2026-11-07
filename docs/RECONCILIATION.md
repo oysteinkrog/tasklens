@@ -902,7 +902,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
   - `serde_json` (pin `1`): tl-engine row; E14-A4 adds the line.
   - PRNG: none. E01-004 writes SplitMix64 plus Box-Muller in `bench/synth.rs`; UI-PRF-053 gains "or an in-tree SplitMix64".
   - `jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }` pinned; tl-ui row. No libc, reads `/etc/localtime` and the system zoneinfo. `chrono` and `time` are out. tl-model's `format_local(LocalDateTime)` stays; tl-ui converts with jiff.
-  - `drm`: not in v1; KMS display modes are a P4 item (add `drm` to the tl-collect row then). `x11rb`: P4 only. `libc` in tl-collect: no; user names from `/etc/passwd`, `getnameinfo` goes into `tl-ops/src/sys.rs` at P4. `flate2`: no; the package check runs `pacman -Qkk <pkg>`.
+  - `drm`: not in v1; KMS display modes are a P4 item (add `drm` to the tl-collect row then). `x11rb`: tl-engine row, `=0.13.2`, `default-features = false, features = ["res"]`, for the X11 resources column only (owner decision on pdu.88, 2026-11-07; GPUI already pulls in this version). `libc` in tl-collect: no; user names from `/etc/passwd`, `getnameinfo` goes into `tl-ops/src/sys.rs` at P4. `flate2`: no; the package check runs `pacman -Qkk <pkg>`.
   - tl-helper row gains `tl-collect` (shared strings scanner, R-157).
   - `unicode-segmentation = "1.12"` pinned; tl-ui row. E15-003 is unblocked.
   - `image`: not added. E16-005 goes through gpui-kit's image support; fallback if it cannot: `image = { version = "0.25", default-features = false, features = ["png"] }` in the tl-ui row.
@@ -2457,7 +2457,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-29 | `/dev/dri/card1` seat ACL allows the KMS read-only ioctls | PERF-065 [now PERF-072] |
 | U-30 | `ureq` 3 with rustls has no Tokio in its graph. Outcome (2026-10-04): ureq 3.4.0's manifest has no `tokio` dependency (inferred from the manifest; `cargo xtask check-deps` confirms, R-142) | PERF-054 [now PERF-060], APP-056 |
 | U-31 | ksni 0.3.6 with `async-io` and `blocking` features has no Tokio in its graph. Confirmed 2026-10-06: ksni 0.3.6 graph has no banned crate (`cargo tree -p tl-tray -e normal,build --target x86_64-unknown-linux-gnu`, 105 crates, none from the `check-deps` banned list) | ADR-010, PERF-078 [now PERF-088] |
-| U-32 | `x11rb` XRes queries work against XWayland for the "X11 resources" column | r2 PROC-025 [now PROC-035] |
+| U-32 | `x11rb` XRes queries work against XWayland for the "X11 resources" column. Verified 2026-11-07 (pdu.88): on a nested KWin 6.8.2 XWayland, XRes 1.2 answered; `XResQueryClientIds` with the local-PID mask listed xmessage's PID, and `XResQueryClientResources` gave it 26 resources. It worked with `XAUTHORITY` unset, because the nested Xwayland runs without `-auth`; the desktop Xwayland uses `-auth`, so the engine reads the cookie file | r2 PROC-025 [now PROC-035] |
 | U-33 | Wayland `wl_data_device` clipboard writes work from GPUI for all copy actions | v1 PROC-058 [now PROC-070] |
 | U-34 | `fstatat` `st_size` of `/proc/<pid>/fd` gives the fd count on kernel 7.2 | r2 PROC-001 [now PROC-002] |
 | U-35 | Hardware peak reporting: GPU power-limit and fan max values needed for fixed scales are reported by NVML on this card. Outcome (2026-10-05): the RTX 5070 Ti reports a power limit of 300000 mW (`real_hello_5070`, ndy.4); `fan_pct` reads `Ok(0)` at idle (ndy.5), so NVML reports fan speed on this card | PERF-015 [now PERF-018], PERF-061 [now PERF-067] |

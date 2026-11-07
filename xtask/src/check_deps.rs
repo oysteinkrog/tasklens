@@ -105,6 +105,7 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "ureq",
             "serde_json",
             "bitflags",
+            "x11rb",
         ],
     ),
     (
