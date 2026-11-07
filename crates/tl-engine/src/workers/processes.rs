@@ -63,6 +63,7 @@ use crate::source::{self, Source, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{ProcessSweep, SourceUpdate, SweepCpu, WorkerError};
 use crate::workers::WorkerSpec;
+use crate::workers::x11res::X11Res;
 
 /// `processes.interval_ms` is clamped to this range (ADR-008).
 pub const MIN_INTERVAL_MS: u32 = 250;
@@ -126,6 +127,8 @@ pub struct SweepWants {
     pub status_fields: bool,
     /// An I/O or disk column, or history recording: `io` for every pid (R-286).
     pub io: bool,
+    /// The X11 resources column (PROC-035): XRes counts for the visible rows.
+    pub x11_resources: bool,
 }
 
 /// The reads `period` turns on for the next sweep.
@@ -140,6 +143,7 @@ pub fn sweep_wants(d: &Demand, s: &EngineSettings) -> SweepWants {
             .any(|c| (ColumnId::Disk..=ColumnId::IoWriteOps).contains(&c))
             || d.recording
             || s.history.enabled,
+        x11_resources: columns.contains(ColumnId::X11Resources),
     }
 }
 
@@ -168,6 +172,9 @@ pub struct ProcessesSource {
     helper: Option<HelperSide>,
     /// Reads the I/O priority of one detail key (R-144).
     io_priority: IoPriorityRead,
+    /// The X11 resources column's display connection (PROC-035). `None` on a fixture root, whose
+    /// pids are of no live process.
+    x11res: Option<X11Res>,
 }
 
 /// Reads the I/O priority of one process as set. `None` when the read fails.
@@ -201,11 +208,8 @@ impl ProcessesSource {
             })?;
         let sampler = ProcessSampler::new(root.clone(), paths, users)?;
         // A fixture root has pids of no live process, so only the host root reads them.
-        let io_priority: IoPriorityRead = if root.proc == Path::new("/proc") {
-            host_io_priority
-        } else {
-            |_, _| None
-        };
+        let host = root.proc == Path::new("/proc");
+        let io_priority: IoPriorityRead = if host { host_io_priority } else { |_, _| None };
         let ctx = SweepCtx {
             boot_id,
             self_uid: rustix::process::getuid().as_raw(),
@@ -244,6 +248,7 @@ impl ProcessesSource {
             clock: real_clock,
             helper: None,
             io_priority,
+            x11res: host.then(X11Res::default),
         })
     }
 
@@ -368,6 +373,15 @@ impl Source for ProcessesSource {
             self.io_priority,
             self.ctx.boot_id,
         );
+        if let Some(x11res) = &mut self.x11res {
+            if !wants.x11_resources {
+                x11res.disconnect();
+            } else if !detail_keys.is_empty() {
+                let pids: FxHashSet<u32> = detail_keys.iter().map(|k| k.pid).collect();
+                let counts = x11res.counts(&self.cfg.desktop, &pids);
+                fill_x11_resources(&mut extras_p2, &detail_keys, &counts);
+            }
+        }
         let out = &mut self.out;
         let records = std::mem::take(&mut out.records);
         tracing::debug!(count = records.len(), "process sweep");
@@ -601,6 +615,24 @@ fn fill_io_priority(
     for p2 in extras_p2 {
         if let Some(key) = p2.key.filter(|k| visible.contains(k)) {
             p2.io_priority = read(key, boot);
+        }
+    }
+}
+
+/// `x11_resources` of the detail keys from the per-pid XRes counts. A detail key with no X11
+/// client gets `None` (PROC-035 n/a).
+fn fill_x11_resources(
+    extras_p2: &mut [ProcessExtrasP2],
+    detail_keys: &[ProcessKey],
+    counts: &FxHashMap<u32, u32>,
+) {
+    if detail_keys.is_empty() {
+        return;
+    }
+    let visible: FxHashSet<ProcessKey> = detail_keys.iter().copied().collect();
+    for p2 in extras_p2 {
+        if let Some(key) = p2.key.filter(|k| visible.contains(k)) {
+            p2.x11_resources = counts.get(&key.pid).copied();
         }
     }
 }
@@ -1170,6 +1202,35 @@ mod tests {
         let mut history = settings(1000);
         history.history.enabled = true;
         assert!(sweep_wants(&Demand::default(), &history).io);
+
+        let mut d = Demand::default();
+        d.process_columns.insert(ColumnId::X11Resources);
+        let w = sweep_wants(&d, &s);
+        assert!(w.x11_resources && !w.io && !w.fd_count, "{w:?}");
+    }
+
+    #[test]
+    fn fill_x11_resources_only_detail_keys() {
+        let key = |pid| ProcessKey {
+            start_ticks: 1,
+            boot_id: BootId(1),
+            pid,
+        };
+        let entry = |k: Option<ProcessKey>| ProcessExtrasP2 {
+            key: k,
+            ..ProcessExtrasP2::default()
+        };
+        let mut p2 = vec![
+            entry(Some(key(10))),
+            entry(None),
+            entry(Some(key(20))),
+            // Has a client, but is not a detail key.
+            entry(Some(key(30))),
+        ];
+        let counts: FxHashMap<u32, u32> = [(10, 26), (30, 5)].into_iter().collect();
+        fill_x11_resources(&mut p2, &[key(10), key(20)], &counts);
+        let got: Vec<_> = p2.iter().map(|p| p.x11_resources).collect();
+        assert_eq!(got, [Some(26), None, None, None]);
     }
 
     #[test]

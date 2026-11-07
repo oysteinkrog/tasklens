@@ -33,6 +33,7 @@ pub mod public_ip;
 pub mod sensors;
 pub mod smartctl;
 mod startup;
+mod x11res;
 
 use std::sync::Arc;
 
