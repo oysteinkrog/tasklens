@@ -32,6 +32,7 @@ mod page_look;
 mod page_mem_widgets;
 mod page_net_widgets;
 mod page_range;
+mod page_remote;
 mod page_widgets;
 mod performance;
 mod sidebar;

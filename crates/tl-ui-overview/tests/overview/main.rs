@@ -8,3 +8,4 @@ mod cpu_apps;
 mod overview;
 mod overview_groups;
 mod overview_widgets;
+mod remote_remap;
