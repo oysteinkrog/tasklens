@@ -2193,6 +2193,73 @@ pub enum PieceLayer {
     Stroke,
 }
 
+/// A path's vertices to be moved into window logical px, not yet written: its bounds after the
+/// move, its vertex count and the source slices (physical px). A ramped paint splits the
+/// vertices between its two bands while it moves them, so each vertex is written once per
+/// band it goes to (tasklens-3uosp).
+pub struct MovedPath<'a, S: Iterator<Item = &'a [PathVertex<Pixels>]>> {
+    pub bounds: Bounds<Pixels>,
+    pub len: usize,
+    inv: f32,
+    offset: Point<Pixels>,
+    slices: S,
+}
+
+impl<'a, S: Iterator<Item = &'a [PathVertex<Pixels>]>> MovedPath<'a, S> {
+    /// `slices` (physical px, `len` vertices in all) divided by `scale_factor` and moved by
+    /// `offset`; `bounds` are the source bounds, moved the same way.
+    pub fn new(
+        bounds: Bounds<Pixels>,
+        len: usize,
+        offset: Point<Pixels>,
+        scale_factor: f32,
+        slices: S,
+    ) -> Self {
+        let inv = 1.0 / scale_factor;
+        Self {
+            bounds: Bounds::new(
+                bounds.origin * inv + offset,
+                size(bounds.size.width * inv, bounds.size.height * inv),
+            ),
+            len,
+            inv,
+            offset,
+            slices,
+        }
+    }
+
+    /// Calls `f` with every vertex moved, in order.
+    pub fn for_each(self, mut f: impl FnMut(PathVertex<Pixels>)) {
+        let (inv, offset) = (self.inv, self.offset);
+        for s in self.slices {
+            for v in s {
+                f(moved(v, inv, offset));
+            }
+        }
+    }
+
+    /// The moved vertices as one path with the moved bounds. Each vertex is written once.
+    pub fn collect(self) -> Path<Pixels> {
+        let mut out = Path::new(self.bounds.origin);
+        out.bounds = self.bounds;
+        out.vertices.reserve_exact(self.len);
+        let (inv, offset) = (self.inv, self.offset);
+        for s in self.slices {
+            out.vertices.extend(s.iter().map(|v| moved(v, inv, offset)));
+        }
+        out
+    }
+}
+
+#[inline]
+fn moved(v: &PathVertex<Pixels>, inv: f32, offset: Point<Pixels>) -> PathVertex<Pixels> {
+    PathVertex {
+        xy_position: v.xy_position * inv + offset,
+        st_position: v.st_position,
+        content_mask: Default::default(),
+    }
+}
+
 /// One layer of every piece as one path in logical px moved by `offset`, as `translated` makes
 /// it from one cached path: the bounds cover every piece, and each vertex is written once, so a
 /// paint copies the grid's vertices once. `None` when no piece has a vertex in that layer.
@@ -2202,7 +2269,17 @@ pub fn piece_path<'a>(
     offset: Point<Pixels>,
     scale_factor: f32,
 ) -> Option<Path<Pixels>> {
-    let mesh = |p: &'a CellPiece| match layer {
+    piece_moved(pieces, layer, offset, scale_factor).map(MovedPath::collect)
+}
+
+/// [`piece_path`] before the vertices are written.
+pub fn piece_moved<'a>(
+    pieces: impl Iterator<Item = &'a CellPiece> + Clone,
+    layer: PieceLayer,
+    offset: Point<Pixels>,
+    scale_factor: f32,
+) -> Option<MovedPath<'a, impl Iterator<Item = &'a [PathVertex<Pixels>]>>> {
+    let mesh = move |p: &'a CellPiece| match layer {
         PieceLayer::Fill => &p.fill,
         PieceLayer::Stroke => &p.stroke,
     };
@@ -2217,21 +2294,15 @@ pub fn piece_path<'a>(
     if count == 0 {
         return None;
     }
-    let inv = 1.0 / scale_factor;
-    let mut out = Path::new(point(px(min.0), px(min.1)) * inv + offset);
-    out.bounds.size = size(px(max.0 - min.0) * inv, px(max.1 - min.1) * inv);
-    out.vertices.reserve_exact(count);
-    let moved = |v: &PathVertex<Pixels>| PathVertex {
-        xy_position: v.xy_position * inv + offset,
-        st_position: v.st_position,
-        content_mask: Default::default(),
-    };
-    for m in meshes {
+    let bounds = Bounds::new(
+        point(px(min.0), px(min.1)),
+        size(px(max.0 - min.0), px(max.1 - min.1)),
+    );
+    let slices = meshes.flat_map(|m| {
         let (a, b) = m.verts.as_slices();
-        out.vertices.extend(a.iter().map(moved));
-        out.vertices.extend(b.iter().map(moved));
-    }
-    Some(out)
+        [a, b]
+    });
+    Some(MovedPath::new(bounds, count, offset, scale_factor, slices))
 }
 
 /// Where one grid cell's points go: chart-local x in `lo .. lo + clip_w` is on screen.

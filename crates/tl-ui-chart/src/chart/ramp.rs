@@ -14,10 +14,12 @@
 //! `appearance.color_charts_by_value` turns every ramp off, power included.
 //!
 //! GPUI paths take a two-stop linear gradient over the path's bounds, and those bounds also clip
-//! the path. So each ramped path is painted twice with the same vertices: once with its bounds
-//! set to the lower half of the plot (low to mid) and once to the upper half (mid to high). A
-//! half the path does not reach is skipped. This costs one extra vertex copy per ramped path
-//! per frame and no geometry rebuild; stepped bands would cost 8 or more paints.
+//! the path. So each ramped path is painted twice: once with its bounds set to the lower half
+//! of the plot (low to mid) and once to the upper half (mid to high). A half the path does not
+//! reach is skipped. Each paint gets only the triangles that reach its half, sorted while the
+//! vertices are moved into place (`element::paint_ramped`, tasklens-3uosp), so only triangles
+//! that cross the split are sent twice. No geometry rebuild; stepped bands would cost 8 or more
+//! paints.
 
 use gpui_kit::{
     Background, Bounds, Hsla, Pixels, Rgba, linear_color_stop, linear_gradient, point, px, size,

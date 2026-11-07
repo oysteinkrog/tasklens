@@ -1253,7 +1253,7 @@ fn paint_grid_view(
                     break;
                 }
                 let cells = pieces[first..last].iter().map(|p| &p[0]);
-                let Some(path) = geometry::piece_path(cells, layer, offset, sf) else {
+                let Some(path) = geometry::piece_moved(cells, layer, offset, sf) else {
                     continue;
                 };
                 let cell = cell_bounds(bounds, &layout, first, cell_h, gap).inset(px(1.));
