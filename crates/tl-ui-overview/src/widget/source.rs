@@ -36,8 +36,8 @@ use tl_model::snapshot::{ComponentMask, Snapshot};
 use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::validity::Validity;
 use tl_ui_settings::layout::{
-    DeviceSelector, FormSet, METRIC_CLOCK_GFX, METRIC_CLOCK_MEM, METRIC_POWER, METRIC_TEMP,
-    METRIC_VRAM, MetricKey, SourceSelector,
+    ContainerLayout, DeviceSelector, FormSet, METRIC_CLOCK_GFX, METRIC_CLOCK_MEM, METRIC_POWER,
+    METRIC_TEMP, METRIC_VRAM, MetricKey, SourceSelector,
 };
 use tl_ui_settings::layout_boxes::{
     CPU_LOGICAL_PREFIX, DeviceKind, METRIC_CORE_CLOCKS, METRIC_CPU_KERNEL, METRIC_CPU_TOTAL,
@@ -57,6 +57,7 @@ use tl_ui_settings::layout_pages::{
 use tl_ui_settings::settings::OverviewRange;
 
 use super::meta::{MetricMeta, NetView};
+use super::remap::{self, LayoutKeys};
 use crate::overview::cpu_box::CoreAverage;
 use crate::overview::picked::{box_mask, box_snapshot};
 use crate::overview::range::{Figures, current_range, figures_text};
@@ -69,7 +70,6 @@ use tl_ui_chart::chart::labels::{NetFormat, format_value};
 use tl_ui_chart::chart::{ChartState, ValueFormat, YScale};
 use tl_ui_chart::net_totals::NetTotal;
 use tl_ui_kit::components::validity::copy_text;
-use tl_ui_perf_core::core::DeviceKey;
 use tl_ui_perf_core::core::core_clocks::core_lines;
 use tl_ui_perf_core::core::gpu::{
     GpuVendor, ProbeState, clocks_tooltip_text, gpu_totals, igpu_power_needs_setup,
@@ -505,6 +505,9 @@ fn shown(v: Validity) -> bool {
 struct Resolved {
     idx: DeviceIdx,
     name: SharedString,
+    /// The device's persistent key on the shown host, which differs from the saved key when the
+    /// key was mapped by kind and order ([`remap`]).
+    key: Arc<str>,
 }
 
 /// What a source last read, compared to tell whether its widgets must notify.
@@ -620,6 +623,9 @@ pub struct SourceData {
     series_of: Option<MetricSeries>,
     /// The catalog version the device was resolved at; `None` forces a new lookup.
     catalog_version: Option<u64>,
+    /// The saved keys of the source's layout and its page pin, which map a key the shown host
+    /// lacks by kind and order on a remote host ([`remap::resolve`]).
+    remap: Arc<LayoutKeys>,
     /// The smoothed load of a logical CPU (UI-PRF-018).
     average: CoreAverage,
     state: SourceState,
@@ -663,6 +669,7 @@ impl SourceData {
             meta,
             series_of,
             catalog_version: None,
+            remap: Arc::default(),
             average: CoreAverage::default(),
             state: SourceState {
                 key,
@@ -905,6 +912,18 @@ impl SourceData {
         });
     }
 
+    /// The layout's saved keys or page pin changed (store): the device is looked up again.
+    pub fn set_remap(&mut self, remap: Arc<LayoutKeys>, cx: &mut Context<Self>) {
+        if *self.remap == *remap {
+            return;
+        }
+        let snap = box_snapshot(&self.hub, cx);
+        self.update(&snap, true, cx, |this, _| {
+            this.remap = remap;
+            this.catalog_version = None;
+        });
+    }
+
     fn on_snapshot(
         &mut self,
         hub: Entity<SnapshotHub>,
@@ -999,22 +1018,20 @@ impl SourceData {
         cx.notify();
     }
 
-    /// Finds the device of the key in the catalog: a present entry whose persistent key is the
-    /// key (or, for a GPU, whose identity gives the key, as phase 1 did).
-    fn resolve_device(&self, snap: &Snapshot) -> Option<Resolved> {
+    /// Finds the device of the key in the catalog ([`remap::resolve`]): a present entry whose
+    /// persistent key is the key (or, for a GPU, whose identity gives the key, as phase 1 did);
+    /// on a remote host, else the same-kind same-order device.
+    fn resolve_device(&self, snap: &Snapshot, cx: &App) -> Option<Resolved> {
         let key = self.state.key.as_deref()?;
-        snap.devices
-            .entries
-            .iter()
-            .filter(|e| e.present)
-            .find(|e| {
-                &*e.persistent_key == key
-                    || DeviceKey::from_identity(&e.identity).is_some_and(|k| &*k.0 == key)
-            })
-            .map(|e| Resolved {
-                idx: e.idx,
-                name: SharedString::from(e.display_name.to_string()),
-            })
+        let perf = cx
+            .try_global::<TlSettings>()
+            .map(|_| &TlSettings::settings(cx).performance);
+        let remote = self.hub.read(cx).clock().is_remote();
+        remap::resolve(snap, perf, key, &self.remap, remote).map(|e| Resolved {
+            idx: e.idx,
+            name: SharedString::from(e.display_name.to_string()),
+            key: Arc::clone(&e.persistent_key),
+        })
     }
 
     /// The series of the metric on the resolved device: one per physical core for
@@ -1051,7 +1068,8 @@ impl SourceData {
             MetricSeries::Paired(metric) => {
                 // A fan's temperature: the sensor its `[fans]` entry names, else its default
                 // pairing (PERF-077). No sensor: no series.
-                let fan = self.state.key.as_deref().unwrap_or_default();
+                // The fan's key on the shown host, which pairs with that host's sensors.
+                let fan = self.state.device.as_ref().map_or("", |d| &*d.key);
                 let sensor = match self.state.followed.fan_temp.as_deref() {
                     Some(s) => sensor_device(snap, s),
                     None => default_sensor(snap, fan).and_then(|s| sensor_device(snap, &s)),
@@ -1129,7 +1147,7 @@ impl SourceData {
     fn refresh(&mut self, snap: &Snapshot, mut stats: bool, cx: &App) {
         if self.catalog_version != Some(snap.devices.version) {
             self.catalog_version = Some(snap.devices.version);
-            self.state.device = self.resolve_device(snap);
+            self.state.device = self.resolve_device(snap, cx);
             self.resolve_series(snap, cx);
             self.average = CoreAverage::default();
             stats = true;
@@ -1404,6 +1422,8 @@ pub struct SourceStore {
     page: bool,
     /// The device keys of the GPUs the box shows, in sidebar order: slot 0, then slot 1.
     slots: Vec<Arc<str>>,
+    /// The saved keys of the store's layout and the page pin, for [`remap::resolve`].
+    remap: Arc<LayoutKeys>,
     sources: FxHashMap<SourceSelector, WeakEntity<SourceData>>,
 }
 
@@ -1413,6 +1433,7 @@ impl SourceStore {
             hub: hub.clone(),
             page: false,
             slots: Vec::new(),
+            remap: Arc::default(),
             sources: FxHashMap::default(),
         }
     }
@@ -1436,9 +1457,11 @@ impl SourceStore {
         let hub = self.hub.clone();
         let selector = selector.clone();
         let page = self.page;
+        let remap = Arc::clone(&self.remap);
         let data = cx.new(|cx| {
             let mut data = SourceData::new(&hub, selector.clone(), slot_key, cx);
             data.set_page(page, cx);
+            data.set_remap(remap, cx);
             data
         });
         self.sources.insert(selector, data.downgrade());
@@ -1459,6 +1482,41 @@ impl SourceStore {
             let key = self.slot_key(&selector.device);
             data.update(cx, |d, cx| d.set_slot_key(key, cx));
         }
+    }
+
+    /// The saved keys of the layout the store serves ([`LayoutKeys::of`]); the page pin stays.
+    /// Returns whether they changed; the sources look their devices up again then.
+    pub fn set_layout_keys(&mut self, layout: &ContainerLayout, cx: &mut App) -> bool {
+        let next = LayoutKeys::of(layout).with_pin(self.remap.pin().cloned());
+        self.set_remap(next, cx)
+    }
+
+    /// On a remote device page that borrows a local page's layout: the local key at the page's
+    /// position and the page's own key ([`remap`]). Returns whether it changed.
+    pub fn set_pin(&mut self, pin: Option<(Arc<str>, Arc<str>)>, cx: &mut App) -> bool {
+        if self.remap.pin() == pin.as_ref() {
+            return false;
+        }
+        let next = (*self.remap).clone().with_pin(pin);
+        self.set_remap(next, cx)
+    }
+
+    /// The saved keys and the page pin the sources resolve with.
+    pub fn remap(&self) -> &Arc<LayoutKeys> {
+        &self.remap
+    }
+
+    fn set_remap(&mut self, next: LayoutKeys, cx: &mut App) -> bool {
+        if *self.remap == next {
+            return false;
+        }
+        self.remap = Arc::new(next);
+        self.prune();
+        for data in self.sources.values().filter_map(WeakEntity::upgrade) {
+            let remap = Arc::clone(&self.remap);
+            data.update(cx, |d, cx| d.set_remap(remap, cx));
+        }
+        true
     }
 
     /// The number of sources in use.

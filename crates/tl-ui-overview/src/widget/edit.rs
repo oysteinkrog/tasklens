@@ -61,8 +61,10 @@ use super::fixed_widget::PAGE_FIXED_NAMES;
 use super::grid::{self, Drawn, InnerGrid, SlotDevice};
 use super::menu::{self, OPTION_DASHED, OPTION_FILL, SourceGroup};
 use super::meta::MetricMeta;
+use super::remap;
 use super::source::Availability;
 use crate::overview::picked::box_snapshot;
+use tl_ui_base::host::HostContext;
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::tr;
 use tl_ui_base::selector::TlSelector;
@@ -532,6 +534,9 @@ pub struct WidgetEditor {
     page_name: Option<SharedString>,
     /// The page parts the page can show now; Add Widget lists the ones it does not hold.
     page_parts: Vec<FixedWidget>,
+    /// On a remote device page that shows a borrowed local page layout: the local container the
+    /// edit saves to, so the layout stays one shared layout (leader decision 2026-11-07).
+    save_to: Option<SharedString>,
     edit: Option<LayoutEdit>,
     /// The layout the container showed when editing started; Cancel puts it back.
     shown_before: Option<ContainerLayout>,
@@ -574,6 +579,7 @@ impl WidgetEditor {
             slots: Vec::new(),
             page_name: None,
             page_parts: Vec::new(),
+            save_to: None,
             edit: None,
             shown_before: None,
             drag: None,
@@ -626,6 +632,71 @@ impl WidgetEditor {
     /// The page parts the page can show now, in the order Add Widget lists them.
     pub fn set_page_parts(&mut self, parts: Vec<FixedWidget>) {
         self.page_parts = parts;
+    }
+
+    /// The container Edit Widgets saves to and starts from: `Some` on a remote device page that
+    /// shows a borrowed local page layout (the local container), `None` for the editor's own.
+    pub fn set_save_container(&mut self, container: Option<SharedString>) {
+        self.save_to = container;
+    }
+
+    /// The container Edit Widgets saves to: the borrowed local container, else its own.
+    pub fn save_id(&self) -> &SharedString {
+        self.save_to.as_ref().unwrap_or(&self.id)
+    }
+
+    /// Whether the editor's page shows a remote host.
+    fn remote(&self, cx: &App) -> bool {
+        self.hub.read(cx).clock().is_remote()
+    }
+
+    /// The key an edit writes for the shown host's device `shown`: on a remote host the saved
+    /// key that maps to it ([`remap::saved_key_for`]), else `shown` itself.
+    fn key_to_write(&self, shown: &Arc<str>, cx: &App) -> Arc<str> {
+        if !self.remote(cx) {
+            return Arc::clone(shown);
+        }
+        let snap = box_snapshot(&self.hub, cx);
+        let perf = cx
+            .try_global::<TlSettings>()
+            .map(|_| &TlSettings::settings(cx).performance);
+        let keys = self.container.read(cx).remap();
+        remap::saved_key_for(&snap, perf, shown, &keys, true).unwrap_or_else(|| Arc::clone(shown))
+    }
+
+    /// The slots a flow layout pins with. On a remote host a slot writes the saved key that maps
+    /// to its GPU, else the local GPU at the same position, else the shown GPU's key (leader
+    /// decision 2026-11-07: an edit on a remote host writes local keys).
+    fn pin_slots(&self, cx: &App) -> Vec<SlotDevice> {
+        if !self.remote(cx) {
+            return self.slots.clone();
+        }
+        let perf = cx
+            .try_global::<TlSettings>()
+            .map(|_| &TlSettings::settings(cx).performance);
+        let local = HostContext::local_hub(cx).map(|h| Arc::clone(h.read(cx).current()));
+        let local_gpus = local.as_ref().map_or_else(Vec::new, |l| {
+            remap::kind_rows(l, perf, tl_ui_perf_core::core::DeviceKind::Gpu)
+        });
+        self.slots
+            .iter()
+            .enumerate()
+            .map(|(n, dev)| {
+                let mapped = self.key_to_write(&dev.key, cx);
+                let key = if *mapped != *dev.key {
+                    mapped
+                } else {
+                    local_gpus
+                        .get(n)
+                        .map_or_else(|| Arc::clone(&dev.key), |row| Arc::clone(&row.key.0))
+                };
+                let name = local
+                    .as_ref()
+                    .and_then(|l| remap::find_present(l, &key))
+                    .map_or_else(|| Arc::clone(&dev.name), |e| Arc::clone(&e.display_name));
+                SlotDevice { key, name }
+            })
+            .collect()
     }
 
     /// Whether the editor serves a device page.
@@ -696,7 +767,7 @@ impl WidgetEditor {
                 fit_to = Some(fit as u16);
             }
         }
-        let mut pinned = grid::pin(layout, &drawn, &self.slots, &g);
+        let mut pinned = grid::pin(layout, &drawn, &self.pin_slots(cx), &g);
         // Flow rows packed tighter than the grid's row pitch (a 1.2.0 GPU section draws its
         // 18 px text rows 22 px apart) still pin to more rows: the tall widgets give rows down
         // to their minimum span, so the box fits under the toolbar where it can.
@@ -736,7 +807,7 @@ impl WidgetEditor {
         } else {
             shown.clone()
         };
-        let before = saved_layout(&self.id, cx);
+        let before = saved_layout(self.save_id(), cx);
         // The body keeps the offset the applied view had.
         let offset = self.container.read(cx).scroll_offset();
         self.scroll.set_offset(point(px(0.), -offset));
@@ -751,7 +822,11 @@ impl WidgetEditor {
             }
         });
         self.shown_before = Some(shown);
-        self.edit = Some(LayoutEdit::new(self.id.to_string(), before, Some(working)));
+        self.edit = Some(LayoutEdit::new(
+            self.save_id().to_string(),
+            before,
+            Some(working),
+        ));
         self.drag = None;
         bump_edit_mode(cx);
         cx.emit(WidgetEditEvent::Started);
@@ -1146,7 +1221,7 @@ impl WidgetEditor {
                     .map(|s| Arc::clone(&s.name))
             });
         let selector = SourceSelector {
-            device: DeviceSelector::Key(Arc::clone(&source.device)),
+            device: DeviceSelector::Key(self.key_to_write(&source.device, cx)),
             metric,
         };
         (selector, name, offered)
@@ -1195,7 +1270,7 @@ impl WidgetEditor {
             .find(|s| *s.key == *device)
             .map(|s| Arc::clone(&s.name));
         let widget = menu::new_group(
-            DeviceSelector::Key(Arc::from(device)),
+            DeviceSelector::Key(self.key_to_write(&Arc::from(device), cx)),
             members,
             MetricKey::new(metric),
             name,

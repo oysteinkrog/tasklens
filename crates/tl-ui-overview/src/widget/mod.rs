@@ -29,4 +29,5 @@ pub mod members;
 pub mod menu;
 pub mod meta;
 pub mod metric_widget;
+pub mod remap;
 pub mod source;

@@ -34,6 +34,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
@@ -55,6 +56,7 @@ use super::fixed_widget::{FixedContent, FixedWidgetView};
 use super::grid::{self, InnerGrid, InnerPlacement, PlacedWidget};
 use super::group_widget::{GroupFlowLook, GroupWidget};
 use super::metric_widget::{FlowLook, MetricWidget};
+use super::remap::LayoutKeys;
 use super::source::{Availability, AvailabilityChanged, SourceData, SourceStore};
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::selector::TlSelector;
@@ -297,6 +299,8 @@ impl WidgetContainer {
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             relayout_count: std::cell::Cell::new(0),
         };
+        let layout = this.layout.clone();
+        this.store.borrow_mut().set_layout_keys(&layout, cx);
         this.sync_sources(cx);
         this.relayout(cx);
         this
@@ -416,9 +420,36 @@ impl WidgetContainer {
             return;
         }
         self.layout = layout;
+        let remapped = self.store.borrow_mut().set_layout_keys(&self.layout, cx);
         self.sync_sources(cx);
         self.relayout(cx);
+        if remapped {
+            self.remap_groups(cx);
+        }
         self.notify(cx);
+    }
+
+    /// On a remote device page that borrows a local page's layout: the local key at the page's
+    /// position and the page's own key (`remap`). The sources and groups look their devices up
+    /// again when it changed.
+    pub fn set_pin(&mut self, pin: Option<(Arc<str>, Arc<str>)>, cx: &mut Context<Self>) {
+        if self.store.borrow_mut().set_pin(pin, cx) {
+            self.remap_groups(cx);
+        }
+    }
+
+    /// The saved keys and the page pin the container's sources resolve with.
+    pub fn remap(&self) -> Arc<LayoutKeys> {
+        Arc::clone(self.store.borrow().remap())
+    }
+
+    /// The layout's keys or the pin changed: the groups read their members again.
+    fn remap_groups(&mut self, cx: &mut Context<Self>) {
+        for view in self.widgets.values() {
+            if let WidgetView::Group(g) = view {
+                g.update(cx, |g, cx| g.remap_changed(cx));
+            }
+        }
     }
 
     /// The placer of flow layouts; `None` places them in list order.

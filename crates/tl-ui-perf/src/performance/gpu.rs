@@ -55,7 +55,10 @@ use tl_ui_settings::settings::GpuOptionalGraph;
 use super::actions::{
     PerfToggleGpuEngine, PerfToggleGpuOptionalGraph, PerfWidgetEditStart, PerfWidgetResetPage,
 };
-use super::aggregate::{add_demand, page_layout, reset_page, start_page_edit, strings_version};
+use super::aggregate::{
+    add_demand, page_layout_on, page_store, reset_page, show_page_layout, start_page_edit,
+    strings_version,
+};
 // The engine model moved to `core/gpu.rs` (tasklens-zljr5.22), and the probe state with it
 // (tasklens-hzire.4). These keep the old paths working.
 pub(crate) use super::core::gpu::gpu_totals;
@@ -79,7 +82,6 @@ use super::widget::container::WidgetContainer;
 use super::widget::details_widget::{DetailsResized, DetailsShown, DetailsView};
 use super::widget::edit::{WidgetEditor, default_layout};
 use super::widget::fixed_widget::FixedContent;
-use super::widget::source::SourceStore;
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_base::app_env::AppEnv;
 use tl_ui_base::demand::DemandAggregator;
@@ -484,7 +486,10 @@ impl GpuPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let container_id = SharedString::from(page_container(&key.0));
-        convert_on_first_build(&container_id, cx);
+        // A remote host's page borrows the local page's layout instead (tasklens-jmc36).
+        if !hub.read(cx).clock().is_remote() {
+            convert_on_first_build(&container_id, cx);
+        }
         let theme = current(cx).clone();
         let settings = PageSettings::read(cx);
         let snap = Arc::clone(hub.read(cx).current());
@@ -550,9 +555,10 @@ impl GpuPage {
                 _ => None,
             })
         };
+        let page = page_layout_on(&container_id, &hub, cx);
         let container = {
-            let store = Rc::new(std::cell::RefCell::new(SourceStore::for_page(&hub)));
-            let layout = page_layout(&container_id, cx);
+            let store = page_store(&hub, &page, cx);
+            let layout = page.layout.clone();
             let id = container_id.clone();
             let hub = hub.clone();
             cx.new(move |cx| {
@@ -565,6 +571,7 @@ impl GpuPage {
         let editor = {
             let container = container.clone();
             let hub = hub.clone();
+            let borrowed = page.borrowed.clone();
             cx.new(move |cx| {
                 let mut e = WidgetEditor::new(container, &hub, cx);
                 e.set_page_parts(vec![
@@ -572,6 +579,7 @@ impl GpuPage {
                     FixedWidget::GpuEngineGrid,
                     FixedWidget::GpuDisplays,
                 ]);
+                e.set_save_container(borrowed);
                 e
             })
         };
@@ -1009,8 +1017,12 @@ impl GpuPage {
         if a.key != self.key {
             return;
         }
-        let container = self.container_id.to_string();
-        let key = Arc::clone(&self.key.0);
+        // A borrowed page writes the local page with the local key (tasklens-jmc36).
+        let container = self.editor.read(cx).save_id().to_string();
+        let remap = self.container.read(cx).remap();
+        let key = remap
+            .pin()
+            .map_or_else(|| Arc::clone(&self.key.0), |(local, _)| Arc::clone(local));
         let which = a.which;
         TlSettings::update(cx, |d| {
             let perf = &mut d.settings.performance;
@@ -1029,8 +1041,8 @@ impl GpuPage {
     /// Reset Page, a menu item) shows when the page is not in Edit Widgets.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
         if !self.editor.read(cx).is_editing() {
-            let layout = page_layout(&self.container_id, cx);
-            self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+            let page = page_layout_on(&self.container_id, &self.hub, cx);
+            show_page_layout(&self.container, &self.editor, page, cx);
         }
         let versions = section_versions(cx);
         if versions == self.settings_versions {
@@ -1109,7 +1121,8 @@ impl GpuPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        reset_page(&self.container_id, self.header.0.clone(), window, cx);
+        let container = self.editor.read(cx).save_id().clone();
+        reset_page(&container, self.header.0.clone(), window, cx);
     }
 }
 
@@ -1993,7 +2006,7 @@ impl DevicePage for GpuPage {
     /// engine grid, then the Power and Clocks graphs, checked from the page's flow layout
     /// (PERF-063, UI-PRF-032). A grid layout hides Power and Clocks (ADR-019 phase 3).
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
-        let layout = page_layout(&self.container_id, cx);
+        let layout = page_layout_on(&self.container_id, &self.hub, cx).layout;
         let has_grid = layout
             .widgets
             .iter()

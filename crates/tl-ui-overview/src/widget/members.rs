@@ -26,6 +26,7 @@ use tl_ui_settings::layout::{
 use tl_ui_settings::layout_boxes::CPU_LOGICAL_PREFIX;
 use tl_ui_settings::settings::PerformanceSettings;
 
+use super::remap::{LayoutKeys, resolve};
 use tl_ui_perf_core::core::gpu::{GpuVendor, gpu_totals, grid_engines};
 use tl_ui_perf_core::core::retain_whole_disks;
 use tl_ui_perf_core::core::{
@@ -67,16 +68,37 @@ fn member_metric(group: &GroupSelector, engine: Option<&str>) -> MetricKey {
     }
 }
 
+/// How a group finds its own device on the shown host: the layout's keys and whether the host
+/// is a remote one ([`super::remap::resolve`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Remap<'a> {
+    pub keys: &'a LayoutKeys,
+    pub remote: bool,
+}
+
+impl Remap<'_> {
+    /// Exact keys only, as on the local host.
+    pub fn exact() -> Remap<'static> {
+        static NONE: LayoutKeys = LayoutKeys::EMPTY;
+        Remap {
+            keys: &NONE,
+            remote: false,
+        }
+    }
+}
+
 /// The members of `group` on `snap`. `perf` is `[performance]` (`None` before settings load:
 /// every disk and adapter class shows, no engine is hidden). `slot_key` is the device key of
 /// the GPU in the group's slot (ignored for a `Key` device). `flow` says the group is in a flow
-/// layout, where `hidden_gpu_engines` applies.
+/// layout, where `hidden_gpu_engines` applies. `remap` finds an engine group's GPU on another
+/// host by kind and order.
 pub fn members(
     group: &GroupSelector,
     snap: &Snapshot,
     perf: Option<&PerformanceSettings>,
     slot_key: Option<&str>,
     flow: bool,
+    remap: Remap<'_>,
 ) -> Members {
     let one = |device: Arc<str>, engine: Option<&str>| SourceSelector {
         device: DeviceSelector::Key(device),
@@ -133,10 +155,7 @@ pub fn members(
             let Some(key) = key else {
                 return Members::Gone;
             };
-            let Some(entry) = snap.devices.entries.iter().filter(|e| e.present).find(|e| {
-                &*e.persistent_key == key
-                    || DeviceKey::from_identity(&e.identity).is_some_and(|k| &*k.0 == key)
-            }) else {
+            let Some(entry) = resolve(snap, perf, key, remap.keys, remap.remote) else {
                 return Members::Gone;
             };
             let vendor = GpuVendor::of(snap, entry.idx);
@@ -159,7 +178,7 @@ pub fn members(
 }
 
 /// The present devices in sidebar order, as the sidebar lists them before visibility.
-fn all_rows(snap: &Snapshot, perf: Option<&PerformanceSettings>) -> Vec<DeviceRow> {
+pub(crate) fn all_rows(snap: &Snapshot, perf: Option<&PerformanceSettings>) -> Vec<DeviceRow> {
     let (order, overrides) = view_parts(perf);
     let view = settings_view(perf, &order, &overrides);
     let mut rows = Vec::new();
@@ -316,7 +335,7 @@ mod tests {
         ]);
         let g = group(DEVICE_CPU, GroupKind::Cores, METRIC_LOAD);
         assert_eq!(
-            keys(&members(&g, &s, None, None, false)),
+            keys(&members(&g, &s, None, None, false, Remap::exact())),
             ["cpu:0/load", "cpu:2/load"]
         );
     }
@@ -333,7 +352,7 @@ mod tests {
         ]);
         let g = group(DEVICE_DISKS, GroupKind::Disks, METRIC_DISK_IO);
         assert_eq!(
-            keys(&members(&g, &s, None, None, false)),
+            keys(&members(&g, &s, None, None, false, Remap::exact())),
             ["disk:sda/io", "disk:nvme0n1/io"]
         );
         let mut p = PerformanceSettings {
@@ -341,12 +360,12 @@ mod tests {
             ..PerformanceSettings::default()
         };
         assert_eq!(
-            keys(&members(&g, &s, Some(&p), None, false)),
+            keys(&members(&g, &s, Some(&p), None, false, Remap::exact())),
             ["disk:nvme0n1/io", "disk:sda/io"]
         );
         p.show_disks = false;
         assert_eq!(
-            members(&g, &s, Some(&p), None, false),
+            members(&g, &s, Some(&p), None, false, Remap::exact()),
             Members::List(vec![])
         );
     }
@@ -365,12 +384,12 @@ mod tests {
             ..PerformanceSettings::default()
         };
         assert_eq!(
-            keys(&members(&g, &s, Some(&p), None, false)),
+            keys(&members(&g, &s, Some(&p), None, false, Remap::exact())),
             ["net:eth0/traffic", "net:wg0/traffic"]
         );
         p.show_network_vpn = false;
         assert_eq!(
-            keys(&members(&g, &s, Some(&p), None, false)),
+            keys(&members(&g, &s, Some(&p), None, false, Remap::exact())),
             ["net:eth0/traffic"]
         );
     }
@@ -379,11 +398,20 @@ mod tests {
     fn engines_of_a_gone_gpu_and_unknown_groups() {
         let s = snap(vec![]);
         let g = group("gpu:GPU-x", GroupKind::Engines, METRIC_ENGINE_ANY);
-        assert_eq!(members(&g, &s, None, None, false), Members::Gone);
+        assert_eq!(
+            members(&g, &s, None, None, false, Remap::exact()),
+            Members::Gone
+        );
         let mut slot = g.clone();
         slot.device = DeviceSelector::Slot(0);
-        assert_eq!(members(&slot, &s, None, None, true), Members::Gone);
+        assert_eq!(
+            members(&slot, &s, None, None, true, Remap::exact()),
+            Members::Gone
+        );
         let other = group(DEVICE_CPU, GroupKind::Other(Arc::from("fans")), "x");
-        assert_eq!(members(&other, &s, None, None, false), Members::Unknown);
+        assert_eq!(
+            members(&other, &s, None, None, false, Remap::exact()),
+            Members::Unknown
+        );
     }
 }

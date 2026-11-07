@@ -34,7 +34,8 @@ use tl_model::validity::Validity;
 use tl_ui_settings::layout::{
     ContainerLayout, FixedWidget, WidgetSetting, container_layout, reset_to_default,
 };
-use tl_ui_settings::layout_pages::page_container;
+use tl_ui_settings::layout_boxes::DeviceKind as KeyKind;
+use tl_ui_settings::layout_pages::{page_container, page_key};
 
 use super::actions::{PerfWidgetEditStart, PerfWidgetResetPage};
 use super::details::{Fallback, KeyValueModel};
@@ -50,9 +51,11 @@ use super::widget::details_widget::{DetailsResized, DetailsShown, DetailsView};
 use super::widget::edit::{WidgetEditor, any_editing, default_layout, saved_layout};
 use super::widget::fixed_widget::FixedContent;
 use super::widget::menu::confirm_reset_page;
+use super::widget::remap::{find_present, kind_rows, remap_kind};
 use super::widget::source::SourceStore;
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
 use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use tl_ui_base::i18n::Strings;
 use tl_ui_base::settings_global::TlSettings;
@@ -419,6 +422,90 @@ pub(super) fn page_layout(container: &str, cx: &App) -> ContainerLayout {
         .then(|| container_layout(&TlSettings::settings(cx).performance, container))
         .flatten()
         .unwrap_or_else(|| default_layout(container))
+}
+
+/// The layout a device page shows on the host its hub reads, and where it came from.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PageLayout {
+    pub layout: ContainerLayout,
+    /// The local page container a remote page borrowed its layout from. Edit Widgets and Reset
+    /// Page save there, so the layout stays one shared layout.
+    pub borrowed: Option<SharedString>,
+    /// The local key at the page's position and the page's own key (the page pin of `remap`).
+    pub pin: Option<(Arc<str>, Arc<str>)>,
+}
+
+/// The layout of device page `container` on the host of `hub` (tasklens-jmc36, leader decision
+/// 2026-11-07). On the local host, and for a page whose key is the same on every host, it is
+/// [`page_layout`]. On a remote host a page whose key has no saved entry and is not a local
+/// device borrows the local page of the same-kind same-order device, with that local key
+/// pinned to the page's own device. A saved entry under the remote key wins. Never saves.
+pub(super) fn page_layout_on(container: &str, hub: &Entity<SnapshotHub>, cx: &App) -> PageLayout {
+    let own = || PageLayout {
+        layout: page_layout(container, cx),
+        borrowed: None,
+        pin: None,
+    };
+    if !hub.read(cx).clock().is_remote() || saved_layout(container, cx).is_some() {
+        return own();
+    }
+    let Some(key) = page_key(container) else {
+        return own();
+    };
+    let Some(kind) = remap_kind(KeyKind::of_key(key)) else {
+        return own();
+    };
+    let Some(local) = HostContext::local_hub(cx).map(|h| Arc::clone(h.read(cx).current())) else {
+        return own();
+    };
+    if find_present(&local, key).is_some() {
+        return own();
+    }
+    let perf = cx
+        .try_global::<TlSettings>()
+        .map(|_| &TlSettings::settings(cx).performance);
+    let shown = Arc::clone(hub.read(cx).current());
+    let Some(n) = kind_rows(&shown, perf, kind)
+        .iter()
+        .position(|row| *row.key.0 == *key)
+    else {
+        return own();
+    };
+    let Some(row) = kind_rows(&local, perf, kind).into_iter().nth(n) else {
+        return own();
+    };
+    let from = page_container(&row.key.0);
+    PageLayout {
+        layout: page_layout(&from, cx),
+        borrowed: Some(SharedString::from(from)),
+        pin: Some((row.key.0, Arc::from(key))),
+    }
+}
+
+/// Shows `page` in a device page's `container` and points its `editor` at the container it
+/// saves to. Call it only while the page is not in Edit Widgets.
+pub(super) fn show_page_layout(
+    container: &Entity<WidgetContainer>,
+    editor: &Entity<WidgetEditor>,
+    page: PageLayout,
+    cx: &mut App,
+) {
+    editor.update(cx, |e, _| e.set_save_container(page.borrowed));
+    container.update(cx, |c, cx| {
+        c.set_pin(page.pin, cx);
+        c.set_layout(page.layout, cx);
+    });
+}
+
+/// A device page's source store, with the page pin of `page` set.
+pub(super) fn page_store(
+    hub: &Entity<SnapshotHub>,
+    page: &PageLayout,
+    cx: &mut App,
+) -> Rc<RefCell<SourceStore>> {
+    let mut store = SourceStore::for_page(hub);
+    store.set_pin(page.pin.clone(), cx);
+    Rc::new(RefCell::new(store))
 }
 
 impl AggregateDiskPage {

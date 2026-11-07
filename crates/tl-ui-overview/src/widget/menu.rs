@@ -66,7 +66,7 @@ use tl_ui_settings::layout_pages::{
 };
 
 use super::grid::{self, InnerGrid, SlotDevice};
-use super::members::{Members, members};
+use super::members::{Members, Remap, members};
 use super::meta::MetricMeta;
 use super::source::{box_metric_name_key, box_reading, reading};
 use crate::overview::layout::Arrange;
@@ -474,25 +474,26 @@ pub fn cpu_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
             arrange: None,
         },
     };
-    let logical: Vec<(Arc<str>, DeviceIdx, i64)> = match members(&cores, snap, None, None, false) {
-        Members::List(list) => list
-            .into_iter()
-            .filter_map(|s| {
-                let DeviceSelector::Key(key) = s.device else {
-                    return None;
-                };
-                let n = key.strip_prefix(CPU_LOGICAL_PREFIX)?.parse::<i64>().ok()?;
-                let idx = snap
-                    .devices
-                    .entries
-                    .iter()
-                    .find(|e| e.present && *e.persistent_key == *key)?
-                    .idx;
-                Some((key, idx, n))
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
+    let logical: Vec<(Arc<str>, DeviceIdx, i64)> =
+        match members(&cores, snap, None, None, false, Remap::exact()) {
+            Members::List(list) => list
+                .into_iter()
+                .filter_map(|s| {
+                    let DeviceSelector::Key(key) = s.device else {
+                        return None;
+                    };
+                    let n = key.strip_prefix(CPU_LOGICAL_PREFIX)?.parse::<i64>().ok()?;
+                    let idx = snap
+                        .devices
+                        .entries
+                        .iter()
+                        .find(|e| e.present && *e.persistent_key == *key)?
+                        .idx;
+                    Some((key, idx, n))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
     let sub = |metric: &str, label_key: &str, name_key: &str| SourceSub {
         label: tr(cx, label_key),
         items: logical
@@ -636,7 +637,7 @@ fn aggregate_source_groups(spec: &AggregateSources, snap: &Snapshot, cx: &App) -
         },
     };
     let mut groups = Vec::new();
-    for s in members(&group, snap, perf, None, false).list() {
+    for s in members(&group, snap, perf, None, false, Remap::exact()).list() {
         let DeviceSelector::Key(key) = &s.device else {
             continue;
         };

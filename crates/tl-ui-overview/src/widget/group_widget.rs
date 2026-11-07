@@ -35,6 +35,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -51,7 +52,7 @@ use tl_ui_settings::layout_boxes::{DeviceKind, METRIC_FREQ, METRIC_LOAD};
 
 use super::compose::{Composition, group_item_composition};
 use super::group_fill::{GroupFill, fitted_into, group_fill, rows_fill_min};
-use super::members::{Members, members};
+use super::members::{Members, Remap, members};
 use super::meta::MetricMeta;
 use super::metric_widget::{MemberLook, MetricWidget, part_id, widget_id};
 use super::source::{SourceData, SourceStore};
@@ -453,6 +454,14 @@ impl GroupWidget {
         }
     }
 
+    /// The layout's saved keys or the page pin changed (container): the group's own device may
+    /// map to another one on a remote host.
+    pub fn remap_changed(&mut self, cx: &mut Context<Self>) {
+        if self.refresh_members(cx) {
+            self.after_members(cx);
+        }
+    }
+
     /// Whether the widget is in a flow layout.
     pub fn set_flow(&mut self, flow: bool, cx: &mut Context<Self>) {
         if self.flow == flow {
@@ -566,7 +575,12 @@ impl GroupWidget {
                     DeviceSelector::Slot(n) => self.store.borrow().slot(*n),
                     DeviceSelector::Key(_) => None,
                 };
-                match members(g, &snap, perf, slot_key.as_deref(), self.flow) {
+                let keys = Arc::clone(self.store.borrow().remap());
+                let remap = Remap {
+                    keys: &keys,
+                    remote: self.hub.read(cx).clock().is_remote(),
+                };
+                match members(g, &snap, perf, slot_key.as_deref(), self.flow, remap) {
                     Members::List(l) if l.is_empty() => (GroupState::NoneFound, l),
                     Members::List(l) => (GroupState::Members { count: l.len() }, l),
                     Members::Gone => (GroupState::Gone, Vec::new()),
