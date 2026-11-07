@@ -2278,6 +2278,58 @@ steady sweep makes the same syscalls as before plus one hash lookup per pid in
 - The fixture still has no cgroup tree, so these runs make no `cpu.stat` reads. This
   understates the live cost.
 
+### Static and perf-cpu cost after the chart colour beads (tasklens-68ksq, 2026-11-07)
+
+Result: FAIL for `static`, PASS for `perf-cpu` on the 5% process CPU rule. With the power
+gradient (tasklens-1vwxr) and colour by value (tasklens-j477q) both closed, `static` used a
+median 22.65% of one core over 30 s, against the wlf.45 baseline of 16.03% (+41% relative,
++6.62 points). `perf-cpu` used a median 68.83%, against 66.99% (+2.7%). Both are hidden
+nested KWin, 60 Hz.
+
+Setup: HEAD `724fc367a`, binary from
+`cargo build --locked --profile perf -p tl-app --features bench`. Session
+`harness.sh start r68k` (hidden nested KWin, 1920 x 1200, 60 Hz output), wrapper sets
+`TL_BENCH_NESTED=1` and `TL_BENCH_REFRESH_HZ=60`. Command per run:
+`tasklens --bench <scene> --duration 30 --warmup 5 --json <file>`, under the bench slot
+lock. Quiet-machine rule as in wlf.45: 1- and 5-minute load at most 8 at start, 1-minute
+load at most 8 at end. All six runs counted, all reports have `refresh_hz` 60, `pacing`
+off, `window_active` true and 0 stalls. Reports and scripts: `/var/tmp/claude/68ksq/`.
+
+| Run | Start | Load at start (1, 5, 15 min) | Frames | Frame CPU p50 | p99 | Process CPU | Missed, long missed | RSS |
+|---|---|---|---|---|---|---|---|---|
+| static 1 | 03:35:17 | 5.24, 7.95, 10.90 | 300 | | | 22.73% | 0, 0 | 368 MB |
+| static 2 | 03:35:54 | 4.12, 7.31, 10.56 | 300 | | | 22.65% | 0, 0 | 305 MB |
+| static 3 | 03:36:30 | 3.80, 6.88, 10.30 | 300 | | | 22.51% | 0, 0 | 306 MB |
+| Median static | | | 300 | | | 22.65% | 0, 0 | |
+| perf-cpu 1 | 03:37:06 | 3.88, 6.56, 10.06 | 1716 | 11.20 ms | 18.28 ms | 68.83% | 80, 0 | 311 MB |
+| perf-cpu 2 | 03:37:42 | 5.60, 6.65, 9.96 | 1570 | 14.93 ms | 18.68 ms | 76.95% | 226, 0 | 307 MB |
+| perf-cpu 3 | 03:38:18 | 7.90, 7.14, 10.00 | 1592 | 11.50 ms | 23.04 ms | 67.85% | 198, 5 | 312 MB |
+| Median perf-cpu | | | 1592 | 11.50 ms | 18.68 ms | 68.83% | 198, 0 | |
+
+| Gate (5% over the wlf.45 baseline) | Baseline | Limit | Median now | Result |
+|---|---|---|---|---|
+| Process CPU, `static` | 16.03% | 16.83% | 22.65% | FAIL (+41%) |
+| Process CPU, `perf-cpu` | 66.99% | 70.34% | 68.83% | PASS (+2.7%) |
+
+Other perf-cpu numbers moved the wrong way, though the rule does not cover them: p50 11.50
+ms (10.79 ms at wlf.45), p99 18.68 ms (15.71 ms), median missed frames 198 (23). Run 2 is
+the outlier (14.93 ms p50, 76.95%); its load at the end was 7.29. I did not repeat it.
+
+Profile of `static` (perf record, `cpu-clock:u`, 499 Hz, dwarf stacks of 16 KB, one 30 s
+run, 22.78% process CPU): one libc routine at offsets 0x1b1b24 to 0x1b1b4a holds about 52%
+of the samples (a copy loop; the symbol is not named, so this is inferred). Next are
+`WgpuRendererCore::render_frame` 9.1%, `BoundsTree::insert` 3.1%, our chart code
+`piece_path` 1.9% and `paint_ramped` 1.2% (the ramp fill path from 1vwxr and j477q). The
+same copy loop led the wlf.45 profile.
+
+Reading:
+- Not attributed. This HEAD also holds many process and perf page beads since wlf.45, and I
+  did not build a binary from before 1vwxr, so the +6.62 points are not shown to come from
+  the ramp. The chart ramp code is about 3% of the samples, which cannot explain a 41% rise
+  by itself unless it also adds vertices that the copy loop then moves (inferred, not
+  measured).
+- Follow-up bead: tasklens-3uosp (P1) asks for an A/B build at three commits to find the cost.
+
 ## Decision
 
 All values are from the hidden nested KWin session at 60 Hz, the real target (owner, 2026-11-05).
