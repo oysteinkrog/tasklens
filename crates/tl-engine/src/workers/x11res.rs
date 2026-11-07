@@ -395,10 +395,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         let took = start.elapsed();
         assert!(took >= SWEEP_DEADLINE, "{took:?}");
-        assert!(
-            took < SWEEP_DEADLINE + Duration::from_secs(2),
-            "{took:?}"
-        );
+        assert!(took < SWEEP_DEADLINE + Duration::from_secs(2), "{took:?}");
         // A readable stream returns at once.
         let (a, b) = UnixStream::pair().unwrap();
         std::io::Write::write_all(&mut &b, b"x").unwrap();
