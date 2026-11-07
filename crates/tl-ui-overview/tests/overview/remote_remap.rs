@@ -99,7 +99,7 @@ fn idx(kind: usize, host: &str, n: u8) -> DeviceIdx {
 /// The devices of host `host`: `per_kind` of each sweep kind, and with `third_gpu` one more GPU.
 fn catalog(host: &str, per_kind: u8, third_gpu: bool, version: u64) -> DeviceCatalog {
     let mut entries = Vec::new();
-    for kind in 0..KINDS.len() {
+    for (kind, (word, _)) in KINDS.iter().enumerate() {
         let count = if kind == 2 && third_gpu { 3 } else { per_kind };
         for n in 0..count {
             let identity = identity(kind, host, n);
@@ -108,7 +108,7 @@ fn catalog(host: &str, per_kind: u8, third_gpu: bool, version: u64) -> DeviceCat
                 persistent_key: key(kind, host, n),
                 identity,
                 generation: 0,
-                display_name: Arc::from(format!("{} {host}{n}", KINDS[kind].0)),
+                display_name: Arc::from(format!("{word} {host}{n}")),
                 present: true,
                 parent: None,
                 net_kind: (kind == 1).then_some(NetKind::Wired),

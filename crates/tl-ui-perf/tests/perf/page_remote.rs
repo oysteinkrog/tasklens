@@ -226,14 +226,12 @@ fn open(cx: &mut TestAppContext, perf: PerformanceSettings, slot: usize) -> Rig<
     }
 }
 
+/// A widget's saved key, availability and device.
+type Shown = (Arc<str>, Availability, Option<DeviceIdx>);
+
 impl Rig<'_> {
     /// The container's layout and, per metric widget, its saved key, availability and device.
-    fn shown(
-        &mut self,
-    ) -> (
-        ContainerLayout,
-        Vec<(Arc<str>, Availability, Option<DeviceIdx>)>,
-    ) {
+    fn shown(&mut self) -> (ContainerLayout, Vec<Shown>) {
         let page = self.page.clone();
         self.vcx.update(|_, cx| {
             let c = page.read(cx).container().read(cx);
@@ -272,7 +270,7 @@ fn perf_with(layouts: &[ContainerLayout]) -> PerformanceSettings {
 #[gpui_kit::test]
 fn remote_gpu_page_borrows_local_layout(cx: &mut TestAppContext) {
     let layout = grid(LOCAL[1], &[LOCAL[1], LOCAL[0]]);
-    let mut r = open(cx, perf_with(&[layout.clone()]), 1);
+    let mut r = open(cx, perf_with(std::slice::from_ref(&layout)), 1);
     let (shown, widgets) = r.shown();
     assert_eq!(shown, layout, "the local page's layout, unchanged");
     assert_eq!(
