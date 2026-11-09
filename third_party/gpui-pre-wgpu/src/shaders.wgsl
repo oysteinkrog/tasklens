@@ -1047,19 +1047,23 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
 
 // --- path rasterization --- //
 
+// A vertex points at its path's record, which holds the colour and bounds
+// once per path (tasklens-3z9l1). 24 bytes (6 words) with the struct padding.
 struct PathRasterizationVertex {
     xy_position: vec2<f32>,
     st_position: vec2<f32>,
+    path_index: u32,
+}
+
+struct PathRasterizationPath {
     color: Background,
     bounds: Bounds,
 }
 
-
-
 struct PathRasterizationVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) st_position: vec2<f32>,
-    @location(1) @interpolate(flat) vertex_id: u32,
+    @location(1) @interpolate(flat) path_index: u32,
     //TODO: use `clip_distance` once Naga supports it
     @location(3) clip_distances: vec4<f32>,
 }
@@ -1067,12 +1071,13 @@ struct PathRasterizationVarying {
 @vertex
 fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasterizationVarying {
     let v = load_path_vertex(vertex_id);
+    let path = load_path_record(v.path_index);
 
     var out = PathRasterizationVarying();
     out.position = to_device_position_impl(v.xy_position);
     out.st_position = v.st_position;
-    out.vertex_id = vertex_id;
-    out.clip_distances = distance_from_clip_rect_impl(v.xy_position, v.bounds);
+    out.path_index = v.path_index;
+    out.clip_distances = distance_from_clip_rect_impl(v.xy_position, path.bounds);
     return out;
 }
 
@@ -1084,9 +1089,9 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
         return vec4<f32>(0.0);
     }
 
-    let v = load_path_vertex(input.vertex_id);
-    let background = v.color;
-    let bounds = v.bounds;
+    let path = load_path_record(input.path_index);
+    let background = path.color;
+    let bounds = path.bounds;
 
     var alpha: f32;
     if (length(vec2<f32>(dx.x, dy.x)) < 0.001) {

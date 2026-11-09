@@ -44,6 +44,24 @@ const SUBPIXEL_SHADERS: &str = concat!(
     include_str!("shaders_subpixel.wgsl"),
 );
 
+/// Appends the vertices of `paths`, each pointing at its path's record. The
+/// records are numbered from `first_record` in path order.
+fn build_path_vertices(
+    paths: &[Path<ScaledPixels>],
+    first_record: u32,
+    vertices: &mut Vec<PathRasterizationVertex>,
+) {
+    for (index, path) in paths.iter().enumerate() {
+        let path_index = first_record + index as u32;
+        vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
+            xy_position: v.xy_position,
+            st_position: v.st_position,
+            path_index,
+            _pad: 0,
+        }));
+    }
+}
+
 fn least_common_multiple(left: u64, right: u64) -> u64 {
     let mut first = left;
     let mut second = right;
@@ -102,11 +120,24 @@ struct PathSprite {
     bounds: Bounds<ScaledPixels>,
 }
 
+/// One path vertex. The path's colour and clip bounds live once per path in
+/// a `PathRasterizationPath` record that `path_index` points at, so a vertex
+/// is 24 bytes instead of 104 (tasklens-3z9l1).
 #[derive(Clone, Debug)]
 #[repr(C)]
 struct PathRasterizationVertex {
     xy_position: Point<ScaledPixels>,
     st_position: Point<f32>,
+    /// Index of the path's record in the bound record array. On the WebGL
+    /// texture path it already includes the records' `first_instance`.
+    path_index: u32,
+    _pad: u32,
+}
+
+/// The colour and clip bounds of one path, shared by all of its vertices.
+#[derive(Clone, Debug)]
+#[repr(C)]
+struct PathRasterizationPath {
     color: Background,
     bounds: Bounds<ScaledPixels>,
 }
@@ -225,6 +256,9 @@ struct WgpuRendererCore {
     adapter_info: wgpu::AdapterInfo,
     target_format: wgpu::TextureFormat,
     max_texture_size: u32,
+    /// Reused each frame so path batches do not allocate (tasklens-3z9l1).
+    path_record_scratch: Vec<PathRasterizationPath>,
+    path_vertex_scratch: Vec<PathRasterizationVertex>,
 }
 
 /// GPU resources of a windowed renderer. A surface is only ever configured against the
@@ -797,13 +831,14 @@ impl WgpuRendererCore {
             &shader_module,
         );
 
+        // Group 2 holds the per-path records (colour and bounds).
         let path_rasterization = create_pipeline(
             "path_rasterization",
             "vs_path_rasterization",
             "fs_path_rasterization",
             &layouts.globals,
             &layouts.instances,
-            None,
+            Some(&layouts.instances),
             wgpu::PrimitiveTopology::TriangleList,
             &[Some(wgpu::ColorTargetState {
                 format: surface_format,
@@ -1367,6 +1402,8 @@ impl WgpuRendererCore {
             adapter_info: context.adapter.get_info(),
             target_format,
             max_texture_size,
+            path_record_scratch: Vec::new(),
+            path_vertex_scratch: Vec::new(),
         }
     }
 
@@ -1839,25 +1876,62 @@ impl WgpuRendererCore {
         paths: &[Path<ScaledPixels>],
         instance_offset: &mut u64,
     ) -> Result<bool> {
-        let mut vertices = Vec::new();
-        for path in paths {
-            let bounds = path.clipped_bounds();
-            vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
-                xy_position: v.xy_position,
-                st_position: v.st_position,
-                color: path.color,
-                bounds,
-            }));
-        }
+        let mut records = std::mem::take(&mut self.path_record_scratch);
+        let mut vertices = std::mem::take(&mut self.path_vertex_scratch);
+        let result = self.draw_paths_to_intermediate_with(
+            encoder,
+            paths,
+            instance_offset,
+            &mut records,
+            &mut vertices,
+        );
+        records.clear();
+        vertices.clear();
+        self.path_record_scratch = records;
+        self.path_vertex_scratch = vertices;
+        result
+    }
 
-        if vertices.is_empty() {
+    fn draw_paths_to_intermediate_with(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        paths: &[Path<ScaledPixels>],
+        instance_offset: &mut u64,
+        records: &mut Vec<PathRasterizationPath>,
+        vertices: &mut Vec<PathRasterizationVertex>,
+    ) -> Result<bool> {
+        let vertex_count: usize = paths.iter().map(|path| path.vertices.len()).sum();
+        if vertex_count == 0 {
             return Ok(false);
         }
+
+        records.clear();
+        records.extend(paths.iter().map(|path| PathRasterizationPath {
+            color: path.color,
+            bounds: path.clipped_bounds(),
+        }));
+
+        // Both allocations must land in the same instance buffer or texture:
+        // on the WebGL path a vertex indexes its record absolutely.
+        self.reserve_instance_data::<PathRasterizationPath, PathRasterizationVertex>(
+            instance_offset,
+            records.len(),
+            vertex_count,
+        )?;
+        let record_binding = self.write_instance_binding(
+            "path_records_bind_group",
+            instance_offset,
+            records,
+        )?;
+
+        vertices.clear();
+        vertices.reserve(vertex_count);
+        build_path_vertices(paths, record_binding.first_instance, vertices);
 
         let vertex_binding = self.write_instance_binding(
             "path_rasterization_bind_group",
             instance_offset,
-            &vertices,
+            vertices,
         )?;
 
         let resources = self.resources();
@@ -1890,6 +1964,7 @@ impl WgpuRendererCore {
             pass.set_pipeline(&resources.pipelines.path_rasterization);
             pass.set_bind_group(0, &resources.path_globals_bind_group, &[]);
             pass.set_bind_group(1, &vertex_binding.bind_group, &[]);
+            pass.set_bind_group(2, &record_binding.bind_group, &[]);
             // The path rasterization shader loads records by vertex index
             // rather than instance index, so the allocation's base shifts the
             // vertex range here.
@@ -1910,23 +1985,9 @@ impl WgpuRendererCore {
         instances: &[T],
     ) -> Result<InstanceBinding> {
         let data = unsafe { Self::instance_bytes(instances) };
-        // wgpu rejects zero-sized bindings, so empty primitive arrays still
-        // reserve the 16-byte minimum.
-        let size = (data.len() as u64).max(16);
         let stride = (std::mem::size_of::<T>() as u64).max(1);
-        let (alignment, allocation_size) = if self.uses_webgl_instance_data {
-            // The texture transport has no binding offset: the shader indexes
-            // the instance texture absolutely, so each allocation must start on
-            // a whole instance (a stride multiple) and a whole texel, and must
-            // end on a texel boundary so the zero padding of its final partial
-            // texel cannot overlap the next allocation.
-            (
-                least_common_multiple(self.instance_data_alignment, stride),
-                size.next_multiple_of(INSTANCE_TEXTURE_TEXEL_SIZE),
-            )
-        } else {
-            (self.instance_data_alignment.max(1), size)
-        };
+        let (size, alignment, allocation_size) =
+            self.instance_allocation_layout(data.len() as u64, stride);
         let mut offset = (*instance_offset).next_multiple_of(alignment);
         if offset + allocation_size > self.instance_data_capacity {
             self.grow_instance_data(allocation_size)?;
@@ -1974,6 +2035,55 @@ impl WgpuRendererCore {
             bind_group,
             first_instance,
         })
+    }
+
+    /// Returns the binding size, start alignment and allocated size of
+    /// `byte_len` bytes of records `stride` bytes long.
+    fn instance_allocation_layout(&self, byte_len: u64, stride: u64) -> (u64, u64, u64) {
+        // wgpu rejects zero-sized bindings, so empty primitive arrays still
+        // reserve the 16-byte minimum.
+        let size = byte_len.max(16);
+        if self.uses_webgl_instance_data {
+            // The texture transport has no binding offset: the shader indexes
+            // the instance texture absolutely, so each allocation must start on
+            // a whole instance (a stride multiple) and a whole texel, and must
+            // end on a texel boundary so the zero padding of its final partial
+            // texel cannot overlap the next allocation.
+            (
+                size,
+                least_common_multiple(self.instance_data_alignment, stride),
+                size.next_multiple_of(INSTANCE_TEXTURE_TEXEL_SIZE),
+            )
+        } else {
+            (size, self.instance_data_alignment.max(1), size)
+        }
+    }
+
+    /// Grows the instance data now when `a_len` records of `A` followed by
+    /// `b_len` records of `B` would not fit, so that the two
+    /// `write_instance_binding` calls that follow never grow in between.
+    fn reserve_instance_data<A, B>(
+        &mut self,
+        instance_offset: &mut u64,
+        a_len: usize,
+        b_len: usize,
+    ) -> Result<()> {
+        let a_stride = (std::mem::size_of::<A>() as u64).max(1);
+        let b_stride = (std::mem::size_of::<B>() as u64).max(1);
+        let (_, a_alignment, a_size) =
+            self.instance_allocation_layout(a_len as u64 * a_stride, a_stride);
+        let (_, b_alignment, b_size) =
+            self.instance_allocation_layout(b_len as u64 * b_stride, b_stride);
+        let end_from = |start: u64| {
+            let b_start = (start.next_multiple_of(a_alignment) + a_size)
+                .next_multiple_of(b_alignment);
+            b_start + b_size
+        };
+        if end_from(*instance_offset) > self.instance_data_capacity {
+            self.grow_instance_data(end_from(0))?;
+            *instance_offset = 0;
+        }
+        Ok(())
     }
 
     fn write_instance_texture(resources: &WgpuResources, offset: u64, data: &[u8]) {
@@ -2798,7 +2908,8 @@ mod tests {
     fn webgl_record_sizes_match_shader_word_strides() {
         assert_eq!(std::mem::size_of::<Quad>(), 40 * 4);
         assert_eq!(std::mem::size_of::<Shadow>(), 28 * 4);
-        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 26 * 4);
+        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 6 * 4);
+        assert_eq!(std::mem::size_of::<PathRasterizationPath>(), 22 * 4);
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
         assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);
         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);

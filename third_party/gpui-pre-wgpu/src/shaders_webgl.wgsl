@@ -207,10 +207,19 @@ fn load_shadow(instance_id: u32) -> Shadow {
 }
 
 fn load_path_vertex(vertex_id: u32) -> PathRasterizationVertex {
-    var cursor = instance_cursor(vertex_id * 26u);
+    var cursor = instance_cursor(vertex_id * 6u);
     return PathRasterizationVertex(
         read_vec2_f32(&cursor),
         read_vec2_f32(&cursor),
+        read_word(&cursor),
+    );
+}
+
+// The records share the instance texture with the vertices; `path_index` is
+// already absolute there.
+fn load_path_record(path_index: u32) -> PathRasterizationPath {
+    var cursor = instance_cursor(path_index * 22u);
+    return PathRasterizationPath(
         read_background(&cursor),
         read_bounds(&cursor),
     );

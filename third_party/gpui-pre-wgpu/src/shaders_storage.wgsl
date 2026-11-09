@@ -12,6 +12,8 @@
 @group(1) @binding(0) var<storage, read> b_underlines: array<Underline>;
 @group(1) @binding(0) var<storage, read> b_mono_sprites: array<MonochromeSprite>;
 @group(1) @binding(0) var<storage, read> b_poly_sprites: array<PolychromeSprite>;
+// Path rasterization binds its per-path records as a second instance allocation.
+@group(2) @binding(0) var<storage, read> b_path_records: array<PathRasterizationPath>;
 
 fn load_quad(instance_id: u32) -> Quad {
     return b_quads[instance_id];
@@ -23,6 +25,10 @@ fn load_shadow(instance_id: u32) -> Shadow {
 
 fn load_path_vertex(vertex_id: u32) -> PathRasterizationVertex {
     return b_path_vertices[vertex_id];
+}
+
+fn load_path_record(path_index: u32) -> PathRasterizationPath {
+    return b_path_records[path_index];
 }
 
 fn load_path_sprite(instance_id: u32) -> PathSprite {
