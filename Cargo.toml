@@ -123,9 +123,11 @@ tl-history = { path = "crates/tl-history" }
 tl-remote  = { path = "crates/tl-remote" }
 tl-tray    = { path = "crates/tl-tray" }
 
-# Local GPUI patches (D-043, ADR-014). Source: crates.io gpui-pre 0.3.7, changes listed in PATCHES.md.
+# Local GPUI patches (D-043, ADR-014). Source: crates.io gpui-pre and gpui-pre-wgpu 0.3.7,
+# changes listed in third_party/gpui-pre/PATCHES.md.
 [patch.crates-io]
 gpui-pre = { path = "third_party/gpui-pre" }
+gpui-pre-wgpu = { path = "third_party/gpui-pre-wgpu" }
 
 [profile.dev]
 opt-level = 1                 # workspace crates; at 0 the overview tests run 1.6x slower (ADR-002, CS-H1)
