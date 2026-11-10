@@ -2605,6 +2605,132 @@ Reading:
   these frames than this bench. The per-frame limits of 1.0 and 2.0 ms are out of reach
   while every moving chart redraws the views above it.
 
+### Static profile and 16-byte path vertices (tasklens-1ibm6, 2026-11-10)
+
+Result: `static` used a median 8.65% of one core after the change, against 9.42% before it
+in the same session (8% less). That is FAIL against the original limit of 2% and PASS
+against the relaxed limit of 21%. The change packs the GPUI path vertex `st` coordinates
+as two f16 values, so a path vertex is 16 bytes instead of 24 (`6783edbcc`, fix-up
+`450797fb9`). `perf-cpu` gained more: process CPU 44.77% against 49.52%, frame CPU p50
+7.18 ms against 8.09 ms, and 0 missed frames in every run against 4 to 14.
+
+Setup: hidden nested KWin, 1920 x 1200, 60 Hz, session `r1ib`,
+`tasklens --bench <scene> --duration 30 --warmup 5`, bench slot lock, quiet rule (1- and
+5-minute load at most 8 at the start of each run, 1-minute load at most 8 at its end).
+"Before" is the tasklens-i5sgo `b6178088b` binary (`bin-tri`; later commits up to
+`b8444dba9` change only docs). "After" is `cargo build --locked --profile perf -p tl-app
+--features bench` at `450797fb9`, built at 02:54 in the main checkout with a clean tree.
+The two binaries ran interleaved, one run of each per round, from 02:54 to 03:02, inside
+the jobd hold for tasklens benchmarks. All 12 runs counted, and all reports have
+`refresh_hz` 60, `pacing` off, `window_active` true and 0 stalls. Reports, profiles and
+scripts: `/var/tmp/claude/1ibm6/`.
+
+#### Profile before the change
+
+One `static` run of the before binary at 02:31 (load 4.57, 9.82% process CPU), `sudo perf
+record -e cpu-clock -F 999 --call-graph dwarf,16384` for 15 s after warmup: 1,422 samples,
+97.8% on the UI main thread. As in i5sgo the stacks did not unwind, so the shares are self
+time grouped by symbol name (`scripts/group.py`).
+
+| Area | Share |
+|---|---|
+| libc copy loop | 26.8% |
+| GPUI element tree and styles | 12.6% |
+| Chart code other than the band split (`build_cell`, `decimate`, `piece_path`) | 9.4% |
+| taffy layout | 8.2% |
+| Band split and vertex move (`tl-ui-chart`) | 7.9% |
+| GPUI `BoundsTree::insert` | 6.5% |
+| wgpu renderer | 5.7% |
+| GPUI scene and path paint | 4.0% |
+| NVIDIA driver | 3.9% |
+| Rest (text, hashing, malloc, our UI code, not matched) | 15.0% |
+
+What one draw costs, bpftrace on the before binary, 10 s windows:
+- The scene draws 10 times per second, once per sample: 101 `Window::draw`, 99
+  `WgpuRenderer::draw`, 0 animation frame requests. Each draw renders the CPU page once.
+- `Window::draw` (element tree, layout and paint, including the chart geometry) takes 5.7
+  ms per draw. `Window::present` takes 2.9 ms, nearly all of it `WgpuRenderer::draw`.
+- `Queue::write_buffer` takes 2.0 ms per draw, about 30 calls. Three of them carry the path
+  vertices, 1.45 to 1.73 MB each, and take 0.5 to 0.77 ms each, about 2.5 GB/s. The
+  other calls take about 10 µs each.
+- The process had 1,225 page faults in 10 s, so the slow copy is not page faults. The
+  staging memory itself is slow to write (inferred: uncached or BAR memory; not checked).
+- A libc copy probe (15 s) counted 2.63 GB of copies; `write_buffer` made 0.79 GB of
+  them (30%). Most other large copies come from GPUI layout, as in i5sgo.
+
+Top cost named: path vertex bytes. The upload is the largest single function, about 20%
+of the scene's CPU, and its time follows the bytes. With the chart geometry and the
+renderer work that also scale with vertices, the vertex path is about 40% of the scene.
+The next cost is the GPUI rebuild of the page on every draw (element tree, taffy,
+`BoundsTree::insert` and most other copies, about 35%). In `static` that rebuild is
+needed: every chart gets a new sample on every draw, so every view on the page is dirty.
+
+#### The change
+
+GPUI and tasklens only use 0, 0.5 and 1 for a path vertex's `st`, and f16 holds those
+exactly. `gpui-pre-wgpu` now packs `st` as two f16 values in one u32
+(`src/half_float.rs`), so the vertex is position, packed `st` and record index, 16 bytes
+with no padding. The vertex shader decodes the halves with integer operations, because
+`unpack2x16float` needs the `SHADER_FLOAT16_IN_FLOAT32` capability, which WebGL lacks.
+naga 29.0.4 validates the storage, WebGL and subpixel shaders, and their vertex layout
+matches the Rust struct. The f16 rounding has its own tests in `half_float.rs`.
+
+Same probe as above on the after binary: in a 2 s window of 558 `write_buffer` calls,
+the upload carried 67.0 MB in 32.1 ms, against 97.7 MB in 41.5 ms before (31% fewer
+bytes, 23% less time).
+
+#### Gate runs
+
+| Run | Start | Load at start (1, 5, 15 min) | Frames | Frame CPU p50 | p99 | Process CPU | Missed, long missed |
+|---|---|---|---|---|---|---|---|
+| static before 1 | 02:54:55 | 6.33, 5.14, 4.03 | 300 | | | 9.08% | 0, 0 |
+| static after 1 | 02:55:32 | 4.06, 4.70, 3.93 | 300 | | | 8.64% | 0, 0 |
+| static before 2 | 02:56:08 | 2.85, 4.32, 3.83 | 300 | | | 9.42% | 0, 0 |
+| static after 2 | 02:56:44 | 2.96, 4.20, 3.80 | 300 | | | 8.65% | 0, 0 |
+| static before 3 | 02:57:20 | 3.17, 4.09, 3.78 | 300 | | | 9.52% | 0, 0 |
+| static after 3 | 02:57:56 | 3.00, 3.91, 3.73 | 300 | | | 8.75% | 0, 0 |
+| perf-cpu before 1 | 02:58:32 | 2.34, 3.65, 3.65 | 1782 | 8.09 ms | 11.31 ms | 49.52% | 14, 0 |
+| perf-cpu after 1 | 02:59:08 | 2.45, 3.54, 3.61 | 1796 | 7.17 ms | 9.16 ms | 44.38% | 0, 0 |
+| perf-cpu before 2 | 02:59:44 | 2.08, 3.32, 3.53 | 1786 | 8.11 ms | 10.35 ms | 49.56% | 10, 0 |
+| perf-cpu after 2 | 03:00:20 | 2.55, 3.33, 3.53 | 1796 | 7.18 ms | 10.28 ms | 44.77% | 0, 0 |
+| perf-cpu before 3 | 03:00:56 | 2.83, 3.30, 3.51 | 1792 | 8.03 ms | 10.74 ms | 49.35% | 4, 0 |
+| perf-cpu after 3 | 03:01:32 | 2.48, 3.16, 3.45 | 1796 | 7.30 ms | 9.67 ms | 45.33% | 0, 0 |
+| Median static before | | | 300 | | | 9.42% | 0, 0 |
+| Median static after | | | 300 | | | 8.65% | 0, 0 |
+| Median perf-cpu before | | | 1786 | 8.09 ms | 10.74 ms | 49.52% | 10, 0 |
+| Median perf-cpu after | | | 1796 | 7.18 ms | 9.67 ms | 44.77% | 0, 0 |
+
+Three earlier `static` runs of the before binary at 02:47 gave 9.27, 9.53 and 9.22%
+(median 9.27%).
+
+| Gate | Original limit | Relaxed limit | Median after | Original | Relaxed |
+|---|---|---|---|---|---|
+| Process CPU, `static` | 2% | 21% | 8.65% | FAIL | PASS |
+| Frame CPU p50, `perf-cpu` | 1.0 ms | 14 ms | 7.18 ms | FAIL | PASS |
+| Frame CPU p99, `perf-cpu` | 2.0 ms | 20 ms | 9.67 ms | FAIL | PASS |
+| Missed frames, `perf-cpu` | median 0, every run <= 2, long 0 | median <= 29, every run <= 37, long <= 2 | median 0, max run 0, long 0 | PASS | PASS |
+| Process CPU, `perf-cpu` | 30% | 84% | 44.77% | FAIL | PASS |
+
+#### Profile after the change
+
+One `static` run of the after binary at 03:02 (load 2.62, 9.38% process CPU with perf
+attached), same perf settings: 1,374 samples. The copy loop fell from 26.8% to 20.0% of
+the samples. The other areas grew in share as the copy loop shrank: band split and
+vertex move 11.4%, other chart code 11.0%, GPUI element tree 13.5%, `BoundsTree::insert`
+7.4%, taffy 6.6%, wgpu renderer 6.2%.
+
+Reading:
+- `static` is now 8.65% against the 16.03% the gate started from (wlf.45), and 2% is
+  still out of reach. At 10 draws per second the original limit means 2 ms of CPU per
+  draw; `Window::draw` alone takes about 5.7 ms.
+- The vertex count is the next lever for the upload and the chart code (about 200,000
+  path vertices per draw: inferred from 4.7 MB of path uploads at 24 bytes, not counted). It
+  depends on the decimation rule (ADR-009 rule 3, min and max per pixel bucket) and on
+  the band split, which are owner and leader decisions.
+- The other large cost, the page rebuild on every draw, comes from GPUI's dirty-view
+  rules. In `static` every view on the page has new data each draw, so changing those
+  rules would save little here.
+
 ## Decision
 
 All values are from the hidden nested KWin session at 60 Hz, the real target (owner, 2026-11-05).
