@@ -1919,8 +1919,11 @@ impl WgpuRendererCore {
             records.len(),
             vertex_count,
         )?;
-        let record_binding =
-            self.write_instance_binding("path_records_bind_group", instance_offset, records)?;
+        let record_binding = self.write_instance_binding(
+            "path_records_bind_group",
+            instance_offset,
+            records,
+        )?;
 
         vertices.clear();
         vertices.reserve(vertex_count);
@@ -2073,8 +2076,8 @@ impl WgpuRendererCore {
         let (_, b_alignment, b_size) =
             self.instance_allocation_layout(b_len as u64 * b_stride, b_stride);
         let end_from = |start: u64| {
-            let b_start =
-                (start.next_multiple_of(a_alignment) + a_size).next_multiple_of(b_alignment);
+            let b_start = (start.next_multiple_of(a_alignment) + a_size)
+                .next_multiple_of(b_alignment);
             b_start + b_size
         };
         if end_from(*instance_offset) > self.instance_data_capacity {
