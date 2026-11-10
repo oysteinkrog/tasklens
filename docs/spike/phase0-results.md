@@ -2332,6 +2332,10 @@ Reading:
 
 ### Static cost of the value ramp, and the triangle split (tasklens-3uosp, 2026-11-07)
 
+Final state: PASS on 2026-11-10, after the GPUI path vertex patch (tasklens-3z9l1). See
+"Static and perf-cpu after the GPUI path vertex patch" below. This section records the
+2026-11-07 sessions.
+
 Result: the +41% `static` cost comes from the value ramp of tasklens-j477q, which is on by
 default. The commits from wlf.45 to just before tasklens-1vwxr add nothing. Three commits
 in `tl-ui-chart` cut `static` from 22.73% to 17.08% of one core in the same session.
@@ -2406,6 +2410,84 @@ perf-cpu frame time regression both come from GPUI sending 104 bytes per path ve
 Moving the colour and bounds out of the vertex record would cut the 22 MB per frame for
 every chart. That needs a patch to `gpui-pre-wgpu` 0.3.7, which is a crates.io dependency,
 not one of the vendored crates in `third_party/`.
+
+### Re-measure at 7c8a577ad before the GPUI patch (tasklens-3uosp, 2026-11-09)
+
+Result: FAIL for `static` and, by a small margin, for `perf-cpu`. At `7c8a577ad` (the
+one-pass split, the chart code at HEAD `c0f3198cc`) `static` used a median 17.34% of one
+core and `perf-cpu` 70.41%. The limits are 16.83% and 70.34%. In the same session wlf.45
+measured 16.12% and 65.37%. The split's own per-vertex work is the cost that is left:
+about 5 points of `perf-cpu` and about 1 point of `static`.
+
+Setup as above, session `r3u2`, 2026-11-09 from 02:12, inside the jobd hold for tasklens
+benchmarks (01:00 to 04:00). The `7c8a577ad` binary is `target/perf/tasklens`, built at
+06:44 on 2026-11-07 and byte-identical to the `bin-headfused` copy that the cut-off second
+attempt measured. Four binaries ran interleaved, one run of each per round. One `perf-cpu`
+run did not count (1-minute load 12.16 at its end) and was repeated. Reports and scripts:
+`/var/tmp/claude/3uosp/n2/`.
+
+| Scene | Binary | Runs | Median | Frame CPU p50 | Missed (long) per run |
+|---|---|---|---|---|---|
+| `static` | `7c8a577ad` | 17.19, 17.34, 17.40 | 17.34% | | 0 |
+| `static` | `09ae632c7` | 16.12, 17.45, 16.15 | 16.15% | | 0 |
+| `static` | wlf.45 | 16.01, 16.34, 16.12 | 16.12% | | 0 |
+| `static` | `724fc367a` | 23.22, 23.34, 23.44 | 23.34% | | 0 |
+| `perf-cpu` | `7c8a577ad` | 71.11, 70.41, 66.66 | 70.41% | 11.34 to 12.00 ms | 99 (5), 77, 43 |
+| `perf-cpu` | `09ae632c7` | 70.56, 66.12, 71.43 | 70.56% | 11.35 to 12.13 ms | 99 (1), 44, 110 (2) |
+| `perf-cpu` | wlf.45 | 65.37, 64.04, 67.16 | 65.37% | 10.68 to 11.05 ms | 25, 39, 41 |
+| `perf-cpu` | `724fc367a` | 66.21, 66.15, 67.06 | 66.21% | 10.77 to 10.90 ms | 10, 6, 4 |
+
+A second `static` set (02:46 to 02:56) gave `7c8a577ad` 16.98% against wlf.45 16.16%.
+
+Reading:
+- The one-pass commit did not lower the cost. `09ae632c7` and `7c8a577ad` are within
+  noise of each other.
+- Not the allocator. Page faults were 35 to 390 per second in `perf-cpu`, and fixed glibc
+  malloc thresholds (`GLIBC_TUNABLES` mmap 32 MB, trim 256 MB) left `static` at 17.01%.
+- The extra CPU is user time. In a `perf-cpu` profile of `7c8a577ad` (999 Hz, 15 s) the
+  split functions `BandSplit::place`, `BandSplit::triangle` and the vertex mover take
+  about 7% of the samples. In `static` they take about 4.7%.
+- The libc copy loop takes 35% of the `perf-cpu` samples at `7c8a577ad` and 21% at
+  `724fc367a`.
+
+After this run the owner chose to vendor and patch GPUI (tasklens-3z9l1).
+
+### Static and perf-cpu after the GPUI path vertex patch (tasklens-3uosp, 2026-11-10)
+
+Result: PASS for both scenes. With tasklens-3z9l1 (path vertices are 24 bytes, colour and
+bounds stored once per path), HEAD `f5b501bdb` used a median 9.95% of one core in
+`static` and 51.17% in `perf-cpu`. The limits are 16.83% and 70.34% (the wlf.45 values
+16.03% and 66.99% plus 5%). In the same session wlf.45 measured 16.57% and 67.24%.
+Missed frames in `perf-cpu` fell to 4 to 17 per run, the range of `724fc367a` before the
+split (4 to 13).
+
+Setup as above: hidden nested KWin, 1920 x 1200, 60 Hz, session `r3u2`,
+`tasklens --bench <scene> --duration 30 --warmup 5`, bench slot lock, quiet rule. The HEAD
+binary is `cargo build --locked --profile perf -p tl-app --features bench` at `f5b501bdb`,
+built at 01:17 on 2026-11-10 in the main checkout with a clean tree. `7c8a577ad` is the
+same `bin-headfused` copy as on 2026-11-09. The three binaries ran interleaved, one run of
+each per round, from 01:19 to 01:30, inside the jobd hold for tasklens benchmarks.
+1-minute load at the start of each run was 2.6 to 5.0, 5-minute load 4.1 to 7.9. All 18
+runs counted, all reports have `refresh_hz` 60, `pacing` off, `window_active` true and
+0 stalls. Reports and scripts: `/var/tmp/claude/3uosp/n3/`.
+
+| Scene | Binary | Runs | Median | Frame CPU p50 | p99 | Missed (long) per run |
+|---|---|---|---|---|---|---|
+| `static` | HEAD `f5b501bdb` | 10.00, 9.95, 9.75 | 9.95% | | | 0 |
+| `static` | wlf.45 | 16.57, 16.78, 16.25 | 16.57% | | | 0 |
+| `static` | `7c8a577ad` | 22.70, 17.22, 17.64 | 17.64% | | | 0 |
+| `perf-cpu` | HEAD `f5b501bdb` | 50.26, 51.17, 51.42 | 51.17% | 8.14 to 8.39 ms | 11.44 to 11.90 ms | 4, 10, 17 (0) |
+| `perf-cpu` | wlf.45 | 67.24, 63.38, 67.42 | 67.24% | 10.61 to 11.06 ms | 16.06 to 16.90 ms | 43 (1), 23 (1), 41 |
+| `perf-cpu` | `7c8a577ad` | 67.70, 71.13, 69.53 | 69.53% | 11.74 to 12.02 ms | 18.28 to 18.87 ms | 100 (1), 102 (1), 135 (1) |
+
+Reading:
+- HEAD is now below wlf.45 in both scenes: 40% less CPU in `static` and 24% less in
+  `perf-cpu`. wlf.45 still sends 104-byte path vertices; HEAD sends 24-byte vertices.
+- The first `7c8a577ad` `static` run (22.70%, 295 frames) is an outlier I did not
+  explain. The other two match the 2026-11-09 values.
+- The triangle split in `tl-ui-chart` stays. The uncommitted chart edits from the
+  cut-off 2026-11-09 attempt (`/var/tmp/claude/3uosp/n2/uncommitted-2026-11-09.patch`,
+  also `stash@{0}`) are not needed for the gate and were not applied.
 
 ## Decision
 
