@@ -299,7 +299,7 @@ impl AppsMetric {
     /// The Y scale over [`total`](Self::total).
     fn y_scale(self, total: u64) -> YScale {
         match self {
-            Self::Memory => YScale::FixedTotal(total as f32),
+            Self::Memory | Self::Vram(_) => YScale::FixedTotal(total as f32),
             Self::Cpu | Self::Gpu(_) => YScale::Fixed { min: 0., max: 100. },
         }
     }
