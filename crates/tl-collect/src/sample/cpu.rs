@@ -29,8 +29,10 @@ pub struct CpuOpts {
     pub per_cpu: bool,
     pub freq: bool,
     pub temp: bool,
-    /// Load average, open files, process count and uptime. 1 Hz ticks only: it scans /proc.
+    /// Load average, open files and uptime. 1 Hz ticks only.
     pub live_stats: bool,
+    /// With `live_stats`, the process count: one pass over /proc, which lists every pid.
+    pub process_count: bool,
     /// RAPL package and core power. Two `pread`s per sample.
     pub power: bool,
 }
@@ -43,7 +45,8 @@ pub struct LiveStats {
     pub load: Measured<LoadAvg>,
     /// "Handles" in the UI: allocated file handles, system-wide (field 1 of file-nr).
     pub open_files: Measured<u64>,
-    /// Entries of `root.proc` whose names are all ASCII digits.
+    /// Entries of `root.proc` whose names are all ASCII digits. Default when
+    /// `!opts.process_count`.
     pub process_count: Measured<u32>,
     /// `Clock::boot_ns`. CLOCK_BOOTTIME counts time spent in suspend.
     pub uptime_ns: u64,
@@ -172,7 +175,7 @@ impl CpuSampler {
         out.topology_changed = false;
         out.live = if opts.live_stats {
             let realtime = clock_gettime(ClockId::Realtime);
-            self.live_stats(clock, realtime.tv_sec)
+            self.live_stats(clock, realtime.tv_sec, opts.process_count)
         } else {
             LiveStats::default()
         };
@@ -273,9 +276,9 @@ impl CpuSampler {
         };
     }
 
-    /// A `pread` of the kept loadavg, a one-shot read of file-nr and one pass over
-    /// `root.proc`. Each field gets its own validity.
-    fn live_stats(&mut self, clock: Clock, realtime_s: i64) -> LiveStats {
+    /// A `pread` of the kept loadavg, a one-shot read of file-nr and, when `count`, one pass
+    /// over `root.proc`. Each field gets its own validity.
+    fn live_stats(&mut self, clock: Clock, realtime_s: i64, count: bool) -> LiveStats {
         let load = match self
             .loadavg
             .read(&mut self.buf)
@@ -294,9 +297,13 @@ impl CpuSampler {
             Ok(n) => Measured::valid(n),
             Err(err) => Measured::invalid(err.validity()),
         };
-        let process_count = match count_pid_dirs(&self.root) {
-            Ok(n) => Measured::valid(n),
-            Err(err) => Measured::invalid(err.validity()),
+        let process_count = if count {
+            match count_pid_dirs(&self.root) {
+                Ok(n) => Measured::valid(n),
+                Err(err) => Measured::invalid(err.validity()),
+            }
+        } else {
+            Measured::default()
         };
         let boot_s = i64::try_from(clock.boot_ns / 1_000_000_000).unwrap_or(i64::MAX);
         LiveStats {
@@ -497,6 +504,7 @@ mod tests {
         freq: true,
         temp: true,
         live_stats: false,
+        process_count: false,
         power: false,
     };
     const LIVE: CpuOpts = CpuOpts {
@@ -504,6 +512,7 @@ mod tests {
         freq: false,
         temp: false,
         live_stats: true,
+        process_count: true,
         power: false,
     };
     const PER_CPU: CpuOpts = CpuOpts {
@@ -511,6 +520,7 @@ mod tests {
         freq: false,
         temp: false,
         live_stats: false,
+        process_count: false,
         power: false,
     };
 
@@ -788,6 +798,20 @@ mod tests {
     }
 
     #[test]
+    fn live_stats_without_process_count_skip_the_proc_pass() {
+        let mut s = CpuSampler::new(SysRoot::at(&fixture_dir("owner-desktop"))).unwrap();
+        let mut r = CpuReading::default();
+        let opts = CpuOpts {
+            process_count: false,
+            ..LIVE
+        };
+        s.sample_at(at(SEC), opts, &mut r);
+        assert_eq!(r.live.process_count, Measured::default());
+        assert_eq!(r.live.load.value.total, 6667);
+        assert_eq!(r.live.open_files, Measured::valid(26143));
+    }
+
+    #[test]
     fn live_stats_off_keeps_default() {
         let mut s = CpuSampler::new(SysRoot::at(&fixture_dir("owner-desktop"))).unwrap();
         let mut r = CpuReading::default();
@@ -814,6 +838,7 @@ mod tests {
         freq: false,
         temp: false,
         live_stats: false,
+        process_count: false,
         power: true,
     };
 

@@ -138,6 +138,7 @@ fn samplers_handle_missing_sources() {
         freq: true,
         temp: true,
         live_stats: true,
+        process_count: true,
         power: true,
     };
     let mut cpu = CpuSampler::new(fixture(NAME)).expect("topology reads");

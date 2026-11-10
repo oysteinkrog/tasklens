@@ -476,6 +476,36 @@ fn cpu_live_stats_owner_desktop() {
     assert_eq!(s.totals.threads, Metric::valid(6667));
 }
 
+/// The process count lists every pid in /proc, so it is read only while CPU is demanded. Device
+/// history alone reads the load average but keeps the last count (tasklens-dlyfu).
+#[test]
+fn cpu_process_count_follows_cpu_demand() {
+    let dir = fixture_copy("owner-desktop", None);
+    let s = EngineSettings::default();
+    let history = Demand {
+        device_history: true,
+        ..Demand::default()
+    };
+    let src = cpu_source(&dir);
+    assert_eq!(src.period(&history, &s), Some(Duration::from_secs(1)));
+    let (src, sample) = cpu_sample(src, SEC);
+    assert!(!sample.totals.processes.validity.is_valid());
+    assert_eq!(sample.totals.load_avg, Metric::valid([31.35, 27.73, 27.82]));
+
+    src.period(&demand(CpuDemand::Total), &s);
+    let (src, sample) = cpu_sample(src, 2 * SEC);
+    assert_eq!(sample.totals.processes, Metric::valid(50));
+
+    fs::create_dir(dir.join("proc/99999")).expect("add pid dir");
+    src.period(&history, &s);
+    let (src, sample) = cpu_sample(src, 3 * SEC);
+    assert_eq!(sample.totals.processes, Metric::valid(50));
+
+    src.period(&demand(CpuDemand::Total), &s);
+    let (_, sample) = cpu_sample(src, 4 * SEC);
+    assert_eq!(sample.totals.processes, Metric::valid(51));
+}
+
 #[test]
 fn cpu_missing_loadavg_is_missing() {
     let dir = fixture_copy("owner-desktop", None);

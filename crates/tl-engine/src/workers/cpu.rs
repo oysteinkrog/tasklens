@@ -4,9 +4,11 @@
 //! It samples at 10 Hz while a visible CPU chart animates, at 1 Hz while CPU is otherwise
 //! demanded, history recording or device history is on, and not at all otherwise. Clock,
 //! temperature, live stats and RAPL power are read at most once per second; fast ticks repeat
-//! the last values (PERF-028, PERF-033, PERF-038, PERF-039, PERF-040). /proc/pressure/cpu is
-//! read on the same 1 Hz ticks while CPU or device history is demanded (ADR-016 "System
-//! pressure"), together with the Intel `thermal_throttle` counts.
+//! the last values (PERF-028, PERF-033, PERF-038, PERF-039, PERF-040). The process count in the
+//! live stats lists every pid in /proc, so it is read only while CPU is demanded
+//! (tasklens-dlyfu). /proc/pressure/cpu is read on the same 1 Hz ticks while CPU or device
+//! history is demanded (ADR-016 "System pressure"), together with the Intel `thermal_throttle`
+//! counts.
 //!
 //! It also sends the CPU page's static rows as one `CpuStaticInfo` through `take_extra`: on the
 //! first sample of a generation and again after a CPU hotplug (E12-010, PERF-031, PERF-035 to
@@ -353,6 +355,11 @@ pub struct CpuSource {
     /// `Demand.cpu` is not `Off`, or `Demand.device_history`. Written by `period()`, read by
     /// `sample()`.
     pressure_wanted: Arc<AtomicBool>,
+    /// `Demand.cpu` is not `Off`: a surface that shows the process count is visible. The count
+    /// lists every pid in /proc, and device history does not record it, so it is not read
+    /// while only history or the process table keeps the worker running (tasklens-dlyfu).
+    /// The last count is kept. Written by `period()`, read by `sample()`.
+    process_count_wanted: Arc<AtomicBool>,
     pressure: CpuPressureSampler,
     throttle: ThrottleSampler,
     /// Boot ns of the last sample that read clock, temperature, live stats and power.
@@ -382,6 +389,7 @@ impl CpuSource {
             reading: CpuReading::default(),
             per_cpu_wanted: Arc::new(AtomicBool::new(false)),
             pressure_wanted: Arc::new(AtomicBool::new(false)),
+            process_count_wanted: Arc::new(AtomicBool::new(true)),
             pressure: CpuPressureSampler::new(&root),
             throttle: ThrottleSampler::new(&root),
             last_slow_ns: None,
@@ -413,6 +421,7 @@ impl CpuSource {
             freq: slow,
             temp: slow,
             live_stats: slow,
+            process_count: slow && self.process_count_wanted.load(Ordering::Relaxed),
             power: slow,
         };
         self.sampler.sample_at(clock, opts, &mut self.reading);
@@ -433,7 +442,15 @@ impl CpuSource {
                 self.last.per_cpu_mhz = r.freq.per_cpu_mhz.iter().map(|&m| metric(m)).collect();
             }
             self.last.temp_c = r.temp_c;
-            self.last.live = r.live;
+            let process_count = if opts.process_count {
+                r.live.process_count
+            } else {
+                self.last.live.process_count
+            };
+            self.last.live = LiveStats {
+                process_count,
+                ..r.live
+            };
             self.last.power = r.power;
             if self.pressure_wanted.load(Ordering::Relaxed) {
                 self.last.psi_some_pct = self.pressure.sample();
@@ -539,6 +556,8 @@ impl Source for CpuSource {
             d.cpu != CpuDemand::Off || d.device_history,
             Ordering::Relaxed,
         );
+        self.process_count_wanted
+            .store(d.cpu != CpuDemand::Off, Ordering::Relaxed);
         cpu_period(d, s)
     }
 
