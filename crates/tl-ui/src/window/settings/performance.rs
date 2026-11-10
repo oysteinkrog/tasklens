@@ -244,6 +244,24 @@ pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
         1,
         SharedString::default(),
     );
+    // g00wx.2: the bands of the GPU "By app" chart.
+    page.number(
+        memory.clone(),
+        SettingKey::PerformanceGpuByAppTopN,
+        tr(cx, "shell-settings-perf-gpu-groups"),
+        i64::from(min)..=i64::from(max),
+        1,
+        SharedString::default(),
+    );
+    // g00wx.2: the bands of the VRAM "By app" chart.
+    page.number(
+        memory.clone(),
+        SettingKey::PerformanceVramByAppTopN,
+        tr(cx, "shell-settings-perf-vram-groups"),
+        i64::from(min)..=i64::from(max),
+        1,
+        SharedString::default(),
+    );
 
     let optional = CheckSection {
         heading: SharedString::default(),

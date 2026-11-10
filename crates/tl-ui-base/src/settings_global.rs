@@ -445,6 +445,8 @@ setting_keys! {
     PerformanceTimelineClick => "performance.timeline_click", Performance, Str;
     PerformanceMemoryByAppTopN => "performance.memory_by_app.top_n", Performance, Int;
     PerformanceCpuByAppTopN => "performance.cpu_by_app.top_n", Performance, Int;
+    PerformanceGpuByAppTopN => "performance.gpu_by_app.top_n", Performance, Int;
+    PerformanceVramByAppTopN => "performance.vram_by_app.top_n", Performance, Int;
     Fans => "fans", Fans, Map;
     GraphsMinigraphCpu => "graphs.minigraph_cpu", Graphs, Bool;
     GraphsMinigraphMemory => "graphs.minigraph_memory", Graphs, Bool;
@@ -566,6 +568,8 @@ fn assign(s: &mut Settings, key: SettingKey, value: &SettingValue) -> Result<(),
             K::PerformanceGraphRangeS => int(&mut s.performance.graph_range_s, *v),
             K::PerformanceMemoryByAppTopN => int(&mut s.performance.memory_by_app.top_n, *v),
             K::PerformanceCpuByAppTopN => int(&mut s.performance.cpu_by_app.top_n, *v),
+            K::PerformanceGpuByAppTopN => int(&mut s.performance.gpu_by_app.top_n, *v),
+            K::PerformanceVramByAppTopN => int(&mut s.performance.vram_by_app.top_n, *v),
             K::HistoryRetentionH => int(&mut s.history.retention_h, *v),
             K::HistoryMaxDiskMb => int(&mut s.history.max_disk_mb, *v),
             _ => Err("kind mismatch"),

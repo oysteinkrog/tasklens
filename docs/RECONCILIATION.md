@@ -2100,6 +2100,14 @@ colors = []                    # { key = "<group key>", slot = 0..=11 }, at most
 top_n = 10                     # 3..=20, separate from memory_by_app
 colors = []                    # as memory_by_app; the CPU chart's own picks
 
+[performance.gpu_by_app]        # tasklens-g00wx.2
+top_n = 10                     # 3..=20, separate from the other by-app charts
+colors = []                    # as memory_by_app; the GPU load chart's own picks
+
+[performance.vram_by_app]       # tasklens-g00wx.2
+top_n = 10                     # 3..=20
+colors = []                    # as memory_by_app; the VRAM chart's own picks
+
 [[performance.layouts]]         # P2, ADR-019 (D-041): one entry per widget container; none by default
 container = "overview.gpu"     # overview.cpu | overview.memory | overview.gpu | overview.disk | overview.net | overview.processes | overview.timeline;
 #   page.<persistent device key> for a device page (phase 3): page.cpu, page.memory, page.gpu:<id>, page.disk:<id>, page.net:<id>,

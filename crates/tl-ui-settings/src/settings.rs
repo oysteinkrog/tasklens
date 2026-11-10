@@ -201,6 +201,48 @@ impl Default for CpuByAppSettings {
     }
 }
 
+/// `[performance.gpu_by_app]` (g00wx.2). Same limits as [`MemoryByAppSettings`]: it
+/// reuses [`MEMORY_BY_APP_TOP_N`], [`MEMORY_BY_APP_COLORS_MAX`] and [`MEMORY_BY_APP_SLOTS`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GpuByAppSettings {
+    /// Groups drawn as their own band, in [`MEMORY_BY_APP_TOP_N`].
+    pub top_n: u8,
+    /// The GPU load chart's own colour picks, the group shown least recently first. At most
+    /// [`MEMORY_BY_APP_COLORS_MAX`] entries.
+    pub colors: Vec<GroupColor>,
+}
+
+impl Default for GpuByAppSettings {
+    fn default() -> Self {
+        Self {
+            top_n: MEMORY_BY_APP_TOP_N.1,
+            colors: Vec::new(),
+        }
+    }
+}
+
+/// `[performance.vram_by_app]` (g00wx.2). Same limits as [`MemoryByAppSettings`]: it
+/// reuses [`MEMORY_BY_APP_TOP_N`], [`MEMORY_BY_APP_COLORS_MAX`] and [`MEMORY_BY_APP_SLOTS`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VramByAppSettings {
+    /// Groups drawn as their own band, in [`MEMORY_BY_APP_TOP_N`].
+    pub top_n: u8,
+    /// The VRAM chart's own colour picks, the group shown least recently first. At most
+    /// [`MEMORY_BY_APP_COLORS_MAX`] entries.
+    pub colors: Vec<GroupColor>,
+}
+
+impl Default for VramByAppSettings {
+    fn default() -> Self {
+        Self {
+            top_n: MEMORY_BY_APP_TOP_N.1,
+            colors: Vec::new(),
+        }
+    }
+}
+
 thread_local! {
     /// Set when `performance.cpu_graph_mode` held an unknown name or a wrong type. The next
     /// `Settings::clamp` on this thread reports the key and clears the flag.
@@ -567,6 +609,10 @@ pub struct PerformanceSettings {
     pub memory_by_app: MemoryByAppSettings,
     /// `[performance.cpu_by_app]`: the CPU-by-app chart (UI-PRF-062).
     pub cpu_by_app: CpuByAppSettings,
+    /// `[performance.gpu_by_app]`: the GPU-load-by-app chart (g00wx.2).
+    pub gpu_by_app: GpuByAppSettings,
+    /// `[performance.vram_by_app]`: the VRAM-by-app chart (g00wx.2).
+    pub vram_by_app: VramByAppSettings,
     /// `[performance.overview]`: the Overview page layout (UI-PRF-018, D-023). `None` is the
     /// default layout. A value of the wrong type anywhere in it is dropped by [`Settings::clamp`]
     /// with the part it is in, so it never resets the rest of `[performance]`.
@@ -1399,6 +1445,8 @@ impl Default for PerformanceSettings {
             memory_view: MemoryView::default(),
             memory_by_app: MemoryByAppSettings::default(),
             cpu_by_app: CpuByAppSettings::default(),
+            gpu_by_app: GpuByAppSettings::default(),
+            vram_by_app: VramByAppSettings::default(),
             overview: None,
             layouts: LayoutsSetting::default(),
         }
@@ -2282,6 +2330,28 @@ impl Settings {
             "performance.cpu_by_app.colors",
             c,
         );
+        clamp_key(
+            &mut self.performance.gpu_by_app.top_n,
+            (min, max, 1),
+            "performance.gpu_by_app.top_n",
+            c,
+        );
+        clamp_group_colors(
+            &mut self.performance.gpu_by_app.colors,
+            "performance.gpu_by_app.colors",
+            c,
+        );
+        clamp_key(
+            &mut self.performance.vram_by_app.top_n,
+            (min, max, 1),
+            "performance.vram_by_app.top_n",
+            c,
+        );
+        clamp_group_colors(
+            &mut self.performance.vram_by_app.colors,
+            "performance.vram_by_app.colors",
+            c,
+        );
         self.performance.migrate_overview(c);
         // ADR-019: read the layouts, then convert the Overview boxes' old keys once. Runs after
         // the overview, so conversion reads its validated grid entry. Phase 3: the CPU and
@@ -2913,6 +2983,68 @@ mod tests {
 
         let text = toml::to_string(&s).unwrap();
         assert!(text.contains("[performance.cpu_by_app]"), "{text}");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+    }
+
+    /// g00wx.2: `top_n` stays in 3..=20 and `colors` keeps the newest 64 valid picks.
+    #[test]
+    fn gpu_by_app_settings_clamp() {
+        let mut s = Settings::default();
+        assert_eq!(s.performance.gpu_by_app.top_n, 10);
+        s.performance.gpu_by_app.top_n = 2;
+        s.performance.gpu_by_app.colors = (0..70)
+            .map(|i| GroupColor {
+                key: format!("exe:p{i}"),
+                slot: (i % 12) as u8,
+            })
+            .collect();
+        let changed = s.clamp();
+        assert_eq!(s.performance.gpu_by_app.top_n, 3);
+        let colors = &s.performance.gpu_by_app.colors;
+        assert_eq!(colors.len(), 64);
+        assert_eq!(colors[0].key, "exe:p6");
+        assert_eq!(colors[63].key, "exe:p69");
+        assert!(changed.contains(&"performance.gpu_by_app.top_n"));
+        assert!(changed.contains(&"performance.gpu_by_app.colors"));
+        // The CPU picks are separate.
+        assert!(s.performance.cpu_by_app.colors.is_empty());
+        s.performance.gpu_by_app.top_n = 25;
+        s.clamp();
+        assert_eq!(s.performance.gpu_by_app.top_n, 20);
+
+        let text = toml::to_string(&s).unwrap();
+        assert!(text.contains("[performance.gpu_by_app]"), "{text}");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+    }
+
+    /// g00wx.2: `top_n` stays in 3..=20 and `colors` keeps the newest 64 valid picks.
+    #[test]
+    fn vram_by_app_settings_clamp() {
+        let mut s = Settings::default();
+        assert_eq!(s.performance.vram_by_app.top_n, 10);
+        s.performance.vram_by_app.top_n = 2;
+        s.performance.vram_by_app.colors = (0..70)
+            .map(|i| GroupColor {
+                key: format!("exe:p{i}"),
+                slot: (i % 12) as u8,
+            })
+            .collect();
+        let changed = s.clamp();
+        assert_eq!(s.performance.vram_by_app.top_n, 3);
+        let colors = &s.performance.vram_by_app.colors;
+        assert_eq!(colors.len(), 64);
+        assert_eq!(colors[0].key, "exe:p6");
+        assert_eq!(colors[63].key, "exe:p69");
+        assert!(changed.contains(&"performance.vram_by_app.top_n"));
+        assert!(changed.contains(&"performance.vram_by_app.colors"));
+        // The CPU picks are separate.
+        assert!(s.performance.cpu_by_app.colors.is_empty());
+        s.performance.vram_by_app.top_n = 25;
+        s.clamp();
+        assert_eq!(s.performance.vram_by_app.top_n, 20);
+
+        let text = toml::to_string(&s).unwrap();
+        assert!(text.contains("[performance.vram_by_app]"), "{text}");
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
     }
 
