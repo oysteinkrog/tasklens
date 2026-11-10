@@ -10,7 +10,8 @@
 //! from two DRM fdinfo scans. AMD compute, DMA and JPEG always come from fdinfo (PERF-074). Intel
 //! engines, memory, encode and decode always come from fdinfo, and Intel power from the hwmon
 //! energy counter. One fdinfo walk per tick serves every card and the per-process VRAM rows, which
-//! go out while the processes page shows a GPU column or history records. AMD and Intel cards
+//! go out while the processes page shows a GPU column or history records, and with every 10th
+//! sample while device history alone needs them (`HistoryRows`). AMD and Intel cards
 //! have no UUID, so their identity is `uuid: [0; 16]` plus the PCI slot (R-166). Everything here
 //! is read-only.
 
@@ -72,9 +73,52 @@ pub fn gpu_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
 }
 
 /// Per-process VRAM rows are sent while a visible surface shows per-process GPU values or
-/// history records, as for NVIDIA.
+/// history records, as for NVIDIA. Device history alone gets them through `HistoryRows`.
 pub fn wants_processes(d: &Demand) -> bool {
     (d.any_surface_visible && d.gpu_process) || d.recording
+}
+
+/// While only device history needs process rows, a GPU worker sends them with every this many
+/// samples: the process worker's history sweep period (`processes::HISTORY_PERIOD`, 10 s) over
+/// the 1 s GPU period.
+pub const HISTORY_ROWS_EVERY: u32 =
+    (super::processes::HISTORY_PERIOD.as_secs() / PERIOD.as_secs()) as u32;
+
+/// Process rows for device history alone (tasklens-g00wx.1, leader decision 4). The
+/// `GPU_GROUP` and `VRAM_GROUP` series are stored like `CPU_GROUP`, so the 10 s and 1 min
+/// tiers need a point in every 10 s with no window open. While `Demand.device_history` is on
+/// and no view or recording asks for rows, `due` turns true on every `HISTORY_ROWS_EVERY`th
+/// sample, the first one included. Both GPU workers use it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryRows {
+    /// Samples since the last one with rows.
+    since: u32,
+}
+
+impl Default for HistoryRows {
+    fn default() -> Self {
+        HistoryRows {
+            since: HISTORY_ROWS_EVERY - 1,
+        }
+    }
+}
+
+impl HistoryRows {
+    /// Whether this sample carries process rows. `wanted`: a view or recording asks for them
+    /// (`wants_processes`); `history`: `Demand.device_history`. Call it once per sample.
+    pub fn due(&mut self, wanted: bool, history: bool) -> bool {
+        if wanted || !history {
+            *self = HistoryRows::default();
+            return wanted;
+        }
+        self.since += 1;
+        if self.since >= HISTORY_ROWS_EVERY {
+            self.since = 0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Memory and engine use of each process in `scan` on one of `cards`: one row per (card, pid),
@@ -255,6 +299,10 @@ pub struct GpuDrmSource {
     pending_extra: VecDeque<SourceUpdate>,
     /// `wants_processes` of the demand `period` saw last.
     processes: Cell<bool>,
+    /// `Demand.device_history` of the demand `period` saw last.
+    history: Cell<bool>,
+    /// When device history alone gets process rows.
+    history_rows: HistoryRows,
     /// Reused for the per-process rows.
     vram: Vec<DrmProcessVram>,
 }
@@ -271,6 +319,8 @@ impl GpuDrmSource {
             cur_scan: FdinfoScan::default(),
             pending_extra: VecDeque::new(),
             processes: Cell::new(false),
+            history: Cell::new(false),
+            history_rows: HistoryRows::default(),
             vram: Vec::new(),
         }
     }
@@ -304,7 +354,9 @@ impl GpuDrmSource {
 
         // One fdinfo walk serves every card and the process rows. Every card needs it: AMD for
         // compute, DMA and JPEG, Intel for every engine.
-        let processes = self.processes.get();
+        let processes = self
+            .history_rows
+            .due(self.processes.get(), self.history.get());
         scan(&self.root, &mut self.cur_scan);
         let partial = self.cur_scan.partial;
         let drm_processes = processes.then(|| {
@@ -453,6 +505,7 @@ impl Source for GpuDrmSource {
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         self.processes.set(wants_processes(d));
+        self.history.set(d.device_history);
         gpu_period(d, s)
     }
 
@@ -954,7 +1007,8 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(gpu_period(&recording, &s), Some(Duration::from_secs(1)));
-        // Hidden with device history on: totals at 1 Hz, no process rows (ADR-008, ADR-017).
+        // Hidden with device history on: totals at 1 Hz (ADR-008, ADR-017). Process rows come
+        // only every 10th sample (`HistoryRows`), not from `wants_processes`.
         let history = Demand {
             device_history: true,
             ..Demand::default()
@@ -1363,11 +1417,52 @@ mod tests {
         );
 
         src.set_processes(false);
-        let (_, up) = src.sample_at(clock(2 * SEC));
+        let (mut src, up) = src.sample_at(clock(2 * SEC));
         let SourceUpdate::Gpu(g) = up else {
             panic!("{up:?}");
         };
         assert!(g.drm_processes.is_none());
+
+        // Window hidden, device history on (tasklens-g00wx.1): rows with the first sample, then
+        // with every 10th, so the GPU group series have a point in every 10 s history bucket.
+        let history = Demand {
+            device_history: true,
+            ..Demand::default()
+        };
+        src.period(&history, &EngineSettings::default());
+        let mut with_rows = Vec::new();
+        for n in 1..=21u64 {
+            let t = (2 + n) * SEC;
+            // Keep the hand-made card list: no enumeration falls due.
+            let _ = src.enum_clock.due(t);
+            let (next, up) = src.sample_at(clock(t));
+            src = next;
+            let SourceUpdate::Gpu(g) = up else {
+                panic!("{up:?}");
+            };
+            if let Some(rows) = g.drm_processes {
+                assert_eq!(rows.len(), 1, "{rows:?}");
+                with_rows.push(n);
+            }
+        }
+        assert_eq!(with_rows, [1, 11, 21]);
+    }
+
+    #[test]
+    fn history_rows_every_10th_sample() {
+        assert_eq!(HISTORY_ROWS_EVERY, 10);
+        let mut rows = HistoryRows::default();
+        // Wanted by a view: every sample.
+        assert!((0..3).all(|_| rows.due(true, true)));
+        // Neither wanted nor history: none.
+        assert!((0..30).all(|_| !rows.due(false, false)));
+        // History alone: the first sample, then every 10th.
+        let due: Vec<usize> = (0..25).filter(|_| rows.due(false, true)).collect();
+        assert_eq!(due, [0, 10, 20]);
+        // A view that asks again starts the count over: the next history-only sample has rows.
+        assert!(rows.due(true, true));
+        assert!(rows.due(false, true));
+        assert!(!rows.due(false, true));
     }
 
     #[test]

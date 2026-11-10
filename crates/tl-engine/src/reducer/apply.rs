@@ -2278,7 +2278,8 @@ impl Reducer {
     }
 
     /// Pushes one kind of GPU bands for GPU `gpu` and returns its band list, `prev` when
-    /// `bands` is `None` or the list did not change. A band that drops out gets one gap.
+    /// `bands` is `None` or the list did not change. A band that drops out gets one gap, also
+    /// "Other / driver" when `bands.driver` is `None`.
     #[allow(clippy::too_many_arguments, reason = "one GPU, one kind, one sample")]
     fn apply_gpu_bands(
         &mut self,
@@ -2333,10 +2334,14 @@ impl Reducer {
                 0,
             ),
         ];
+        // "Other / driver" without a value is no band: a band shown last time gets one gap
+        // below, as an app that drops out.
         for (key, name, value, process_count) in fixed {
+            let Some(value) = value else {
+                continue;
+            };
             let idx = self.gpu_group_device(pci, &key, &name)?;
-            let valid = value.is_some();
-            self.push(idx, metric, t, value.unwrap_or(0.0) as f32, valid, period);
+            self.push(idx, metric, t, value as f32, true, period);
             shown.push(idx);
             published.push(MemGroupBand {
                 key,

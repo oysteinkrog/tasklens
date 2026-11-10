@@ -1,8 +1,10 @@
 //! The `GpuNvidia` worker (ADR-007, ADR-008, R-155 items 3, 4, 7 and 8).
 //!
 //! It starts the `tl-gpu-probe` child, publishes `GpuInfo` once per generation, then samples
-//! device totals at 1 Hz while GPUs are demanded. Per-process rows are asked for only while
-//! `gpu_process` is demanded. Nothing is requested while neither is wanted.
+//! device totals at 1 Hz while GPUs are demanded. Per-process rows are asked for while
+//! `gpu_process` is demanded, and with every 10th sample while device history alone needs them
+//! for the GPU group series (`gpu_drm::HistoryRows`). Nothing is requested while neither is
+//! wanted.
 //!
 //! It runs its own loop instead of `source::run`, because it owns a child process and must
 //! return `Err` so the supervisor restarts it (ADR-007 failure table). Expected conditions are
@@ -55,6 +57,7 @@ use crate::update::{
     EngineMsg, GpuInfoUpdate, GpuSample, GpuStaticInfo, SourceUpdate, WorkerError,
 };
 use crate::workers::WorkerSpec;
+use crate::workers::gpu_drm::HistoryRows;
 
 /// Never faster; the Refresh setting does not apply (R-026).
 pub const PERIOD: Duration = Duration::from_secs(1);
@@ -281,6 +284,7 @@ pub async fn run_with<L: ProbeLink>(
         }
     }
 
+    let mut history_rows = HistoryRows::default();
     let mut iv = interval(cx.now(), PERIOD);
     iv.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // R-276: resume after the last command a generation started. If it never finished, it
@@ -299,7 +303,9 @@ pub async fn run_with<L: ProbeLink>(
         }
         iv.tick(cx.now());
 
-        let (totals, processes) = wanted(&io.demand.borrow_and_clone());
+        let demand = io.demand.borrow_and_clone();
+        let (totals, processes) = wanted(&demand);
+        let processes = history_rows.due(processes, demand.device_history);
         let control = io.control.borrow_and_clone();
         // The newest `RefreshNow`, done once this turn's sample is sent. The worker has no
         // other command, so any other one is done at once.
@@ -368,7 +374,8 @@ pub async fn run_with<L: ProbeLink>(
 }
 
 /// `(totals, processes)`. Hidden surfaces stop sampling unless history records GPUs (ADR-008).
-/// Device history keeps the totals only.
+/// Device history alone gets totals here and process rows every 10th sample through
+/// `HistoryRows` (tasklens-g00wx.1).
 pub fn wanted(d: &Demand) -> (bool, bool) {
     let totals = (d.any_surface_visible && d.gpus) || d.recording || d.device_history;
     let processes = (d.any_surface_visible && d.gpu_process) || d.recording;
@@ -1650,6 +1657,43 @@ mod tests {
         assert!(rig.calls.samples().is_empty());
         assert!(rig.drain().is_empty());
         assert!(!rig.ended());
+    }
+
+    /// tasklens-g00wx.1: window hidden, device history on. Totals at 1 Hz, and process rows with
+    /// the first sample and every 10th after it, for the GPU group series in history.
+    #[test]
+    fn worker_history_alone_asks_rows_every_10th_sample() {
+        let history = Demand {
+            device_history: true,
+            ..Demand::default()
+        };
+        let mut rig = Rig::start(true, Hello::Ready, Rows::Supported, false, history.clone());
+        for _ in 0..20 {
+            rig.advance(PERIOD);
+        }
+        let flags = rig.calls.samples();
+        assert_eq!(flags.len(), 21, "one sample a second");
+        let with_rows: Vec<usize> = (0..flags.len()).filter(|&i| flags[i]).collect();
+        assert_eq!(with_rows, [0, 10, 20]);
+        let got = rig.drain();
+        let rows: Vec<bool> = gpu_samples(&got)
+            .iter()
+            .map(|s| s.processes.is_some())
+            .collect();
+        assert_eq!(rows, flags, "the rows reach the reducer");
+
+        // A visible Processes GPU column asks for rows every second again.
+        rig.demand
+            .send(Demand {
+                any_surface_visible: true,
+                gpu_process: true,
+                ..history
+            })
+            .expect("demand sends");
+        for _ in 0..3 {
+            rig.advance(PERIOD);
+        }
+        assert_eq!(rig.calls.samples()[21..], [true, true, true]);
     }
 
     #[test]

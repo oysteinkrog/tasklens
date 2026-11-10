@@ -4924,9 +4924,11 @@ fn gpu_and_vram_groups_per_nvidia_gpu() {
             .all(|b| !g.groups.iter().any(|gb| gb.device == b.device))
     );
 
-    // The apps sum to more than the device load: drawn as is, "Other / driver" is 0. The
-    // editor has no row any more, so its bands get one gap each.
+    // The apps sum to more than the device load: drawn as is, with no "Other / driver" band
+    // (leader decision 3), so the driver load band gets one gap. The editor has no row any
+    // more, so its bands get one gap each.
     let editor = (g.groups[2].device, g.vram_groups[2].device);
+    let driver = g.groups[4].device;
     let rows = vec![
         nvml_row(uuid, 1, Some(60), 300),
         nvml_row(uuid, 3, Some(40), 100),
@@ -4942,15 +4944,22 @@ fn gpu_and_vram_groups_per_nvidia_gpu() {
     let snap = rig.latest();
     let g = &snap.system.gpus[0].1;
     let (load_keys, _) = gpu_band_keys(&snap);
-    assert_eq!(load_keys, ["comm:game", "comm:obs", "other", "driver"]);
+    assert_eq!(load_keys, ["comm:game", "comm:obs", "other"]);
     let values: Vec<f32> = gpu_band_values(&rig, &g.groups, MetricId::GPU_GROUP)
         .iter()
         .map(|s| s.value)
         .collect();
-    assert_eq!(values, [60.0, 40.0, 0.0, 0.0]);
+    assert_eq!(values, [60.0, 40.0, 0.0]);
     let gap = |rig: &Rig, device, metric| !rig.last_sample(SeriesId { device, metric }).is_valid();
+    assert!(gap(&rig, driver, MetricId::GPU_GROUP));
     assert!(gap(&rig, editor.0, MetricId::GPU_GROUP));
     assert!(gap(&rig, editor.1, MetricId::VRAM_GROUP));
+    // The VRAM stack keeps its "Other / driver" band: 1000 - 300 - 100.
+    let vram: Vec<f32> = gpu_band_values(&rig, &g.vram_groups, MetricId::VRAM_GROUP)
+        .iter()
+        .map(|s| s.value)
+        .collect();
+    assert_eq!(vram, [300.0, 100.0, 0.0, 600.0]);
 
     // A sample without process rows: every band gets a gap and both lists stay.
     let lists = (Arc::clone(&g.groups), Arc::clone(&g.vram_groups));

@@ -10,10 +10,10 @@
 //!   or the busiest fdinfo engine of its DRM row. An app's load is the sum over its processes,
 //!   clamped to 100. Bands are not rescaled.
 //! - A process's VRAM on a GPU is the sum of its rows' dedicated memory there.
-//! - "Other / driver" is the device total minus all app bands, clamped at 0: the GPU load, or
-//!   the device's used VRAM (NVIDIA per-process VRAM leaves out driver and shared allocations).
-//!   When the apps sum to more than the device load, the stack is drawn as is and "Other /
-//!   driver" is 0.
+//! - "Other / driver" is the device total minus all app bands: the GPU load, or the device's
+//!   used VRAM (NVIDIA per-process VRAM leaves out driver and shared allocations). When the apps
+//!   sum to more than the device load, the load stack is drawn as is and has no "Other / driver"
+//!   band (leader decision 3). The VRAM band is clamped at 0 instead.
 //! - NVIDIA rows match a GPU by UUID, DRM rows (AMD, Intel) by fdinfo `drm-pdev`. A process
 //!   whose group is not known (it started after the last process sweep) is left out of every
 //!   app band; its VRAM then counts in "Other / driver".
@@ -90,8 +90,9 @@ pub struct GpuBands {
     /// Every group outside `top`.
     pub other: f64,
     pub other_processes: u32,
-    /// The device total minus `top` and `other`, clamped at 0. `None` when the device total is
-    /// not known.
+    /// The device total minus `top` and `other`; `None` gives no band. `None` when the device
+    /// total is not known, and for `Kind::Load` when the apps sum to more than the device load.
+    /// For `Kind::Vram` it is clamped at 0.
     pub driver: Option<f64>,
 }
 
@@ -209,7 +210,10 @@ pub fn bands(
         top: apps,
         other,
         other_processes: rest.iter().map(|a| a.processes).sum(),
-        driver: total.map(|t| (t - sum).max(0.0)),
+        driver: match kind {
+            Kind::Load => total.filter(|t| sum <= *t).map(|t| t - sum),
+            Kind::Vram => total.map(|t| (t - sum).max(0.0)),
+        },
     }
 }
 
@@ -351,11 +355,14 @@ mod tests {
         assert_eq!(stack, 80.0, "the stack sums to the device load");
 
         // One app at 70% 3D and one at 60% video while the device reads 70%: drawn as is,
-        // no rescale, and "Other / driver" is 0.
+        // no rescale, and no "Other / driver" band.
         let uses = [use_of(1, 70.0, 0), use_of(3, 60.0, 0)];
         let b = bands(&uses, &g, Kind::Load, Some(70.0));
         assert_eq!(b.top[0].value, 70.0);
         assert_eq!(b.top[1].value, 60.0);
+        assert_eq!(b.driver, None, "apps above the device load: no driver band");
+        // The apps sum to exactly the device load: the band is there, at 0.
+        let b = bands(&uses, &g, Kind::Load, Some(130.0));
         assert_eq!(b.driver, Some(0.0));
 
         // Two processes of one app at 80% each: the app is clamped to 100.
