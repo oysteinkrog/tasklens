@@ -61,6 +61,7 @@ use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{MemGroupBand, WineGroupInfo};
 use tl_model::units;
+use tl_model::validity::Validity;
 use tl_ui_settings::settings::{
     GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS, PerformanceSettings,
 };
@@ -132,6 +133,13 @@ const CPU_BAND_KEYS: [&str; 5] = [
 /// counts in "Other apps" (UI-PRF-062 "Top N").
 pub const CPU_RANK_FLOOR: f64 = 0.05;
 
+/// The one fixed band of the GPU kinds: the remainder of the device total that no app row
+/// explains (key `driver`, name from the device catalog: "Other / driver"). The fill alpha
+/// against `gpu_fill`, and that the value is worked out.
+pub const GPU_BANDS: [(&str, f32, bool); 1] = [("driver", 0.45, true)];
+/// Key prefix of the GPU band devices: the device key is `gpu:<pci bus id>:<band key>`.
+const GPU_KEY_PREFIX: &str = "gpu:";
+
 /// What an [`AppsChart`] shows (UI-PRF-062 "Build"). Everything that differs between the
 /// kinds is here; the chart code is shared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,14 +150,54 @@ pub enum AppsMetric {
     /// CPU by app (UI-PRF-062): series `CPU_GROUP` in percent of all CPUs, 0..100, the five
     /// system bands of [`CPU_BANDS`] as fixed bands, `performance.cpu_by_app`.
     Cpu,
+    /// GPU load by app (tasklens-g00wx.2) of the GPU with this device index: series `GPU_GROUP`
+    /// in percent, 0..100, the remainder band of [`GPU_BANDS`], `performance.gpu_by_app`.
+    Gpu(DeviceIdx),
+    /// VRAM by app (tasklens-g00wx.2) of the GPU with this device index: series `VRAM_GROUP` in
+    /// bytes, 0..the GPU's dedicated memory, the remainder band of [`GPU_BANDS`],
+    /// `performance.vram_by_app`.
+    Vram(DeviceIdx),
 }
 
 impl AppsMetric {
+    /// The GPU of a GPU kind.
+    fn gpu(self) -> Option<DeviceIdx> {
+        match self {
+            Self::Gpu(d) | Self::Vram(d) => Some(d),
+            Self::Memory | Self::Cpu => None,
+        }
+    }
+
+    /// The device key prefix of this GPU's bands (`gpu:<pci bus id>:`); `None` for the other
+    /// kinds, or when the GPU is not in the catalog.
+    fn key_prefix(self, snap: &Snapshot) -> Option<String> {
+        let entry = snap.devices.get(self.gpu()?)?;
+        match &entry.identity {
+            DeviceIdentity::Gpu { pci_bus_id, .. } => {
+                Some(format!("{GPU_KEY_PREFIX}{pci_bus_id}:"))
+            }
+            _ => None,
+        }
+    }
+
+    /// The band key of a `MemGroup` device key for this kind: the GPU kinds keep only their own
+    /// GPU's bands and strip the prefix (so colour seeds and the Processes click use the plain
+    /// group key); Memory and Cpu skip every GPU band.
+    fn band_key<'a>(self, prefix: Option<&str>, key: &'a str) -> Option<&'a str> {
+        if self.gpu().is_some() {
+            key.strip_prefix(prefix?)
+        } else {
+            (!key.starts_with(GPU_KEY_PREFIX)).then_some(key)
+        }
+    }
+
     /// The series of each band on its `DeviceIdentity::MemGroup` device.
     pub fn metric_id(self) -> MetricId {
         match self {
             Self::Memory => MetricId::MEM_GROUP,
             Self::Cpu => MetricId::CPU_GROUP,
+            Self::Gpu(_) => MetricId::GPU_GROUP,
+            Self::Vram(_) => MetricId::VRAM_GROUP,
         }
     }
 
@@ -168,6 +216,7 @@ impl AppsMetric {
         match self {
             Self::Memory => &KERNEL_PARTS,
             Self::Cpu => &CPU_BANDS,
+            Self::Gpu(_) | Self::Vram(_) => &GPU_BANDS,
         }
     }
 
@@ -175,7 +224,7 @@ impl AppsMetric {
     /// Empty when the bands take their names from the device catalog (Memory).
     fn fixed_name_keys(self) -> &'static [&'static str] {
         match self {
-            Self::Memory => &[],
+            Self::Memory | Self::Gpu(_) | Self::Vram(_) => &[],
             Self::Cpu => &CPU_BAND_KEYS,
         }
     }
@@ -184,8 +233,8 @@ impl AppsMetric {
     /// group counts in "Other apps". Memory ranks every group with data.
     fn rank_floor(self) -> f64 {
         match self {
-            Self::Memory => 0.,
-            Self::Cpu => CPU_RANK_FLOOR,
+            Self::Memory | Self::Vram(_) => 0.,
+            Self::Cpu | Self::Gpu(_) => CPU_RANK_FLOOR,
         }
     }
 
@@ -194,6 +243,7 @@ impl AppsMetric {
         match self {
             Self::Memory => KERNEL_PREFIX,
             Self::Cpu => "cpu:",
+            Self::Gpu(_) | Self::Vram(_) => "driver",
         }
     }
 
@@ -202,7 +252,7 @@ impl AppsMetric {
     fn aggregate_key(self) -> Option<&'static str> {
         match self {
             Self::Memory => Some(SHARED_KEY),
-            Self::Cpu => None,
+            Self::Cpu | Self::Gpu(_) | Self::Vram(_) => None,
         }
     }
 
@@ -210,7 +260,7 @@ impl AppsMetric {
     fn clock_key(self) -> &'static str {
         match self {
             Self::Memory => SHARED_KEY,
-            Self::Cpu => OTHER_KEY,
+            Self::Cpu | Self::Gpu(_) | Self::Vram(_) => OTHER_KEY,
         }
     }
 
@@ -219,14 +269,15 @@ impl AppsMetric {
         match self {
             Self::Memory => graph.mem_fill,
             Self::Cpu => graph.cpu_fill,
+            Self::Gpu(_) | Self::Vram(_) => graph.gpu_fill,
         }
     }
 
     /// The format of the page chart's own value.
     fn value_fmt(self) -> ValueFormat {
         match self {
-            Self::Memory => ValueFormat::Bytes,
-            Self::Cpu => ValueFormat::Percent,
+            Self::Memory | Self::Vram(_) => ValueFormat::Bytes,
+            Self::Cpu | Self::Gpu(_) => ValueFormat::Percent,
         }
     }
 
@@ -234,7 +285,14 @@ impl AppsMetric {
     fn total(self, snap: &Snapshot) -> u64 {
         match self {
             Self::Memory => snap.system.memory.total,
-            Self::Cpu => 100,
+            Self::Cpu | Self::Gpu(_) => 100,
+            Self::Vram(d) => snap
+                .system
+                .gpus
+                .iter()
+                .find(|(idx, _)| *idx == d)
+                .filter(|(_, g)| matches!(g.mem_total.validity, Validity::Valid | Validity::Stale))
+                .map_or(0, |(_, g)| g.mem_total.value),
         }
     }
 
@@ -242,15 +300,15 @@ impl AppsMetric {
     fn y_scale(self, total: u64) -> YScale {
         match self {
             Self::Memory => YScale::FixedTotal(total as f32),
-            Self::Cpu => YScale::Fixed { min: 0., max: 100. },
+            Self::Cpu | Self::Gpu(_) => YScale::Fixed { min: 0., max: 100. },
         }
     }
 
     /// Writes a band value for the legend and the tooltip: bytes, or percent with one decimal.
     fn write_value(self, out: &mut String, value: f64) {
         match self {
-            Self::Memory => units::bytes(out, value.max(0.) as u64),
-            Self::Cpu => units::percent(out, value.max(0.) as f32),
+            Self::Memory | Self::Vram(_) => units::bytes(out, value.max(0.) as u64),
+            Self::Cpu | Self::Gpu(_) => units::percent(out, value.max(0.) as f32),
         }
     }
 
@@ -259,6 +317,16 @@ impl AppsMetric {
         match self {
             Self::Memory => &snap.system.memory.groups,
             Self::Cpu => &snap.system.cpu.groups,
+            Self::Gpu(d) | Self::Vram(d) => {
+                let Some((_, g)) = snap.system.gpus.iter().find(|(idx, _)| *idx == d) else {
+                    return &[];
+                };
+                if matches!(self, Self::Gpu(_)) {
+                    &g.groups
+                } else {
+                    &g.vram_groups
+                }
+            }
         }
     }
 
@@ -269,7 +337,8 @@ impl AppsMetric {
         let mut text = String::new();
         match self {
             Self::Memory => units::bytes(&mut text, snap.system.memory.used),
-            Self::Cpu => units::percent(&mut text, stack_top.max(0.) as f32),
+            Self::Cpu | Self::Gpu(_) => units::percent(&mut text, stack_top.max(0.) as f32),
+            Self::Vram(_) => units::bytes(&mut text, stack_top.max(0.) as u64),
         }
         Some(SharedString::from(text))
     }
@@ -282,6 +351,8 @@ impl AppsMetric {
                 "perf-cpu-heading-utilization",
                 "perf-cpu-heading-utilization",
             ),
+            Self::Gpu(_) => ("perf-gpu-row-utilization", "perf-gpu-row-utilization"),
+            Self::Vram(_) => ("perf-gpu-heading-memory", "perf-gpu-range-memory"),
         }
     }
 
@@ -291,6 +362,8 @@ impl AppsMetric {
         match self {
             Self::Memory => ("perf-mem-apps-share", "perf-mem-apps-estimate"),
             Self::Cpu => ("perf-cpu-apps-share", "perf-cpu-apps-estimate"),
+            Self::Gpu(_) => ("perf-gpu-apps-share", "perf-gpu-apps-estimate"),
+            Self::Vram(_) => ("perf-vram-apps-share", "perf-vram-apps-estimate"),
         }
     }
 
@@ -299,6 +372,8 @@ impl AppsMetric {
         match self {
             Self::Memory => usize::from(s.memory_by_app.top_n),
             Self::Cpu => usize::from(s.cpu_by_app.top_n),
+            Self::Gpu(_) => usize::from(s.gpu_by_app.top_n),
+            Self::Vram(_) => usize::from(s.vram_by_app.top_n),
         }
     }
 
@@ -307,6 +382,8 @@ impl AppsMetric {
         let key = match self {
             Self::Memory => SettingKey::PerformanceMemoryByAppTopN,
             Self::Cpu => SettingKey::PerformanceCpuByAppTopN,
+            Self::Gpu(_) => SettingKey::PerformanceGpuByAppTopN,
+            Self::Vram(_) => SettingKey::PerformanceVramByAppTopN,
         };
         TlSettings::set(cx, key, SettingValue::Int(i64::from(count)));
     }
@@ -316,6 +393,8 @@ impl AppsMetric {
         match self {
             Self::Memory => s.memory_by_app.colors.clone(),
             Self::Cpu => s.cpu_by_app.colors.clone(),
+            Self::Gpu(_) => s.gpu_by_app.colors.clone(),
+            Self::Vram(_) => s.vram_by_app.colors.clone(),
         }
     }
 
@@ -324,7 +403,7 @@ impl AppsMetric {
     fn seed_picks(self, s: &PerformanceSettings) -> &[GroupColor] {
         match self {
             Self::Memory => &[],
-            Self::Cpu => &s.memory_by_app.colors,
+            Self::Cpu | Self::Gpu(_) | Self::Vram(_) => &s.memory_by_app.colors,
         }
     }
 
@@ -336,6 +415,8 @@ impl AppsMetric {
             match self {
                 Self::Memory => p.memory_by_app.colors = picks,
                 Self::Cpu => p.cpu_by_app.colors = picks,
+                Self::Gpu(_) => p.gpu_by_app.colors = picks,
+                Self::Vram(_) => p.vram_by_app.colors = picks,
             }
         });
     }
@@ -1192,8 +1273,12 @@ impl AppsChart {
         if source == Source::Waiting {
             return;
         }
+        let prefix = self.metric.key_prefix(snap);
         for e in snap.devices.entries.iter() {
-            if !matches!(e.identity, DeviceIdentity::MemGroup { .. }) {
+            let DeviceIdentity::MemGroup { key } = &e.identity else {
+                continue;
+            };
+            if self.metric.band_key(prefix.as_deref(), key).is_none() {
                 continue;
             }
             let id = self.metric.series(e.idx);
@@ -1282,12 +1367,16 @@ impl AppsChart {
         self.aggregate = None;
         self.reference = None;
         self.parts.resize(fixed_bands.len(), None);
+        let prefix = metric.key_prefix(snap);
         for e in snap.devices.entries.iter() {
             if let DeviceIdentity::MemGroup { key } = &e.identity {
-                if **key == *metric.clock_key() {
+                let Some(key) = metric.band_key(prefix.as_deref(), key) else {
+                    continue;
+                };
+                if *key == *metric.clock_key() {
                     self.reference = Some(e.idx);
                 }
-                match &**key {
+                match key {
                     OTHER_KEY => self.other = Some(e.idx),
                     k if Some(k) == metric.aggregate_key() => self.aggregate = Some(e.idx),
                     // The fixed bands are never ranked or given a colour.
@@ -1297,7 +1386,7 @@ impl AppsChart {
                         }
                     }
                     _ => self.groups.push(Group {
-                        key: Arc::clone(key),
+                        key: Arc::from(key),
                         name: Arc::clone(&e.display_name),
                         device: e.idx,
                     }),

@@ -5,6 +5,7 @@
 //! Run with `cargo test -p tl-ui-overview --features test-hooks --test overview`.
 
 mod cpu_apps;
+mod gpu_apps;
 mod overview;
 mod overview_groups;
 mod overview_widgets;
