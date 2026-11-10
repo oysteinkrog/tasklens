@@ -236,7 +236,8 @@ pub struct KernelMemory {
 
 /// One band of the memory-by-app chart (D-036, UI-PRF-060). It also serves the CPU-by-app
 /// chart (D-042, UI-PRF-062): the band keeps its device, and `MEM_GROUP` and `CPU_GROUP` are
-/// two series on it.
+/// two series on it. The GPU-by-app bands of `GpuTotals` use it too, on their own devices per
+/// GPU with series `GPU_GROUP` and `VRAM_GROUP` (tasklens-g00wx.1).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemGroupBand {
     /// The memory group key (`app:<app id>`, `exe:<name>`, `system`, `comm:<comm>`), or
@@ -412,6 +413,18 @@ pub struct GpuTotals {
     pub fdinfo_partial: bool,
     /// The device's static values, shared by every sample until the next `Hello` or card scan.
     pub info: Arc<GpuStaticInfo>,
+    /// The bands of the GPU-by-app chart from the last sample with process rows
+    /// (tasklens-g00wx.1): the top 20 app groups by GPU load, largest first, then "Other apps"
+    /// (key `other`) and "Other / driver" (key `driver`). Each band's value is series
+    /// `GPU_GROUP` on its device. The reducer fills it; the GPU workers leave it empty. Empty
+    /// for a GPU that reports no per-process load, and when a remote peer sends none.
+    #[serde(default)]
+    pub groups: Arc<Vec<MemGroupBand>>,
+    /// The same for dedicated memory: the top 20 app groups by VRAM, then "Other apps" and
+    /// "Other / driver" (device used memory minus the sum over processes, clamped at 0). Each
+    /// band's value is series `VRAM_GROUP` on its device.
+    #[serde(default)]
+    pub vram_groups: Arc<Vec<MemGroupBand>>,
 }
 
 bitflags::bitflags! {

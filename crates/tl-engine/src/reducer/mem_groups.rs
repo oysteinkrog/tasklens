@@ -61,6 +61,9 @@ pub const CPU_BANDS: [(&str, &str); 5] = [
 pub const KTHREADS: usize = 0;
 pub const SHORT: usize = 4;
 
+/// A memory group with the Wine side of a Wine group, as `MemGroups::by_key` holds it.
+pub type GroupInfo = (Arc<MemGroup>, Option<Arc<WineGroupInfo>>);
+
 /// The RssAnon sum of one memory group in one sweep.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupSum {
@@ -123,6 +126,9 @@ pub struct MemGroups {
     /// The memory group key of each live process in the last sweep. The process table's
     /// memory group filter reads it, so the UI does not repeat the grouping rules.
     pub keys: FxHashMap<ProcessKey, Arc<str>>,
+    /// Each group of the last sweep by key, with the Wine side of a Wine group. The GPU group
+    /// bands name their groups from it (tasklens-g00wx.1).
+    pub by_key: FxHashMap<Arc<str>, GroupInfo>,
     /// `getuid()`. Tests set it.
     pub self_uid: u32,
     /// Device and display name per band key, so a sweep in steady state does not touch the
@@ -155,6 +161,7 @@ impl MemGroups {
             grouper: MemGrouper::new(),
             out: Vec::new(),
             keys: FxHashMap::default(),
+            by_key: FxHashMap::default(),
             self_uid,
             devices: FxHashMap::default(),
             shown: Vec::new(),
@@ -276,6 +283,11 @@ impl MemGroups {
                 prefix: sum.group.wine_prefix.clone(),
                 images: names.into_iter().map(Arc::from).collect(),
             }));
+        }
+        self.by_key.clear();
+        for g in &sums {
+            let info = (Arc::clone(&g.group), g.wine.clone());
+            self.by_key.insert(Arc::clone(&g.group.key), info);
         }
 
         let cpu = cpu.map(|c| cpu_acc.finish(c, records, &live, &sums));

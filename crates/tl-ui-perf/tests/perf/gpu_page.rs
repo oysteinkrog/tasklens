@@ -57,6 +57,8 @@ pub(super) fn totals(shared: bool) -> GpuTotals {
         Metric::with(Validity::Unsupported)
     };
     GpuTotals {
+        groups: Default::default(),
+        vram_groups: Default::default(),
         device: GPU,
         util_pct: Metric::valid(10.9),
         mem_util_pct: Metric::valid(4.0),

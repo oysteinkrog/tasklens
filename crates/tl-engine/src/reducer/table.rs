@@ -3551,6 +3551,8 @@ mod tests {
 
         fn gpu(idx: u16, util: f32, used: u64, all: u64) -> (DeviceIdx, GpuTotals) {
             let g = GpuTotals {
+                groups: Default::default(),
+                vram_groups: Default::default(),
                 device: DeviceIdx(idx),
                 util_pct: Metric::valid(util),
                 mem_util_pct: Metric::valid(0.0),

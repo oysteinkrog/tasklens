@@ -53,7 +53,7 @@ use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{BatteryDetails, ComponentMask, DiskDetails, ServiceBackend, Snapshot};
 use tl_model::system::{
     CoreInfo, CoreKind, CpuSet, CpuTopology, CpuTotals, DiskTotals, GpuEngine, GpuTotals,
-    KernelMemory, LinkState, MemoryTotals, Metric, NetTotals,
+    KernelMemory, LinkState, MemGroupBand, MemoryTotals, Metric, NetTotals,
 };
 use tl_model::table::{
     Manager, SysColumnId, SysSortSpec, SysTable, SysTableQuery, TableQuery, Total,
@@ -1721,6 +1721,8 @@ fn every_source_update() -> Vec<SourceUpdate> {
                     pci_bus_id: Arc::from("0000:01:00.0"),
                 },
                 GpuTotals {
+                    groups: Default::default(),
+                    vram_groups: Default::default(),
                     device: DeviceIdx(0),
                     util_pct: Metric::valid(5.0),
                     mem_util_pct: Metric::default(),
@@ -2344,6 +2346,8 @@ fn gpu_power_msg(uuid: [u8; 16], watts: f32, sm: &[(u32, u32)]) -> EngineMsg {
                 pci_bus_id: Arc::from("0000:01:00.0"),
             },
             GpuTotals {
+                groups: Default::default(),
+                vram_groups: Default::default(),
                 device: DeviceIdx(0),
                 util_pct: Metric::valid(80.0),
                 mem_util_pct: Metric::default(),
@@ -3775,6 +3779,8 @@ fn gpu_sample(cards: &[(&DeviceIdentity, f32)]) -> EngineMsg {
                 (
                     id.clone(),
                     GpuTotals {
+                        groups: Default::default(),
+                        vram_groups: Default::default(),
                         device: DeviceIdx(0),
                         util_pct: Metric::valid(10.0),
                         mem_util_pct: Metric::default(),
@@ -4783,4 +4789,249 @@ fn mem_group_devices_pruned() {
         .expect("no invariant violation");
     let snap = rig.latest();
     assert_eq!(snap.system.memory.groups[0].device, old);
+}
+
+// ---- GPU load and VRAM by app (tasklens-g00wx.1) ----
+
+/// One GPU sample for `identity` with load `util`, `used` bytes of VRAM in use, and the given
+/// process rows.
+fn gpu_group_msg(
+    identity: DeviceIdentity,
+    util: f32,
+    used: u64,
+    nvidia: Option<Vec<GpuProcessSample>>,
+    drm: Option<Vec<DrmProcessVram>>,
+) -> EngineMsg {
+    let mut msg = gpu_power_msg([0; 16], 100.0, &[]);
+    if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut msg {
+        s.devices[0].0 = identity;
+        s.devices[0].1.util_pct = Metric::valid(util);
+        s.devices[0].1.mem_used = Metric::valid(used);
+        s.processes = nvidia;
+        s.drm_processes = drm;
+    }
+    msg
+}
+
+/// An NVML row: `sm` percent (`None`: no utilization sample for the process) and `mem` bytes.
+fn nvml_row(uuid: [u8; 16], pid: u32, sm: Option<u32>, mem: u64) -> GpuProcessSample {
+    GpuProcessSample {
+        uuid,
+        pid,
+        sm_pct: sm.map_or(Reading::Unsupported, Reading::Ok),
+        mem_pct: Reading::Ok(0),
+        enc_pct: Reading::Unsupported,
+        dec_pct: Reading::Unsupported,
+        mem_used: Reading::Ok(mem),
+    }
+}
+
+/// The band keys of the GPU's load list and VRAM list.
+fn gpu_band_keys(snap: &Snapshot) -> (Vec<String>, Vec<String>) {
+    let g = &snap.system.gpus[0].1;
+    let keys = |bands: &[MemGroupBand]| bands.iter().map(|b| b.key.to_string()).collect();
+    (keys(&g.groups), keys(&g.vram_groups))
+}
+
+/// The last sample of `metric` on each band of `bands`.
+fn gpu_band_values(rig: &Rig, bands: &[MemGroupBand], metric: MetricId) -> Vec<Sample> {
+    bands
+        .iter()
+        .map(|b| {
+            rig.last_sample(SeriesId {
+                device: b.device,
+                metric,
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn gpu_and_vram_groups_per_nvidia_gpu() {
+    const MIB: u64 = 1 << 20;
+    let uuid = [7; 16];
+    let gpu = DeviceIdentity::Gpu {
+        uuid,
+        pci_bus_id: Arc::from("0000:01:00.0"),
+    };
+    let mut rig = Rig::new();
+    let procs = [
+        (1, "game", MIB),
+        (2, "game", MIB),
+        (3, "obs", MIB),
+        (4, "editor", MIB),
+        (5, "shell", MIB),
+    ];
+    // pid 4 has VRAM but no utilization sample: an idle app. pid 9 is not in the sweep.
+    let rows = vec![
+        nvml_row(uuid, 1, Some(30), 300),
+        nvml_row(uuid, 2, Some(25), 200),
+        nvml_row(uuid, 3, Some(10), 100),
+        nvml_row(uuid, 4, None, 50),
+        nvml_row(uuid, 9, Some(5), 40),
+    ];
+    rig.run(vec![
+        gpu_info(uuid, true),
+        mem_sweep(SEC, &procs),
+        gpu_group_msg(gpu.clone(), 80.0, 1000, Some(rows), None),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let (load_keys, vram_keys) = gpu_band_keys(&snap);
+    assert_eq!(
+        load_keys,
+        ["comm:game", "comm:obs", "comm:editor", "other", "driver"]
+    );
+    assert_eq!(
+        vram_keys,
+        ["comm:game", "comm:obs", "comm:editor", "other", "driver"]
+    );
+    let g = &snap.system.gpus[0].1;
+    assert_eq!(g.groups[0].process_count, 2);
+    let load = gpu_band_values(&rig, &g.groups, MetricId::GPU_GROUP);
+    let values: Vec<f32> = load.iter().map(|s| s.value).collect();
+    // pid 9 is unknown, so its 5% is in "Other / driver": 80 - 55 - 10.
+    assert_eq!(values, [55.0, 10.0, 0.0, 0.0, 15.0]);
+    assert!(
+        load.iter().all(Sample::is_valid),
+        "the idle app reads 0, not a gap"
+    );
+    assert_eq!(
+        values.iter().sum::<f32>(),
+        80.0,
+        "the stack is the GPU load"
+    );
+    let vram = gpu_band_values(&rig, &g.vram_groups, MetricId::VRAM_GROUP);
+    let values: Vec<f32> = vram.iter().map(|s| s.value).collect();
+    assert_eq!(values, [500.0, 100.0, 50.0, 0.0, 350.0]);
+    assert_eq!(values.iter().sum::<f32>(), 1000.0, "the stack is used VRAM");
+    // A load band and a VRAM band of one app share a device.
+    assert_eq!(g.groups[0].device, g.vram_groups[0].device);
+    let game = snap
+        .devices
+        .find(&DeviceIdentity::MemGroup {
+            key: "gpu:0000:01:00.0:comm:game".into(),
+        })
+        .expect("the band device is in the catalog");
+    assert_eq!(&*game.persistent_key, "memgroup:gpu:0000:01:00.0:comm:game");
+    assert_eq!(&*game.display_name, "game");
+    // The memory chart keeps its own devices.
+    assert!(
+        snap.system
+            .memory
+            .groups
+            .iter()
+            .all(|b| !g.groups.iter().any(|gb| gb.device == b.device))
+    );
+
+    // The apps sum to more than the device load: drawn as is, "Other / driver" is 0. The
+    // editor has no row any more, so its bands get one gap each.
+    let editor = (g.groups[2].device, g.vram_groups[2].device);
+    let rows = vec![
+        nvml_row(uuid, 1, Some(60), 300),
+        nvml_row(uuid, 3, Some(40), 100),
+    ];
+    rig.run(vec![gpu_group_msg(
+        gpu.clone(),
+        50.0,
+        1000,
+        Some(rows),
+        None,
+    )])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let g = &snap.system.gpus[0].1;
+    let (load_keys, _) = gpu_band_keys(&snap);
+    assert_eq!(load_keys, ["comm:game", "comm:obs", "other", "driver"]);
+    let values: Vec<f32> = gpu_band_values(&rig, &g.groups, MetricId::GPU_GROUP)
+        .iter()
+        .map(|s| s.value)
+        .collect();
+    assert_eq!(values, [60.0, 40.0, 0.0, 0.0]);
+    let gap = |rig: &Rig, device, metric| !rig.last_sample(SeriesId { device, metric }).is_valid();
+    assert!(gap(&rig, editor.0, MetricId::GPU_GROUP));
+    assert!(gap(&rig, editor.1, MetricId::VRAM_GROUP));
+
+    // A sample without process rows: every band gets a gap and both lists stay.
+    let lists = (Arc::clone(&g.groups), Arc::clone(&g.vram_groups));
+    rig.run(vec![gpu_group_msg(gpu, 50.0, 1000, None, None)])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    let g = &snap.system.gpus[0].1;
+    assert_eq!((&g.groups, &g.vram_groups), (&lists.0, &lists.1));
+    for b in g.groups.iter() {
+        assert!(gap(&rig, b.device, MetricId::GPU_GROUP), "{}", b.key);
+    }
+    for b in g.vram_groups.iter() {
+        assert!(gap(&rig, b.device, MetricId::VRAM_GROUP), "{}", b.key);
+    }
+}
+
+#[test]
+fn gpu_groups_need_nvml_process_utilization() {
+    let uuid = [8; 16];
+    let gpu = DeviceIdentity::Gpu {
+        uuid,
+        pci_bus_id: Arc::from("0000:01:00.0"),
+    };
+    let mut rig = Rig::new();
+    rig.run(vec![
+        gpu_info(uuid, false),
+        mem_sweep(SEC, &[(1, "game", 1 << 20)]),
+        gpu_group_msg(
+            gpu,
+            30.0,
+            1000,
+            Some(vec![nvml_row(uuid, 1, None, 400)]),
+            None,
+        ),
+    ])
+    .expect("no invariant violation");
+    let (load_keys, vram_keys) = gpu_band_keys(&rig.latest());
+    assert!(load_keys.is_empty(), "no per-process load, no load bands");
+    assert_eq!(vram_keys, ["comm:game", "other", "driver"]);
+}
+
+#[test]
+fn gpu_groups_on_a_drm_card_by_pdev() {
+    let card = DeviceIdentity::Gpu {
+        uuid: [0; 16],
+        pci_bus_id: Arc::from("0000:03:00.0"),
+    };
+    let row = |pdev: &str, pid: u32, busy: f32, vram: u64| {
+        let mut r = DrmProcessVram::new(Arc::from(pdev), pid, vram);
+        r.engines.push((Arc::from("gfx"), busy));
+        r
+    };
+    let mut rig = Rig::new();
+    rig.run(vec![
+        mem_sweep(SEC, &[(1, "game", 1 << 20), (2, "obs", 1 << 20)]),
+        gpu_group_msg(
+            card,
+            50.0,
+            2000,
+            None,
+            Some(vec![
+                row("0000:03:00.0", 1, 40.0, 1200),
+                // On another card: left out of this card's bands.
+                row("0000:00:02.0", 2, 90.0, 0),
+            ]),
+        ),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let (load_keys, vram_keys) = gpu_band_keys(&snap);
+    assert_eq!(load_keys, ["comm:game", "other", "driver"]);
+    assert_eq!(vram_keys, ["comm:game", "other", "driver"]);
+    let g = &snap.system.gpus[0].1;
+    let load: Vec<f32> = gpu_band_values(&rig, &g.groups, MetricId::GPU_GROUP)
+        .iter()
+        .map(|s| s.value)
+        .collect();
+    assert_eq!(load, [40.0, 0.0, 10.0]);
+    let vram: Vec<f32> = gpu_band_values(&rig, &g.vram_groups, MetricId::VRAM_GROUP)
+        .iter()
+        .map(|s| s.value)
+        .collect();
+    assert_eq!(vram, [1200.0, 0.0, 800.0]);
 }

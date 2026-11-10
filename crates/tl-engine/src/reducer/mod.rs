@@ -11,6 +11,7 @@
 pub mod app_detail;
 pub mod apply;
 pub mod devices;
+pub mod gpu_groups;
 pub mod health;
 pub mod mem_groups;
 mod power;

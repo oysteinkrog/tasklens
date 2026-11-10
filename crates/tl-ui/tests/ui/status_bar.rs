@@ -325,6 +325,8 @@ mod performance_tab {
     /// A GPU at 50 °C.
     fn gpu(idx: u16) -> (DeviceIdx, GpuTotals) {
         let totals = GpuTotals {
+            groups: Default::default(),
+            vram_groups: Default::default(),
             device: DeviceIdx(idx),
             util_pct: Metric::valid(5.),
             mem_util_pct: Metric::default(),

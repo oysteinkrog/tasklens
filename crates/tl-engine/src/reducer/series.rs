@@ -26,6 +26,16 @@ const STALE_PERIODS: u64 = 3;
 pub const SLOW_CAPACITY: u32 = 602;
 pub const SLOW_PERIOD_NS: u64 = 1_000_000_000;
 
+/// The By app group series: memory, CPU, GPU load and VRAM. They join across a period change
+/// and a late sample, since every band changes at once and a gap would cut a column through
+/// the whole stack (tasklens-r9b7g, tasklens-36kya, tasklens-g00wx.1).
+fn joins_across(metric: MetricId) -> bool {
+    matches!(
+        metric,
+        MetricId::MEM_GROUP | MetricId::CPU_GROUP | MetricId::GPU_GROUP | MetricId::VRAM_GROUP
+    )
+}
+
 pub struct SeriesStore {
     rings: FxHashMap<SeriesId, Entry>,
     /// Set by `mark_gap_all`; a series created before the next `publish` also starts with
@@ -176,8 +186,8 @@ impl SeriesStore {
         SeriesRing::fast_capacity(period_ns)
     }
 
-    /// Appends; creates the ring on first use; a period change sets `gap_next` (except for the memory
-    /// and CPU group series, tasklens-r9b7g) and keeps the
+    /// Appends; creates the ring on first use; a period change sets `gap_next` (except for the
+    /// group series, `joins_across`, tasklens-r9b7g) and keeps the
     /// ring, grown to the new period's capacity when it is shorter, so a series that started at
     /// 1 s still holds 60 s at 10 Hz (crw.83). Flags without `VALID` append a gap sample (value
     /// 0.0). Returns the stored sample, `GAP_BEFORE` included, for the record sink.
@@ -201,7 +211,7 @@ impl SeriesStore {
             // Memory and CPU group series join across a period change: the process sweep moves
             // from 10 s to 1 s for every group at once, and a gap would cut a column through
             // all By app bands (tasklens-r9b7g). Suspend and restart still gap.
-            entry.gap_next |= id.metric != MetricId::MEM_GROUP && id.metric != MetricId::CPU_GROUP;
+            entry.gap_next |= !joins_across(id.metric);
             entry.ring.grow(SeriesStore::fast_capacity(period_ns));
         }
         if entry.stale {
@@ -212,7 +222,7 @@ impl SeriesStore {
             // late at once, so a gap here would cut a column through all bands of the By app
             // stack. The line joins across the late sweep; a suspend or restart still gaps
             // through `mark_gap_all` and `mark_gap_source` (tasklens-36kya, D-042).
-            entry.gap_next |= id.metric != MetricId::MEM_GROUP && id.metric != MetricId::CPU_GROUP;
+            entry.gap_next |= !joins_across(id.metric);
         }
         let mut s = Sample { t_ns, value, flags };
         if !s.is_valid() {
@@ -565,19 +575,23 @@ mod tests {
     fn late_memory_group_sweep_does_not_gap() {
         let group = sid(0, MetricId::MEM_GROUP);
         let cpu = sid(1, MetricId::CPU_TOTAL);
+        let gpu = sid(2, MetricId::GPU_GROUP);
+        let vram = sid(3, MetricId::VRAM_GROUP);
         let mut store = SeriesStore::new();
-        for id in [group, cpu] {
+        for id in [group, cpu, gpu, vram] {
             store.append(id, 10 * SEC, 1.0, SEC, SampleFlags::VALID);
         }
         // One sweep is skipped for 6 s, past the 3 s stale limit.
         store.mark_stale(16 * SEC);
-        for id in [group, cpu] {
+        for id in [group, cpu, gpu, vram] {
             store.append(id, 16 * SEC, 2.0, SEC, SampleFlags::VALID);
         }
         let set = store.publish();
-        let late = view(&set, group).samples[1];
-        assert!(late.is_valid() && !late.flags.contains(SampleFlags::GAP_BEFORE));
-        assert!(!late.flags.contains(SampleFlags::STALE));
+        for id in [group, gpu, vram] {
+            let late = view(&set, id).samples[1];
+            assert!(late.is_valid() && !late.flags.contains(SampleFlags::GAP_BEFORE));
+            assert!(!late.flags.contains(SampleFlags::STALE));
+        }
         assert!(
             view(&set, cpu).samples[1]
                 .flags
@@ -599,7 +613,9 @@ mod tests {
         let mem = sid(0, MetricId::MEM_GROUP);
         let cpu_g = sid(1, MetricId::CPU_GROUP);
         let total = sid(2, MetricId::CPU_TOTAL);
-        let ids = [mem, cpu_g, total];
+        let gpu_g = sid(3, MetricId::GPU_GROUP);
+        let vram_g = sid(4, MetricId::VRAM_GROUP);
+        let ids = [mem, cpu_g, total, gpu_g, vram_g];
         let mut store = SeriesStore::new();
         for t in [10, 20, 30] {
             for id in ids {
@@ -612,7 +628,7 @@ mod tests {
             }
         }
         let set = store.publish();
-        for id in [mem, cpu_g] {
+        for id in [mem, cpu_g, gpu_g, vram_g] {
             let v = view(&set, id);
             assert_eq!(v.period_ns, SEC);
             assert_eq!(v.samples.len(), 5);

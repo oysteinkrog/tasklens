@@ -161,6 +161,8 @@ fn catalog() -> DeviceCatalog {
 /// A GPU at `device` at 25% busy with 4 of 16 GiB VRAM used, drawing 120 W.
 fn gpu_totals(device: u16) -> GpuTotals {
     GpuTotals {
+        groups: Default::default(),
+        vram_groups: Default::default(),
         device: DeviceIdx(device),
         util_pct: Metric::valid(25.),
         mem_util_pct: Metric::default(),

@@ -1206,6 +1206,8 @@ mod tests {
     /// A GPU record with no value and no static facts.
     fn bare_gpu() -> GpuTotals {
         GpuTotals {
+            groups: Default::default(),
+            vram_groups: Default::default(),
             device: DeviceIdx(1),
             util_pct: Metric::default(),
             mem_util_pct: Metric::default(),

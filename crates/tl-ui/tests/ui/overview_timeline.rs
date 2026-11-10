@@ -601,6 +601,8 @@ fn proc_record(pid: u32, name: &str, cpu_pct: f32) -> ProcessRecord {
 
 fn gpu_totals(pct: f32) -> GpuTotals {
     GpuTotals {
+        groups: Default::default(),
+        vram_groups: Default::default(),
         device: DeviceIdx(2),
         util_pct: Metric::valid(pct),
         mem_util_pct: Metric::default(),

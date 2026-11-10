@@ -844,6 +844,8 @@ impl OverviewSynth {
 
         let gpu = DeviceIdx(DEV_GPU);
         let row = GpuTotals {
+            groups: Default::default(),
+            vram_groups: Default::default(),
             device: gpu,
             util_pct: Metric::valid(d.gpu_pct),
             mem_util_pct: none(),

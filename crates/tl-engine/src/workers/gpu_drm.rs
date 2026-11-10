@@ -632,6 +632,8 @@ fn totals(
         seen,
     );
     GpuTotals {
+        groups: Default::default(),
+        vram_groups: Default::default(),
         device: DeviceIdx(0),
         util_pct,
         mem_util_pct,
@@ -759,6 +761,8 @@ fn intel(
         )
     };
     GpuTotals {
+        groups: Default::default(),
+        vram_groups: Default::default(),
         device: DeviceIdx(0),
         util_pct,
         mem_util_pct: Metric::with(Validity::Unsupported),

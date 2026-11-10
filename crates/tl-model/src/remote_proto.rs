@@ -50,9 +50,10 @@ use crate::validity::FieldValidity;
 pub const MAGIC: [u8; 4] = *b"TLR1";
 /// Protocol version. Peers are compatible only when their `proto` values are equal.
 ///
-/// 2 from 1.5.9: 1.1.0 to 1.5.8 all sent 1 with changing wire types (tasklens-j5ss5). Bump it
-/// for every wire change.
-pub const PROTO: u16 = 2;
+/// 2 from 1.5.9: 1.1.0 to 1.5.8 all sent 1 with changing wire types (tasklens-j5ss5). 3 after
+/// 1.5.9: `GpuTotals` gained `groups` and `vram_groups` (tasklens-g00wx.1). Bump it for every
+/// wire change.
+pub const PROTO: u16 = 3;
 /// The app version sent in bootstrap frames.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Magic, proto, flags, encoded length, decoded length.
@@ -1528,10 +1529,11 @@ mod tests {
         assert_eq!(bytes, expected);
     }
 
-    /// 1.1.0 to 1.5.8 sent proto 1 with changing wire types, so this build must not send 1.
+    /// 1.1.0 to 1.5.8 sent proto 1 with changing wire types and 1.5.9 sent 2, so this build
+    /// must send neither: `GpuTotals` changed after 1.5.9.
     #[test]
-    fn proto_is_2_from_1_5_9() {
-        assert_eq!(PROTO, 2);
+    fn proto_is_3_after_1_5_9() {
+        assert_eq!(PROTO, 3);
     }
 
     #[test]

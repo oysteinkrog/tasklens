@@ -5135,6 +5135,8 @@ mod page {
         use tl_model::validity::Validity;
         const GIB: u64 = 1 << 30;
         tl_model::system::GpuTotals {
+            groups: Default::default(),
+            vram_groups: Default::default(),
             device: DeviceIdx(device),
             util_pct: Metric::valid(25.),
             mem_util_pct: Metric::default(),

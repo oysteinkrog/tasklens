@@ -2740,6 +2740,8 @@ mod tests {
         let gpu = gpu_entry(9, "AMD Radeon RX 7900 XTX");
         let mut sys = SystemSnapshot::default();
         let mut totals = GpuTotals {
+            groups: Default::default(),
+            vram_groups: Default::default(),
             device: DeviceIdx(9),
             util_pct: Metric::valid(10.9),
             mem_util_pct: Metric::default(),

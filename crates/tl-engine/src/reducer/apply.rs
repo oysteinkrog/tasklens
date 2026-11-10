@@ -16,7 +16,7 @@ use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::{Demand, DetailDemand};
 use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId, TabPayload};
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
-use tl_model::gpu_proto::ApiVersions;
+use tl_model::gpu_proto::{ApiVersions, GpuProcessSample};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::series::{Sample, SampleFlags};
@@ -33,6 +33,7 @@ use tl_model::table::{Manager, SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
+use super::gpu_groups::{self, GpuBands, GpuGroups, Kind};
 use super::mem_groups::{CpuBands, DEVICE_KEY_PREFIX, KTHREADS, MemGroups, kernel_parts};
 use super::power::{GpuShare, PowerEstimator};
 use super::process_series::ProcessSeries;
@@ -49,9 +50,9 @@ use crate::client_session::{
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
     ConnectionsUpdate, CpuCoreSample, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate,
-    DeviceKinds, DeviceList, DiskSample, EngineMsg, GpuSample, HelperUpdate, HistoryUpdate,
-    MemorySample, NetSample, SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, SweepCpu,
-    source_of,
+    DeviceKinds, DeviceList, DiskSample, DrmProcessVram, EngineMsg, GpuSample, HelperUpdate,
+    HistoryUpdate, MemorySample, NetSample, SensorSample, ServicesUpdate, SourceUpdate,
+    StartupUpdate, SweepCpu, source_of,
 };
 use crate::workers::history::{HistoryMsg, SessionList};
 use crate::workers::process_detail::pss_keys;
@@ -149,6 +150,20 @@ pub struct ApplyState {
     details_seen: Arc<[DetailDemand]>,
     /// Memory groups for the memory-by-app chart (D-036, UI-PRF-060).
     mem_groups: MemGroups,
+    /// GPU band devices for the GPU-by-app charts (tasklens-g00wx.1).
+    gpu_groups: GpuGroups,
+}
+
+/// The process rows of one GPU sample, for the GPU group bands (tasklens-g00wx.1).
+enum GpuRows<'a> {
+    /// The GPU is not present: gap its bands.
+    None,
+    /// The sample's NVIDIA and DRM rows, and the group of each of their pids.
+    Of {
+        nvidia: Option<&'a [GpuProcessSample]>,
+        drm: Option<&'a [DrmProcessVram]>,
+        groups: &'a FxHashMap<u32, gpu_groups::GroupInfo>,
+    },
 }
 
 impl ApplyState {
@@ -326,7 +341,12 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
         DeviceKind::Fan => &[MetricId::FAN_RPM, MetricId::FAN_PWM],
         DeviceKind::Battery => &[MetricId::BATTERY_PCT, MetricId::BATTERY_POWER],
         DeviceKind::Aggregate => &[],
-        DeviceKind::MemGroup => &[MetricId::MEM_GROUP, MetricId::CPU_GROUP],
+        DeviceKind::MemGroup => &[
+            MetricId::MEM_GROUP,
+            MetricId::CPU_GROUP,
+            MetricId::GPU_GROUP,
+            MetricId::VRAM_GROUP,
+        ],
     }
 }
 
@@ -2081,6 +2101,15 @@ impl Reducer {
         };
         let owner = source.unwrap_or_else(|| gpu_update_owner(s.devices.iter().map(|(id, _)| id)));
         let mut rows = self.other_gpu_rows(owner);
+        // The group of each pid in this sample's process rows, for the GPU group bands.
+        let pids: FxHashSet<u32> = s
+            .processes
+            .iter()
+            .flatten()
+            .map(|r| r.pid)
+            .chain(s.drm_processes.iter().flatten().map(|r| r.pid))
+            .collect();
+        let pid_groups = gpu_groups::pid_groups(&self.apply_state.mem_groups, &pids);
         let (mut util, mut mem) = (0.0f32, 0u64);
         let (mut util_ok, mut mem_ok) = (false, false);
         for (idx, g) in &rows {
@@ -2104,6 +2133,7 @@ impl Reducer {
                 self.gaps(idx, &GPU_METRICS, t);
                 self.gaps(idx, &GPU_ENGINE_SERIES.map(GpuEngine::metric), t);
                 self.apply_state.set_gpu_power(idx, &identity, None);
+                self.apply_gpu_groups(idx, &identity, &mut g, GpuRows::None, t, period)?;
                 rows.push((idx, g));
                 continue;
             }
@@ -2156,8 +2186,15 @@ impl Reducer {
                 mem += g.mem_used.value;
                 mem_ok = true;
             }
+            let process_rows = GpuRows::Of {
+                nvidia: s.processes.as_deref(),
+                drm: s.drm_processes.as_deref(),
+                groups: &pid_groups,
+            };
+            self.apply_gpu_groups(idx, &identity, &mut g, process_rows, t, period)?;
             rows.push((idx, g));
         }
+        self.apply_state.gpu_groups.prune();
         let agg = self.fixed_device(&DeviceIdentity::Aggregate(AggregateKind::Gpus))?;
         self.push(agg, MetricId::GPU_UTIL, t, util, util_ok, period);
         self.push(agg, MetricId::GPU_MEM, t, mem as f32, mem_ok, period);
@@ -2181,6 +2218,181 @@ impl Reducer {
             self.republish_processes(settings);
         }
         Ok(())
+    }
+
+    /// Pushes the GPU load and VRAM bands of GPU `gpu` and puts their lists in `g.groups` and
+    /// `g.vram_groups` (tasklens-g00wx.1, `gpu_groups`). An NVIDIA GPU gets load bands only
+    /// when it supports per-process utilization; a DRM card gets both. Without process rows for
+    /// the GPU's worker (`rows` is `GpuRows::None`, or the sample has none) every band the GPU
+    /// showed gets a gap, no device is added, and the lists stay as they were.
+    fn apply_gpu_groups(
+        &mut self,
+        gpu: DeviceIdx,
+        identity: &DeviceIdentity,
+        g: &mut GpuTotals,
+        rows: GpuRows<'_>,
+        t: TimeNs,
+        period: u64,
+    ) -> Result<(), InvariantViolation> {
+        let (prev_load, prev_vram) = self
+            .components
+            .system
+            .gpus
+            .iter()
+            .find(|(idx, _)| *idx == gpu)
+            .map(|(_, p)| (Arc::clone(&p.groups), Arc::clone(&p.vram_groups)))
+            .unwrap_or_default();
+        let DeviceIdentity::Gpu { uuid, pci_bus_id } = identity else {
+            return Ok(());
+        };
+        let (load, vram) = match rows {
+            GpuRows::Of {
+                nvidia,
+                drm,
+                groups,
+            } => {
+                let drm_card = *uuid == [0; 16];
+                let uses = if drm_card {
+                    drm.map(|r| gpu_groups::drm_uses(r, pci_bus_id))
+                } else {
+                    nvidia.map(|r| gpu_groups::nvidia_uses(r, uuid))
+                };
+                let load_ok = drm_card || self.apply_state.gpu_caps.get(uuid) == Some(&true);
+                let util = g.util_pct.validity.is_valid().then_some(g.util_pct.value);
+                let used = g.mem_used.validity.is_valid().then_some(g.mem_used.value);
+                let load = uses
+                    .as_deref()
+                    .filter(|_| load_ok)
+                    .map(|u| gpu_groups::bands(u, groups, Kind::Load, util.map(f64::from)));
+                let vram = uses
+                    .as_deref()
+                    .map(|u| gpu_groups::bands(u, groups, Kind::Vram, used.map(|b| b as f64)));
+                (load, vram)
+            }
+            GpuRows::None => (None, None),
+        };
+        g.groups = self.apply_gpu_bands(gpu, pci_bus_id, Kind::Load, load, prev_load, t, period)?;
+        g.vram_groups =
+            self.apply_gpu_bands(gpu, pci_bus_id, Kind::Vram, vram, prev_vram, t, period)?;
+        Ok(())
+    }
+
+    /// Pushes one kind of GPU bands for GPU `gpu` and returns its band list, `prev` when
+    /// `bands` is `None` or the list did not change. A band that drops out gets one gap.
+    #[allow(clippy::too_many_arguments, reason = "one GPU, one kind, one sample")]
+    fn apply_gpu_bands(
+        &mut self,
+        gpu: DeviceIdx,
+        pci: &Arc<str>,
+        kind: Kind,
+        bands: Option<GpuBands>,
+        prev: Arc<Vec<MemGroupBand>>,
+        t: TimeNs,
+        period: u64,
+    ) -> Result<Arc<Vec<MemGroupBand>>, InvariantViolation> {
+        let metric = kind.metric();
+        let Some(bands) = bands else {
+            let shown = self
+                .apply_state
+                .gpu_groups
+                .shown
+                .get(&(gpu, metric))
+                .cloned()
+                .unwrap_or_default();
+            for idx in shown {
+                self.gaps(idx, &[metric], t);
+            }
+            return Ok(prev);
+        };
+        let mut published = Vec::with_capacity(bands.top.len() + 2);
+        let mut shown = Vec::with_capacity(bands.top.len() + 2);
+        for app in &bands.top {
+            let idx = self.gpu_group_device(pci, &app.group.key, &app.group.name)?;
+            self.push(idx, metric, t, app.value as f32, true, period);
+            shown.push(idx);
+            published.push(MemGroupBand {
+                key: Arc::clone(&app.group.key),
+                name: Arc::clone(&app.group.name),
+                process_count: app.processes,
+                device: idx,
+                wine: app.wine.clone(),
+            });
+        }
+        let state = &self.apply_state.gpu_groups;
+        let fixed = [
+            (
+                Arc::clone(&state.other_key),
+                Arc::clone(&state.other_name),
+                Some(bands.other),
+                bands.other_processes,
+            ),
+            (
+                Arc::clone(&state.driver_key),
+                Arc::clone(&state.driver_name),
+                bands.driver,
+                0,
+            ),
+        ];
+        for (key, name, value, process_count) in fixed {
+            let idx = self.gpu_group_device(pci, &key, &name)?;
+            let valid = value.is_some();
+            self.push(idx, metric, t, value.unwrap_or(0.0) as f32, valid, period);
+            shown.push(idx);
+            published.push(MemGroupBand {
+                key,
+                name,
+                process_count,
+                device: idx,
+                wine: None,
+            });
+        }
+        let old = self
+            .apply_state
+            .gpu_groups
+            .shown
+            .insert((gpu, metric), shown)
+            .unwrap_or_default();
+        let now = &self.apply_state.gpu_groups.shown[&(gpu, metric)];
+        let left: Vec<DeviceIdx> = old.into_iter().filter(|i| !now.contains(i)).collect();
+        for idx in left {
+            self.gaps(idx, &[metric], t);
+        }
+        Ok(if *prev == published {
+            prev
+        } else {
+            Arc::new(published)
+        })
+    }
+
+    /// The device of a GPU band: `DeviceIdentity::MemGroup` with the key
+    /// `gpu:<pci bus id>:<band key>`. A new key, or a new display name for a known key, updates
+    /// the catalog.
+    fn gpu_group_device(
+        &mut self,
+        pci: &Arc<str>,
+        key: &Arc<str>,
+        name: &Arc<str>,
+    ) -> Result<DeviceIdx, InvariantViolation> {
+        let map_key = (Arc::clone(pci), Arc::clone(key));
+        if let Some((idx, known)) = self.apply_state.gpu_groups.devices.get(&map_key)
+            && known == name
+        {
+            return Ok(*idx);
+        }
+        let band_key = format!("{}{pci}:{key}", gpu_groups::KEY_PREFIX);
+        let persistent_key = format!("{DEVICE_KEY_PREFIX}{band_key}");
+        let identity = DeviceIdentity::MemGroup {
+            key: Arc::from(band_key),
+        };
+        let (idx, _) = self
+            .devices
+            .ensure(&identity, name, None, &persistent_key, None, None)?;
+        self.apply_state
+            .gpu_groups
+            .devices
+            .insert(map_key, (idx, Arc::clone(name)));
+        self.mark(ComponentMask::DEVICES);
+        Ok(idx)
     }
 
     /// The current GPU rows whose device belongs to another worker than `owner`, so a sample

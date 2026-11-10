@@ -1185,6 +1185,8 @@ mod hardware_builders {
         sys.gpus = vec![(
             DeviceIdx(7),
             GpuTotals {
+                groups: Default::default(),
+                vram_groups: Default::default(),
                 device: DeviceIdx(7),
                 util_pct: Metric::default(),
                 mem_util_pct: Metric::default(),

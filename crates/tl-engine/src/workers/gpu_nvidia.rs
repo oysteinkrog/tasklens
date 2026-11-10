@@ -400,6 +400,8 @@ pub fn to_totals(
     engines.set(GpuEngine::Jpeg, pct(s.jpeg_pct));
     engines.set(GpuEngine::Ofa, pct(s.ofa_pct));
     GpuTotals {
+        groups: Default::default(),
+        vram_groups: Default::default(),
         device: DEVICE_PLACEHOLDER,
         util_pct: pct(s.util_pct),
         mem_util_pct: pct(s.mem_util_pct),

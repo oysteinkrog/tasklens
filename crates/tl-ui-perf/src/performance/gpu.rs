@@ -2298,6 +2298,8 @@ mod tests {
     fn reported_bits_skip_unsupported() {
         use tl_model::system::Metric;
         let mut t = GpuTotals {
+            groups: Default::default(),
+            vram_groups: Default::default(),
             device: DeviceIdx(1),
             util_pct: Metric::valid(10.0),
             mem_util_pct: Metric::default(),
@@ -2350,6 +2352,8 @@ mod tests {
             .collect();
         assert_eq!(all, ["gpu", "enc", "dec"], "no record yet: every engine");
         let t = GpuTotals {
+            groups: Default::default(),
+            vram_groups: Default::default(),
             device,
             util_pct: Metric::valid(10.0),
             mem_util_pct: Metric::default(),

@@ -164,6 +164,8 @@ fn catalog(version: u64, gone: Option<bool>) -> DeviceCatalog {
 
 fn gpu_totals(device: u16, util: f32) -> GpuTotals {
     GpuTotals {
+        groups: Default::default(),
+        vram_groups: Default::default(),
         device: DeviceIdx(device),
         util_pct: Metric::valid(util),
         mem_util_pct: Metric::default(),

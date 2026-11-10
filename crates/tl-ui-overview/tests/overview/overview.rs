@@ -1740,6 +1740,8 @@ mod bottom {
 
     fn gpu_totals(device: u16) -> GpuTotals {
         GpuTotals {
+            groups: Default::default(),
+            vram_groups: Default::default(),
             device: DeviceIdx(device),
             util_pct: Metric::valid(25.),
             mem_util_pct: Metric::default(),
@@ -3901,6 +3903,8 @@ mod sweep {
     /// A GPU with 3D, encode and decode engines and the owner's VRAM of 1.0.7: 3.98 of 15.92 GiB.
     fn gpu() -> GpuTotals {
         GpuTotals {
+            groups: Default::default(),
+            vram_groups: Default::default(),
             device: DeviceIdx(10),
             util_pct: Metric::valid(25.),
             mem_util_pct: Metric::default(),
