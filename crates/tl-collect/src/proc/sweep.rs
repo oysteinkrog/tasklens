@@ -36,11 +36,7 @@
 //! a full sweep. `status` gives RssAnon, VmRSS, commit, VmSize and the uid, so a uid change shows
 //! at the next sweep. The metadata (exe, cmdline, cgroup) is re-read for a new key, when `comm`
 //! changes and every [`MEM_ONLY_META_REFRESH`] sweeps, so an exec or a cgroup move shows within
-//! that many sweeps. No `io`, I/O rates, fd counts or app unit stats. Kernel threads are the
-//! exception to the `status` rule: their `status` has no memory lines and their uid is 0, so it
-//! is read as R-286 sets for a full sweep (on first sight, when a status-only field is demanded,
-//! or for this sweep's tenth). A pid that was a kernel thread in the last sweep opens no anchor
-//! before `stat` (tasklens-dlyfu).
+//! that many sweeps. No `io`, I/O rates, fd counts or app unit stats.
 //!
 //! `ProcessSampler` (E05-A1) adds metadata, app groups, flags, the P1 extra columns, the app
 //! unit samples and the Frozen state of unit cgroups on top of `SweepCore`. Command lines, paths and user names are never logged
@@ -356,10 +352,6 @@ pub struct SweepCore {
     clock: fn() -> (TimeNs, u64),
     /// Memory-only mode: see the module doc.
     mem_only: bool,
-    /// Memory-only mode: the pids that were kernel threads in the last sweep, and the ones seen
-    /// in this sweep.
-    kthreads: FxHashSet<u32>,
-    kthreads_next: FxHashSet<u32>,
     stat_head: StatHead,
     /// The window of the last sweep.
     window: Option<CpuWindow>,
@@ -382,8 +374,6 @@ impl SweepCore {
             stat: PidStat::default(),
             clock: real_clock,
             mem_only: false,
-            kthreads: FxHashSet::default(),
-            kthreads_next: FxHashSet::default(),
         }
     }
 
@@ -473,8 +463,6 @@ impl SweepCore {
                     path: &mut self.path,
                     stat: &mut self.stat,
                     mem_only: self.mem_only,
-                    kthreads: &self.kthreads,
-                    kthreads_next: &mut self.kthreads_next,
                 };
                 if let Some((p, fds)) = sweep_one(ctx, dir, &mut core, per_pid) {
                     let dir = PidDir {
@@ -490,8 +478,6 @@ impl SweepCore {
 
         std::mem::swap(&mut self.prev, &mut self.next);
         self.next.clear();
-        std::mem::swap(&mut self.kthreads, &mut self.kthreads_next);
-        self.kthreads_next.clear();
         let live = &self.prev;
         self.status.retain(|k, _| live.contains_key(k));
         let (boot_ns, mono_ns) = (self.clock)();
@@ -622,8 +608,6 @@ struct SweepIo<'a> {
     path: &'a mut String,
     stat: &'a mut PidStat,
     mem_only: bool,
-    kthreads: &'a FxHashSet<u32>,
-    kthreads_next: &'a mut FxHashSet<u32>,
 }
 
 /// Reads `name` relative to `dir` into `buf` with one `read` (R-286). The per-process files are
@@ -687,12 +671,6 @@ fn pid_path<'p>(path: &'p mut String, pid: u32, file: &str) -> &'p str {
 /// between. The anchor is `statm`, or `status` in memory-only mode. Both are read every sweep, so
 /// the check costs no extra read. When the anchor cannot be opened or read, a second read of the
 /// kept `stat` fd does the check. The `/proc/<pid>` dirfd is opened before the anchor read too.
-///
-/// Memory-only mode skips the `status` read of a kernel thread whose next read is not due yet
-/// (see the module doc). A pid that was a kernel thread in the last sweep opens no anchor before
-/// `stat`; when its `status` is due after all (its tenth, or the pid now names another process)
-/// it is opened after `stat`, and a second read of the kept `stat` fd does the check. With no
-/// anchor read, that second read runs only when the `/proc/<pid>` dirfd was opened.
 fn sweep_one(
     ctx: &SweepCtx,
     dir: PidDir<'_>,
@@ -710,8 +688,6 @@ fn sweep_one(
         path,
         stat,
         mem_only,
-        kthreads,
-        kthreads_next,
     } = core;
     let mem_only = *mem_only;
     let (proc_fd, pid) = (dir.proc_fd, dir.pid);
@@ -722,9 +698,7 @@ fn sweep_one(
     } else {
         ("statm", SMALL_FILE_LIMIT)
     };
-    // A kernel thread in the last sweep most likely skips its status read now: no early anchor.
-    let anchor = (!(mem_only && kthreads.contains(&pid)))
-        .then(|| open_file(proc_fd, pid_path(path, pid, anchor_name)));
+    let anchor = open_file(proc_fd, pid_path(path, pid, anchor_name));
 
     let stat_read = open_file(proc_fd, pid_path(path, pid, "stat")).and_then(|fd| {
         read_fd(fd.as_fd(), &mut bufs.small, SMALL_FILE_LIMIT)?;
@@ -744,22 +718,15 @@ fn sweep_one(
         pid,
     };
     let kernel_thread = stat.flags & PF_KTHREAD != 0;
-    if mem_only && kernel_thread {
-        kthreads_next.insert(pid);
-    }
 
     let mut validity = FieldValidity::default();
     validity.set(ProcessField::Threads, Validity::Valid);
 
     // status: on first sight, when a status-only field is demanded, or for this sweep's tenth.
     // Otherwise the last read's values and validity stand (R-286). Memory-only mode reads it
-    // every sweep, as the anchor: the memory groups need its RssAnon and uid. A kernel thread has
-    // no memory lines, so it follows the full sweep's rule there too (tasklens-dlyfu).
+    // every sweep, as the anchor: the memory groups need its RssAnon and uid.
     let staggered = u64::from(pid) % STATUS_STAGGER == *sweep % STATUS_STAGGER;
-    let due = (mem_only && !kernel_thread)
-        || ctx.want_status_fields
-        || staggered
-        || !status_cache.contains_key(&key);
+    let due = mem_only || ctx.want_status_fields || staggered || !status_cache.contains_key(&key);
     if due {
         count(&STATUS_READS);
     }
@@ -799,26 +766,14 @@ fn sweep_one(
             .map_or(FdCount::Gone, |d| fd_count(d.as_fd()))
     });
 
-    // The anchor read ends the reads by pid (see the doc above). Memory-only mode reads no
-    // `status` for a kernel thread that is not due; an anchor opened after `stat` needs the check.
-    let late = anchor.is_none();
-    let anchor_read = (!mem_only || due).then(|| {
-        anchor
-            .unwrap_or_else(|| open_file(proc_fd, pid_path(path, pid, anchor_name)))
-            .and_then(|fd| read_fd(fd.as_fd(), &mut bufs.small, anchor_limit))
-    });
-    let check = match &anchor_read {
-        Some(Ok(())) => late,
-        Some(Err(_)) => true,
-        None => pid_dir.is_some(),
-    };
-    if check {
+    // The anchor read ends the reads by pid (see the doc above).
+    let anchor_read = anchor.and_then(|fd| read_fd(fd.as_fd(), &mut bufs.small, anchor_limit));
+    if anchor_read.is_err() {
         let check = PidDir {
             stat_fd: Some(stat_fd.as_fd()),
             ..dir
         };
-        // `bufs.small` may hold a good anchor read that is parsed below.
-        if !check.same_process(key.start_ticks, &mut bufs.cmdline) {
+        if !check.same_process(key.start_ticks, &mut bufs.small) {
             return None;
         }
     }
@@ -828,12 +783,12 @@ fn sweep_one(
     // status has no memory lines, so the fields stay Unsupported.
     let mut statm = PidStatm::default();
     if mem_only {
-        if let Some(read) = anchor_read {
-            store_status(status_cache.entry(key).or_default(), read, &bufs.small);
-        }
+        store_status(
+            status_cache.entry(key).or_default(),
+            anchor_read,
+            &bufs.small,
+        );
     } else {
-        // Outside memory-only mode the anchor is always read.
-        let anchor_read = anchor_read.unwrap_or(Ok(()));
         let statm_validity = match anchor_read.and_then(|()| parse_statm(&bufs.small, &mut statm)) {
             Ok(()) if kernel_thread => Validity::Unsupported,
             Ok(()) => Validity::Valid,
