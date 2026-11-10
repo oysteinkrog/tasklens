@@ -202,9 +202,26 @@ impl Fixture {
             entries.push(group_entry(NOISE, &format!("gpu:{OTHER_PCI}:exe:zz"), "zz"));
             views.push(self.view(kind, NOISE, 0.5));
             views.sort_by_key(|v| v.id);
+            // The catalog is indexed by position, so fill the gaps with inert entries.
+            entries.sort_by_key(|e| e.idx);
+            let mut dense: Vec<DeviceEntry> = Vec::new();
+            for e in entries {
+                while dense.len() < usize::from(e.idx.0) {
+                    let idx = DeviceIdx(dense.len() as u16);
+                    dense.push(entry(
+                        idx,
+                        DeviceIdentity::Gpu {
+                            uuid: [idx.0 as u8; 16],
+                            pci_bus_id: Arc::from(format!("filler:{}", idx.0)),
+                        },
+                        "filler",
+                    ));
+                }
+                dense.push(e);
+            }
             s.devices = Arc::new(DeviceCatalog {
                 version: s.devices.version + 1,
-                entries: entries.into(),
+                entries: dense.into(),
             });
             s.series = Arc::new(SeriesSet {
                 header: ComponentHeader {
@@ -237,7 +254,6 @@ impl Fixture {
 }
 
 fn gpu_totals(mem_total: u64) -> GpuTotals {
-    let off = || Metric::with(Validity::Unsupported);
     GpuTotals {
         groups: Default::default(),
         vram_groups: Default::default(),
@@ -246,34 +262,34 @@ fn gpu_totals(mem_total: u64) -> GpuTotals {
         mem_util_pct: Metric::valid(0.0),
         mem_used: Metric::valid(0),
         mem_total: Metric::valid(mem_total),
-        shared_used: off(),
-        shared_total: off(),
-        enc_pct: off(),
-        dec_pct: off(),
-        mem_reserved: off(),
-        enc_sessions: off(),
+        shared_used: off_metric(),
+        shared_total: off_metric(),
+        enc_pct: off_metric(),
+        dec_pct: off_metric(),
+        mem_reserved: off_metric(),
+        enc_sessions: off_metric(),
         enc_dec_shared: false,
-        temp_c: off(),
-        temp_edge_c: off(),
-        temp_junction_c: off(),
-        temp_mem_c: off(),
-        power_w: off(),
-        power_limit_w: off(),
-        clock_gfx_mhz: off(),
-        clock_mem_mhz: off(),
-        fan_pct: off(),
-        pcie_rx_bps: off(),
-        pcie_tx_bps: off(),
+        temp_c: off_metric(),
+        temp_edge_c: off_metric(),
+        temp_junction_c: off_metric(),
+        temp_mem_c: off_metric(),
+        power_w: off_metric(),
+        power_limit_w: off_metric(),
+        clock_gfx_mhz: off_metric(),
+        clock_mem_mhz: off_metric(),
+        fan_pct: off_metric(),
+        pcie_rx_bps: off_metric(),
+        pcie_tx_bps: off_metric(),
         engines: Default::default(),
         throttling: Default::default(),
         fdinfo_partial: false,
-        energy_since_boot: off(),
-        clock_video_mhz: off(),
-        pstate: off(),
-        clock_event_reasons: off(),
-        fan_rpm: off(),
-        pcie_gen: off(),
-        pcie_width: off(),
+        energy_since_boot: off_metric(),
+        clock_video_mhz: off_metric(),
+        pstate: off_metric(),
+        clock_event_reasons: off_metric(),
+        fan_rpm: off_metric(),
+        pcie_gen: off_metric(),
+        pcie_width: off_metric(),
         info: Arc::default(),
     }
 }
@@ -313,10 +329,6 @@ impl Rig<'_> {
                 .map(|b| (b.key.to_string(), b.kind, b.name.to_string(), b.value))
                 .collect()
         })
-    }
-
-    fn kinds(&mut self) -> Vec<BandKind> {
-        self.bands().into_iter().map(|b| b.1).collect()
     }
 
     fn settings(&mut self) -> Settings {
@@ -483,4 +495,8 @@ fn gpu_kinds_read_their_own_bands_and_save_picks(cx: &mut TestAppContext) {
         assert!(others.is_empty(), "{}", kind.name);
         assert!(s.cpu_by_app.colors.is_empty() && s.memory_by_app.colors.is_empty());
     }
+}
+
+fn off_metric<T: Copy + Default>() -> Metric<T> {
+    Metric::with(Validity::Unsupported)
 }
