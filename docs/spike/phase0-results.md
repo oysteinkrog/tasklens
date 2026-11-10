@@ -1956,6 +1956,111 @@ Over 30 s after a 10 s settle, the whole process used 31 ticks (1.03%). By threa
 The engine sources keep sampling while the window is minimized, with recording off. The
 fix is to turn demand off for every source when the main window is hidden or minimized.
 
+### Minimized CPU after the process count change (tasklens-dlyfu, 2026-11-10)
+
+Result: minimized CPU was a median 1.28% of one core after the change, against 1.38% before
+it in the same session. That is FAIL against the original limit of 0.3% and PASS against the
+relaxed limit of 1.5%. The change stops the CPU worker from listing every pid in /proc once
+per second while only device history needs it (`d5a15ce06`). The top cost, the memory group
+sweep of the Processes worker, is unchanged: it follows D-036, and changing it is not a lane
+decision.
+
+Setup: hidden nested KWin, 1920 x 1200, 60 Hz, session `dly`, app on the nested Xwayland
+(X11), private XDG folders, normal mode (no `--bench`). Recording is off (`history.enabled`
+false by default) and device history is on (`history.device_metrics` true by default). Each
+run starts the app, waits 8 s, minimizes the window with `xdotool windowminimize` (`WM_STATE`
+Iconic), waits 10 s, then counts `utime + stime` of the process and of each thread over 60 s
+(`CLK_TCK` 100). Bench slot lock and quiet rule: 1- and 5-minute load at most 8 at the start
+of each run, 1-minute load at most 8 at its end. "Before" is the tasklens-1ibm6 binary built
+at `450797fb9` (`cargo build --locked --profile perf -p tl-app --features bench`; later
+commits up to `601321da5` change only docs). "After" is the same command at `d5a15ce06`. The
+machine had 1,477 pids, 546 of them kernel threads. Runs, profiles and scripts:
+`/var/tmp/claude/dlyfu/`.
+
+These are perf-profile binaries, not the release package that wlf.19 measured (1.13%). I did
+not check why the before value here is higher than 1.13%. The pid count and the device history
+work merged since 2026-11-04 are likely causes (a guess).
+
+#### Profile before the change
+
+One before run at 03:08 (load 3.47, 1.38%), `sudo perf record -e cpu-clock -F 999
+--call-graph dwarf,16384` for 30 s after the count: 359 samples. Kernel frames were resolved
+from a copy of `/proc/kallsyms`.
+
+| Thread | Share of samples | What it does while minimized |
+|---|---|---|
+| `tl-src-Processes` | 36.5% | Memory group sweep every 10 s (D-036): `stat` and `status` for every pid, 4 to 5 ticks per sweep |
+| `tl-engine-0` | 21.5% | Reducer and snapshot publish, about once per second |
+| `tl-src-Cpu` | 17.3% | 1 Hz CPU sample; 88.7% of its samples are in `proc_pid_readdir` |
+| main thread (two threads) | 10.3% | Installs each snapshot in the hub; no `Window::draw` |
+| `tl-src-Net` | 6.1% | 1 Hz device sample |
+| `tl-src-Sensors` | 4.2% | 1 Hz device sample |
+| `tl-src-Disk` | 3.3% | 1 Hz device sample |
+
+The main thread does not render while minimized, so the hub goes hidden and the UI sends no
+page demand. What remains is the ADR-018 background demand for device history: the device
+series at 1 s and the memory group sweep every 10 s.
+
+Top cost named: the memory group sweep. Its kernel time splits into opening files (20.6% of
+the thread's samples), formatting `status` (16.0%), formatting `stat` (11.5%) and listing
+/proc (6.9%). Each read is one that D-036 and R-286 ask for, so the lane did not change it.
+
+The change went to the next cost, which had no consumer. The CPU worker's live stats count
+the pid directories in /proc on every 1 Hz tick for the process count. Device history does
+not record the process count: the load average (`CPU_LOAD1`) and the thread count come from
+`/proc/loadavg`, which is still read. Every surface that shows the process count (Performance
+CPU page, Overview, Information, sidebar, status bar) demands CPU.
+
+#### The change
+
+`CpuOpts` gets `process_count`. The CPU worker sets it on slow ticks only while `Demand.cpu`
+is not `Off`, and keeps the last count otherwise. A window that shows the count again reads
+it on the next slow tick, within 1 s. Tests: `live_stats_without_process_count_skip_the_proc_pass`
+(tl-collect) and `cpu_process_count_follows_cpu_demand` (tl-engine `lab_system_workers`).
+
+#### Gate runs
+
+| Run | Start | Load at start (1, 5, 15 min) | Ticks in 60 s | CPU | `tl-src-Cpu` ticks | `tl-src-Sensors` ticks |
+|---|---|---|---|---|---|---|
+| before 1 | 03:21:03 | 6.83, 5.75, 4.50 | 83 | 1.38% | 13 | 3 |
+| after 1 | 03:22:23 | 3.08, 4.78, 4.26 | 70 | 1.17% | 1 | 3 |
+| before 2 | 03:23:43 | 2.29, 4.22, 4.11 | 82 | 1.37% | 12 | 4 |
+| after 2 | 03:25:03 | 2.70, 3.98, 4.04 | 81 | 1.35% | 1 | 14 |
+| before 3 | 03:26:24 | 2.29, 3.57, 3.89 | 88 | 1.47% | 11 | 10 |
+| after 3 | 03:27:44 | 2.90, 3.41, 3.80 | 77 | 1.28% | 0 | 9 |
+| Median before | | | 83 | 1.38% | 12 | |
+| Median after | | | 77 | 1.28% | 1 | |
+
+All 6 runs counted. The other threads were steady in all 6 runs: `tl-src-Processes` 26 to 27
+ticks, `tl-engine-0` 16 to 17, the main thread 10 to 11, `tl-src-Net` 5, `tl-src-Disk` 2 to 3.
+The `tl-src-Sensors` thread varied from 3 to 14 ticks in both binaries and hides part of the
+saving: the CPU thread alone saved 11 ticks per minute (0.18% of one core), while the medians
+differ by 6 ticks. Two extra before runs are not in the table: 1.48% at 03:16 (load 2.00,
+taken while I edited code) and 1.68% at 03:17, which overlapped the after build (load 7.05
+at its end).
+
+| Gate | Original limit | Relaxed limit | Median after | Original | Relaxed |
+|---|---|---|---|---|---|
+| Process CPU, minimized, recording off | 0.3% | 1.5% | 1.28% | FAIL | PASS |
+
+#### Profile after the change
+
+One after run at 03:29 (load 2.75, 1.23%), same perf settings: 330 samples. `tl-src-Cpu`
+fell from 62 samples (17.3%) to 2 (0.6%). The shares of the rest: `tl-src-Processes` 41.2%,
+`tl-engine-0` 29.7%, main thread 13.3%, `tl-src-Net` 6.4%, `tl-src-Sensors` 4.2%,
+`tl-src-Disk` 2.7%.
+
+Reading:
+- 0.3% is 18 ticks per minute. The memory group sweep alone uses 26 to 27, so the original
+  limit needs a change to D-036 (the 10 s period or the reads per pid). That is an owner or
+  leader decision.
+- One lever inside D-036: in memory-only mode the sweep reads `status` for kernel threads too
+  (546 of the 1,477 pids here), which have no memory. Skipping it touches the pid reuse check
+  in `sweep_one`, which uses `status` as its anchor, so it needs its own bead.
+- The engine publishes a snapshot about once per second while hidden and the main thread
+  installs each one (`tl-engine-0` and the main thread together: 26 to 28 ticks per minute).
+  I did not look into how much of that work a hidden window needs.
+
 ### Start-up timing (tasklens-cr0.23, 2026-10-07)
 
 Result: the warm median `first_frame_ms` is 365 ms after this bead, against 385 ms before it.
