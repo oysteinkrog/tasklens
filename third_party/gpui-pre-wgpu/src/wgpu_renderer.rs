@@ -1,3 +1,4 @@
+use crate::half_float::pack_st;
 use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
@@ -55,9 +56,8 @@ fn build_path_vertices(
         let path_index = first_record + index as u32;
         vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
             xy_position: v.xy_position,
-            st_position: v.st_position,
+            st_position: pack_st(v.st_position),
             path_index,
-            _pad: 0,
         }));
     }
 }
@@ -122,16 +122,17 @@ struct PathSprite {
 
 /// One path vertex. The path's colour and clip bounds live once per path in
 /// a `PathRasterizationPath` record that `path_index` points at, so a vertex
-/// is 24 bytes instead of 104 (tasklens-3z9l1).
+/// is 16 bytes instead of 104 (tasklens-3z9l1, tasklens-1ibm6).
 #[derive(Clone, Debug)]
 #[repr(C)]
 struct PathRasterizationVertex {
     xy_position: Point<ScaledPixels>,
-    st_position: Point<f32>,
+    /// s and t as two f16 values, s in the low half (`pack_st`). The vertex
+    /// shader unpacks them with `unpack_st`.
+    st_position: u32,
     /// Index of the path's record in the bound record array. On the WebGL
     /// texture path it already includes the records' `first_instance`.
     path_index: u32,
-    _pad: u32,
 }
 
 /// The colour and clip bounds of one path, shared by all of its vertices.
@@ -1918,11 +1919,8 @@ impl WgpuRendererCore {
             records.len(),
             vertex_count,
         )?;
-        let record_binding = self.write_instance_binding(
-            "path_records_bind_group",
-            instance_offset,
-            records,
-        )?;
+        let record_binding =
+            self.write_instance_binding("path_records_bind_group", instance_offset, records)?;
 
         vertices.clear();
         vertices.reserve(vertex_count);
@@ -2075,8 +2073,8 @@ impl WgpuRendererCore {
         let (_, b_alignment, b_size) =
             self.instance_allocation_layout(b_len as u64 * b_stride, b_stride);
         let end_from = |start: u64| {
-            let b_start = (start.next_multiple_of(a_alignment) + a_size)
-                .next_multiple_of(b_alignment);
+            let b_start =
+                (start.next_multiple_of(a_alignment) + a_size).next_multiple_of(b_alignment);
             b_start + b_size
         };
         if end_from(*instance_offset) > self.instance_data_capacity {
@@ -2908,7 +2906,7 @@ mod tests {
     fn webgl_record_sizes_match_shader_word_strides() {
         assert_eq!(std::mem::size_of::<Quad>(), 40 * 4);
         assert_eq!(std::mem::size_of::<Shadow>(), 28 * 4);
-        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 6 * 4);
+        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 4 * 4);
         assert_eq!(std::mem::size_of::<PathRasterizationPath>(), 22 * 4);
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
         assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);

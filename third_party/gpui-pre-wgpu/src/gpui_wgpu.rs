@@ -1,4 +1,5 @@
 mod cosmic_text_system;
+mod half_float;
 mod wgpu_atlas;
 mod wgpu_context;
 mod wgpu_renderer;

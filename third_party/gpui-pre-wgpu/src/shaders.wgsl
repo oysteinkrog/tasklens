@@ -1048,11 +1048,33 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
 // --- path rasterization --- //
 
 // A vertex points at its path's record, which holds the colour and bounds
-// once per path (tasklens-3z9l1). 24 bytes (6 words) with the struct padding.
+// once per path (tasklens-3z9l1). 16 bytes (4 words): `st_position` holds s
+// and t as two f16 values, s in the low half (tasklens-1ibm6).
 struct PathRasterizationVertex {
     xy_position: vec2<f32>,
-    st_position: vec2<f32>,
+    st_position: u32,
     path_index: u32,
+}
+
+// The f32 value of the f16 in the low 16 bits of `bits`. Exact for every
+// finite f16; infinity and NaN are not decoded (`st` never holds them). Done
+// with integer operations because `unpack2x16float` needs the
+// SHADER_FLOAT16_IN_FLOAT32 capability, which WebGL lacks.
+fn f16_to_f32(bits: u32) -> f32 {
+    let sign = (bits & 0x8000u) << 16u;
+    let exponent = (bits >> 10u) & 0x1fu;
+    let mantissa = bits & 0x3ffu;
+    if (exponent == 0u) {
+        // Zero or a subnormal: mantissa * 2^-24.
+        let magnitude = f32(mantissa) * 5.9604644775390625e-8;
+        return bitcast<f32>(sign | bitcast<u32>(magnitude));
+    }
+    return bitcast<f32>(sign | ((exponent + 112u) << 23u) | (mantissa << 13u));
+}
+
+// s from the low half of a packed `st_position`, t from the high half.
+fn unpack_st(packed: u32) -> vec2<f32> {
+    return vec2<f32>(f16_to_f32(packed & 0xffffu), f16_to_f32(packed >> 16u));
 }
 
 struct PathRasterizationPath {
@@ -1075,7 +1097,7 @@ fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasteriza
 
     var out = PathRasterizationVarying();
     out.position = to_device_position_impl(v.xy_position);
-    out.st_position = v.st_position;
+    out.st_position = unpack_st(v.st_position);
     out.path_index = v.path_index;
     out.clip_distances = distance_from_clip_rect_impl(v.xy_position, path.bounds);
     return out;
