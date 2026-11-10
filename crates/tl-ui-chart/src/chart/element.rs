@@ -868,14 +868,14 @@ pub(super) fn paint_ramped<'a>(
 /// rectangle. A trailing partial triangle goes to `below`.
 ///
 /// Both outputs are reserved once at the full vertex count, so no buffer grows and is copied
-/// while it fills.
+/// while it fills. The split takes whole triangles ([`MovedPath::for_each_triangle`]) and holds
+/// back one, so a fill column is seen whole without a per-vertex buffer (tasklens-i5sgo).
 struct BandSplit {
     split: Pixels,
     below: Vec<PathVertex<Pixels>>,
     above: Vec<PathVertex<Pixels>>,
-    /// Up to two triangles not yet placed, so a fill column can be seen whole.
-    buf: [PathVertex<Pixels>; 6],
-    n: usize,
+    /// The last triangle, not yet placed: with the next one it may be a fill column.
+    pending: Option<[PathVertex<Pixels>; 3]>,
     run: Option<Run>,
 }
 
@@ -888,8 +888,8 @@ impl BandSplit {
     ) -> (Path<Pixels>, Path<Pixels>) {
         let mut s = Self::new(below.top(), path.len);
         let origin = path.bounds.origin;
-        path.for_each(|v| s.push(v));
-        let (b, a) = s.finish();
+        let rest = path.for_each_triangle(|t| s.push(t));
+        let (b, a) = s.finish(&rest);
         let band = |vertices, bounds| {
             let mut p = Path::new(origin);
             p.vertices = vertices;
@@ -900,37 +900,28 @@ impl BandSplit {
     }
 
     fn new(split: Pixels, len: usize) -> Self {
-        let blank = PathVertex {
-            xy_position: point(px(0.), px(0.)),
-            st_position: point(0., 0.),
-            content_mask: Default::default(),
-        };
         Self {
             split,
             below: Vec::with_capacity(len),
             above: Vec::with_capacity(len),
-            buf: std::array::from_fn(|_| blank.clone()),
-            n: 0,
+            pending: None,
             run: None,
         }
     }
 
+    /// Takes the next triangle: with the held one it is a whole fill column, or else the held
+    /// one is placed and this one is held.
     #[inline]
-    fn push(&mut self, v: PathVertex<Pixels>) {
-        self.buf[self.n] = v;
-        self.n += 1;
-        if self.n == 6 {
-            self.place();
-        }
-    }
-
-    /// Places the six buffered vertices: a whole fill column, or else the first triangle, which
-    /// leaves three.
-    fn place(&mut self) {
+    fn push(&mut self, t: [PathVertex<Pixels>; 3]) {
+        let Some(held) = self.pending.take() else {
+            self.pending = Some(t);
+            return;
+        };
         let split = self.split;
-        if let Some((x0, x1, bottom)) = full_column(&self.buf, split) {
-            self.above.extend_from_slice(&self.buf);
-            let st = self.buf[0].st_position;
+        if let Some((x0, x1, bottom)) = full_column(&held, &t, split) {
+            self.above.extend_from_slice(&held);
+            self.above.extend_from_slice(&t);
+            let st = held[0].st_position;
             match self.run.as_mut() {
                 Some(r) if r.right == x0 && r.bottom == bottom && r.st == st => r.right = x1,
                 _ => {
@@ -943,21 +934,15 @@ impl BandSplit {
                     });
                 }
             }
-            self.n = 0;
             return;
         }
-        self.triangle();
-        let [a, b, c, d, e, f] = &mut self.buf;
-        std::mem::swap(a, d);
-        std::mem::swap(b, e);
-        std::mem::swap(c, f);
-        self.n = 3;
+        self.triangle(&held);
+        self.pending = Some(t);
     }
 
-    /// Places the first buffered triangle in the bands it reaches.
-    fn triangle(&mut self) {
+    /// Places triangle `t` in the bands it reaches.
+    fn triangle(&mut self, t: &[PathVertex<Pixels>; 3]) {
         flush_run(&mut self.below, self.run.take(), self.split);
-        let t = &self.buf[..3];
         let ys = [t[0].xy_position.y, t[1].xy_position.y, t[2].xy_position.y];
         if ys[0].min(ys[1]).min(ys[2]) < self.split {
             self.above.extend_from_slice(t);
@@ -967,15 +952,17 @@ impl BandSplit {
         }
     }
 
-    /// The vertices of the lower and the upper band.
-    fn finish(mut self) -> (Vec<PathVertex<Pixels>>, Vec<PathVertex<Pixels>>) {
-        if self.n >= 3 {
-            self.triangle();
-            self.buf.rotate_left(3);
-            self.n -= 3;
+    /// The vertices of the lower and the upper band. `rest`, a last partial triangle, goes to
+    /// the lower band.
+    fn finish(
+        mut self,
+        rest: &[PathVertex<Pixels>],
+    ) -> (Vec<PathVertex<Pixels>>, Vec<PathVertex<Pixels>>) {
+        if let Some(held) = self.pending.take() {
+            self.triangle(&held);
         }
         flush_run(&mut self.below, self.run.take(), self.split);
-        self.below.extend_from_slice(&self.buf[..self.n]);
+        self.below.extend_from_slice(rest);
         (self.below, self.above)
     }
 }
@@ -1014,17 +1001,21 @@ fn flush_run(below: &mut Vec<PathVertex<Pixels>>, run: Option<Run>, split: Pixel
     }));
 }
 
-/// `(left x, right x, bottom y)` when `pair` is one fill segment as `FillMesh::band` emits it,
-/// `(t0, t1, b1), (t0, b1, b0)`, with vertical sides, a flat bottom below `split`, a top that
-/// is above `split` at both ends and one s and t for all six vertices. Its part below `split`
-/// is then the rectangle from `split` to the bottom.
-fn full_column(pair: &[PathVertex<Pixels>], split: Pixels) -> Option<(Pixels, Pixels, Pixels)> {
-    let p = |i: usize| pair[i].xy_position;
-    let (t0, t1, b1, b0) = (p(0), p(1), p(2), p(5));
-    let st = pair[0].st_position;
-    let column = p(3) == t0
-        && p(4) == b1
-        && pair.iter().all(|v| v.st_position == st)
+/// `(left x, right x, bottom y)` when the triangles `a` and `b` are one fill segment as
+/// `FillMesh::band` emits it, `(t0, t1, b1), (t0, b1, b0)`, with vertical sides, a flat bottom
+/// below `split`, a top that is above `split` at both ends and one s and t for all six vertices.
+/// Its part below `split` is then the rectangle from `split` to the bottom.
+fn full_column(
+    a: &[PathVertex<Pixels>; 3],
+    b: &[PathVertex<Pixels>; 3],
+    split: Pixels,
+) -> Option<(Pixels, Pixels, Pixels)> {
+    let (t0, t1, b1) = (a[0].xy_position, a[1].xy_position, a[2].xy_position);
+    let b0 = b[2].xy_position;
+    let st = a[0].st_position;
+    let column = b[0].xy_position == t0
+        && b[1].xy_position == b1
+        && a.iter().chain(b).all(|v| v.st_position == st)
         && t0.x < t1.x
         && b0.x == t0.x
         && b1.x == t1.x
@@ -1120,11 +1111,17 @@ mod tests {
     /// Splits `path` at `at` as `BandSplit` does: returns the upper band and keeps the lower
     /// band in `path`.
     fn split_triangles(path: &mut Path<Pixels>, at: f32) -> Path<Pixels> {
-        let mut s = BandSplit::new(px(at), path.vertices.len());
-        for v in path.vertices.drain(..) {
-            s.push(v);
-        }
-        let (below, above) = s.finish();
+        let src = std::mem::take(&mut path.vertices);
+        let mut s = BandSplit::new(px(at), src.len());
+        let whole = MovedPath::new(
+            path.bounds,
+            src.len(),
+            point(px(0.), px(0.)),
+            1.0,
+            std::iter::once(&src[..]),
+        );
+        let rest = whole.for_each_triangle(|t| s.push(t));
+        let (below, above) = s.finish(&rest);
         path.vertices = below;
         let mut out = Path::new(point(px(0.), px(0.)));
         out.vertices = above;

@@ -2195,7 +2195,7 @@ pub enum PieceLayer {
 
 /// A path's vertices to be moved into window logical px, not yet written: its bounds after the
 /// move, its vertex count and the source slices (physical px). A ramped paint splits the
-/// vertices between its two bands while it moves them, so each vertex is written once per
+/// triangles between its two bands while it moves them, so each vertex is written once per
 /// band it goes to (tasklens-3uosp).
 pub struct MovedPath<'a, S: Iterator<Item = &'a [PathVertex<Pixels>]>> {
     pub bounds: Bounds<Pixels>,
@@ -2228,14 +2228,40 @@ impl<'a, S: Iterator<Item = &'a [PathVertex<Pixels>]>> MovedPath<'a, S> {
         }
     }
 
-    /// Calls `f` with every vertex moved, in order.
-    pub fn for_each(self, mut f: impl FnMut(PathVertex<Pixels>)) {
+    /// Calls `f` with every triangle moved, in order, three vertices at a time. A triangle may
+    /// span two source slices. Returns the moved vertices of a last partial triangle (0 to 2).
+    /// A whole triangle per call keeps the band split free of per-vertex buffering
+    /// (tasklens-i5sgo).
+    pub fn for_each_triangle(
+        self,
+        mut f: impl FnMut([PathVertex<Pixels>; 3]),
+    ) -> SmallVec<[PathVertex<Pixels>; 2]> {
         let (inv, offset) = (self.inv, self.offset);
+        let mut part: SmallVec<[PathVertex<Pixels>; 2]> = SmallVec::new();
         for s in self.slices {
-            for v in s {
-                f(moved(v, inv, offset));
+            let mut s = s;
+            while !part.is_empty()
+                && let Some((v, tail)) = s.split_first()
+            {
+                s = tail;
+                if part.len() == 2 {
+                    f([part[0].clone(), part[1].clone(), moved(v, inv, offset)]);
+                    part.clear();
+                } else {
+                    part.push(moved(v, inv, offset));
+                }
             }
+            let (triangles, rest) = s.as_chunks::<3>();
+            for [a, b, c] in triangles {
+                f([
+                    moved(a, inv, offset),
+                    moved(b, inv, offset),
+                    moved(c, inv, offset),
+                ]);
+            }
+            part.extend(rest.iter().map(|v| moved(v, inv, offset)));
         }
+        part
     }
 
     /// The moved vertices as one path with the moved bounds. Each vertex is written once.
