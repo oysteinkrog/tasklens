@@ -2489,6 +2489,122 @@ Reading:
   cut-off 2026-11-09 attempt (`/var/tmp/claude/3uosp/n2/uncommitted-2026-11-09.patch`,
   also `stash@{0}`) are not needed for the gate and were not applied.
 
+### perf-cpu profile and the whole-triangle band split (tasklens-i5sgo, 2026-11-10)
+
+Result: no measurable change. The top cost at HEAD is GPUI rebuilding the element tree and
+layout of the whole Performance page on every frame, plus the copies that work makes. The
+one change this bead made is in our own chart code: the band split now takes whole
+triangles (`b6178088b`). With it, `perf-cpu` used a median 51.14% process CPU, frame CPU
+p50 8.35 ms, p99 11.42 ms and 8 missed frames. The same session measured 50.62%, 8.25 ms,
+11.80 ms and 9 missed frames before the change. All four values pass the relaxed limits
+and fail the original limits, as before.
+
+Setup: hidden nested KWin, 1920 x 1200, 60 Hz, session `ri5s`,
+`tasklens --bench <scene> --duration 30 --warmup 5`, bench slot lock, quiet rule (1- and
+5-minute load at most 8 at the start of each run, 1-minute load at most 8 at its end).
+"Before" is the 3uosp `f5b501bdb` binary (`bin-headgpu`; later commits up to `360cfd049`
+change only docs). "After" is `cargo build --locked --profile perf -p tl-app --features
+bench` at `b6178088b`, built at 01:52 in the main checkout. The two binaries ran
+interleaved, one run of each per round, from 01:53 to 02:01. All 12 runs counted, and all
+reports have `refresh_hz` 60, `pacing` off, `window_active` true and 0 stalls. Reports,
+profiles and scripts: `/var/tmp/claude/i5sgo/`.
+
+#### Profile before the change
+
+One `perf-cpu` run of the before binary at 01:34 (load 4.38), `sudo perf record -e
+cpu-clock -F 999 --call-graph dwarf,16384` for 15 s after warmup: 8,288 samples, 99.3% on
+the UI main thread, 51.6% process CPU. The call stacks did not unwind past the first
+frame, also with a 64 KB stack copy, so the shares are self time grouped by symbol name
+(`scripts/group.py` on `perf report --no-children --sort dso,sym`).
+
+| Area | Share | Main symbols |
+|---|---|---|
+| libc copy loop (`__memcpy_avx_unaligned_erms`) | 26.6% | see the copy callers below |
+| GPUI element tree and styles | 12.7% | `Interactivity`, `Style`, `Div`, `Window` |
+| Our band split and vertex move (`tl-ui-chart`) | 9.7% | `BandSplit::place` 3.6%, `MovedPath::for_each` 3.0%, `BandSplit::triangle` 2.7% |
+| taffy layout | 9.2% | `compute_flexbox_layout` 3.3% |
+| GPUI `BoundsTree::insert` | 7.3% | about 1,170 inserts per frame |
+| wgpu renderer | 6.2% | `WgpuRenderer::draw` 4.1% |
+| Other chart code (`tl-ui-chart`) | 5.4% | `piece_path` 2.1% |
+| GPUI scene and path paint | 4.4% | `Path::into_scaled` 2.0% |
+| NVIDIA driver | 3.1% | |
+| Text | 2.5% | |
+| Rest (malloc, hashing, our UI code, not matched) | 10.3% | |
+
+Copy callers, bpftrace probe on the libc copy entry for 15 s (copies of 256 bytes or more):
+4.03 GB in all. `wgpu_core::Queue::write_buffer` copied 1.21 GB of it (30%), about 1.4 MB
+per frame. Most of the rest comes from GPUI layout: `Interactivity::compute_style_internal`
+151 MB, taffy node inserts and drains 127 MB each, `Style::to_taffy` 64 MB.
+
+What one frame holds (bpftrace, 10 s): 52 paths with about 220,000 path vertices, 1,009
+quads and 752 glyph sprites.
+
+What renders each frame (bpftrace on every `render` function, 10 s, about 950 draws): the
+whole Performance page. Per draw, 13 `ChartView`s, 9 sidebar `CardView`s and `DeviceCard`s,
+`DeviceSidebar`, `PerformancePage`, `CpuPage`, `CpuCoreGridView`, 2 `MetricWidget`s, 2
+`FixedWidgetView`s, `WidgetEditor`, `WidgetContainer`, `DetailsView` and its
+`TlKeyValueGrid`. The bench runs with pacing off, so every chart notifies every frame.
+GPUI then marks every ancestor view dirty (`window.rs` `mark_view_dirty`), and a cached
+view that renders again renders all cached views below it (`view.rs`, `refreshing`).
+
+Top cost named: GPUI's per-frame rebuild of the page (element tree 12.7%, taffy 9.2%, and
+most of the 26.6% copy loop), which follows from the dirty-view rules above. The largest
+item in our own code is the band split and vertex move at 9.7%.
+
+#### The change
+
+The two larger items need a decision outside this bead. A GPUI patch (the rebuild,
+`BoundsTree::insert`) is the owner's call (ADR-014 rule 3, D-043). Drawing the widget editor
+and its container without `.cached()` is the open leader question from tasklens-wlf.40.
+Removing the band split, whose reason was the 104-byte GPUI vertex that tasklens-3z9l1
+removed, is against the owner decision of 2026-11-07 to keep it. So the one change is
+inside the split: `MovedPath::for_each_triangle` hands it three moved vertices at a time,
+and `BandSplit` holds back one triangle instead of buffering six vertices and swapping
+them. The split output is the same; the `tl-ui-chart` tests pass unchanged.
+
+#### Gate runs
+
+| Run | Start | Load at start (1, 5, 15 min) | Frames | Frame CPU p50 | p99 | Process CPU | Missed, long missed |
+|---|---|---|---|---|---|---|---|
+| before 1 | 01:53:12 | 7.84, 6.34, 6.28 | 1787 | 8.25 ms | 11.80 ms | 50.62% | 9, 0 |
+| after 1 | 01:53:48 | 5.70, 5.98, 6.16 | 1791 | 8.18 ms | 11.42 ms | 50.72% | 5, 0 |
+| before 2 | 01:54:24 | 4.49, 5.62, 6.03 | 1786 | 8.29 ms | 12.27 ms | 51.03% | 10, 0 |
+| after 2 | 01:55:00 | 4.42, 5.47, 5.96 | 1786 | 8.35 ms | 10.99 ms | 51.14% | 10, 0 |
+| before 3 | 01:55:36 | 3.70, 5.20, 5.85 | 1787 | 8.09 ms | 11.66 ms | 49.98% | 9, 0 |
+| after 3 | 01:56:13 | 3.08, 4.87, 5.72 | 1788 | 8.50 ms | 11.69 ms | 52.33% | 8, 0 |
+| Median before | | | 1787 | 8.25 ms | 11.80 ms | 50.62% | 9, 0 |
+| Median after | | | 1788 | 8.35 ms | 11.42 ms | 51.14% | 8, 0 |
+
+`static`, same session, 01:56 to 02:01: before 9.81, 9.63, 9.75 (median 9.75%), after
+9.55, 9.51, 9.64 (median 9.55%), 300 frames and 0 missed frames in every run.
+
+| Gate, `perf-cpu` | Original limit | Relaxed limit | Median after | Original | Relaxed |
+|---|---|---|---|---|---|
+| Frame CPU p50 | 1.0 ms | 14 ms | 8.35 ms | FAIL | PASS |
+| Frame CPU p99 | 2.0 ms | 20 ms | 11.42 ms | FAIL | PASS |
+| Missed frames | median 0, every run <= 2, long 0 | median <= 29, every run <= 37, long <= 2 | median 8, max run 10, long 0 | FAIL | PASS |
+| Process CPU | 30% | 84% | 51.14% | FAIL | PASS |
+
+#### Profile after the change
+
+One `perf-cpu` run of the after binary at 02:00 (load 3.80), same perf settings: 7,584
+samples. The band split and vertex move take 9.5% (before 9.7%): `BandSplit::triangle`
+3.3%, `MovedPath::for_each_triangle` 2.7%. The other areas match the before profile within
+one point (copy loop 27.5%, element tree 12.1%, taffy 10.1%, `BoundsTree::insert` 7.3%).
+
+Reading:
+- The split's cost is writing the vertices into the band paths, not the six-vertex buffer.
+  Taking whole triangles removed the buffer but not that cost. `static` may be about 2%
+  lower; its runs overlap, so I do not count that as shown.
+- Everything that scales with path vertices (our split and move, `into_scaled`, the
+  renderer's vertex records, the upload) adds up to about 20% of the samples. At about
+  220,000 vertices per frame for 32 per-core cells and 9 sidebar charts, the vertex count
+  is the lever for this part.
+- The largest cost is the page rebuild on every frame. With pacing on, the default since
+  tasklens-nosaa, charts notify only when they move one pixel, so real use has fewer of
+  these frames than this bench. The per-frame limits of 1.0 and 2.0 ms are out of reach
+  while every moving chart redraws the views above it.
+
 ## Decision
 
 All values are from the hidden nested KWin session at 60 Hz, the real target (owner, 2026-11-05).
