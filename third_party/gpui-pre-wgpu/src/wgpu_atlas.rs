@@ -262,6 +262,11 @@ impl WgpuAtlasTextures {
             let spare = self.storage.spares.swap_remove(ix);
             (spare.texture, spare.view)
         } else {
+            // No spare fits, so drop this kind's spares before creating. This
+            // keeps the bound on `WgpuAtlasStorage::spares`: without it, textures
+            // of different sizes inserted and removed one after the other would
+            // pile up as spares while only one is ever live.
+            self.storage.spares.retain(|spare| spare.kind != kind);
             self.textures_created += 1;
             self.create_texture(size, format)
         };
@@ -374,9 +379,13 @@ struct WgpuAtlasStorage {
     polychrome_textures: AtlasTextureList<WgpuAtlasTexture>,
     /// Emptied textures kept for reuse, so a later insert of the same kind, size
     /// and format takes one instead of making a new device texture
-    /// (tasklens-x12tr.2). Bound: a spare was a live texture, so the live plus
-    /// spare textures of one kind never exceed the peak live count of that kind.
-    /// A spare is dropped when it has not been reused for `SPARE_IDLE_RELEASE`
+    /// (tasklens-x12tr.2). Bound: the live plus spare textures of one kind never
+    /// exceed the peak live count of that kind. Emptying a texture and reusing a
+    /// spare each move one texture between live and spare, so the sum stays the
+    /// same. `push_texture` creates a texture only when no spare of the kind
+    /// fits, and then drops all spares of that kind first, so the sum becomes the
+    /// live count. A spare can be a different size than the next request needs;
+    /// it is then dropped, not kept. A spare is dropped when it has not been reused for `SPARE_IDLE_RELEASE`
     /// (60 s, checked in `drain_uploads`, once per drawn frame, so the check waits
     /// for the next frame when none is drawn), on `clear()` and on device loss,
     /// which replace the whole storage. Desktop platforms send no memory-pressure
@@ -728,6 +737,33 @@ mod tests {
             assert_eq!(spare_count(&atlas), 0);
         }
         assert_eq!(textures_created(&atlas), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn spares_stay_within_peak_live_count() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+
+        // Each image needs its own texture size (1024, 1500, 2100), and only one
+        // is live at a time, so at most one spare may stay.
+        for (round, side) in [700, 1500, 2100, 700, 1500].into_iter().enumerate() {
+            let key = image_key(round + 1);
+            let size = Size {
+                width: DevicePixels(side),
+                height: DevicePixels(side),
+            };
+            let bytes = vec![0; (side * side * 4) as usize];
+            atlas
+                .get_or_insert_with(key.clone(), &mut || {
+                    Ok(Some((size, Cow::Borrowed(bytes.as_slice()))))
+                })?
+                .expect("callback returns Some");
+            assert_eq!(spare_count(&atlas), 0);
+            atlas.remove(&key);
+            assert_eq!(spare_count(&atlas), 1);
+        }
+        assert_eq!(textures_created(&atlas), 5);
         Ok(())
     }
 
