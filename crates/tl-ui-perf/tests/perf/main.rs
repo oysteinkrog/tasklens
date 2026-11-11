@@ -18,6 +18,7 @@ mod overview;
 mod overview_cpu_widgets;
 mod overview_disk_widgets;
 mod overview_fixed_widgets;
+mod overview_gpu_widgets;
 mod overview_mem_widgets;
 mod overview_net_widgets;
 mod overview_range;
