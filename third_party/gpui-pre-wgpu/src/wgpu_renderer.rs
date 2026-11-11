@@ -369,6 +369,9 @@ pub struct WgpuRenderer {
     observed_error_generation: u64,
     last_surface_error: Option<String>,
     needs_redraw: bool,
+    /// Suboptimal frames that were presented without a reconfigure.
+    suboptimal_frames: u64,
+    reconfigures: crate::surface_frame::ReconfigureTracker,
 }
 
 impl WgpuRenderer {
@@ -585,6 +588,8 @@ impl WgpuRenderer {
             observed_error_generation: 0,
             last_surface_error: None,
             needs_redraw: false,
+            suboptimal_frames: 0,
+            reconfigures: Default::default(),
         })
     }
 }
@@ -1272,25 +1277,55 @@ impl WgpuRenderer {
             self.failed_frame_count = 0;
         }
 
-        let frame = match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+        use crate::surface_frame::{AcquireStatus, FrameAction, frame_action};
+        let (status, frame) = match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) => (AcquireStatus::Success, Some(f)),
+            wgpu::CurrentSurfaceTexture::Suboptimal(f) => (AcquireStatus::Suboptimal, Some(f)),
+            wgpu::CurrentSurfaceTexture::Lost => (AcquireStatus::Lost, None),
+            wgpu::CurrentSurfaceTexture::Outdated => (AcquireStatus::Outdated, None),
+            wgpu::CurrentSurfaceTexture::Timeout => (AcquireStatus::Timeout, None),
+            wgpu::CurrentSurfaceTexture::Occluded => (AcquireStatus::Occluded, None),
+            wgpu::CurrentSurfaceTexture::Validation => (AcquireStatus::Validation, None),
+        };
+        let frame_size = frame
+            .as_ref()
+            .map(|f| (f.texture.width(), f.texture.height()))
+            .unwrap_or((0, 0));
+        let configured = (self.surface_config.width, self.surface_config.height);
+        let frame = match (frame_action(status, frame_size, configured), frame) {
+            (FrameAction::Present, Some(frame)) => {
+                if status == AcquireStatus::Suboptimal {
+                    self.suboptimal_frames += 1;
+                    log::debug!(
+                        target: "tasklens::frame",
+                        "surface suboptimal, frame presented ({} so far)",
+                        self.suboptimal_frames
+                    );
+                }
+                frame
+            }
+            (FrameAction::Reconfigure, frame) => {
                 // Textures must be destroyed before the surface can be reconfigured.
                 drop(frame);
                 surface.configure(&core.resources.device, &self.surface_config);
+                log::debug!(
+                    target: "tasklens::frame",
+                    "surface reconfigured after {status:?} ({} so far)",
+                    self.reconfigures.total + 1
+                );
+                if self.reconfigures.record(std::time::Instant::now()) {
+                    log::warn!(
+                        target: "tasklens::frame",
+                        "surface reconfigured more than 10 times in 60 s"
+                    );
+                }
                 return false;
             }
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                surface.configure(&core.resources.device, &self.surface_config);
-                return false;
-            }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return false;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
+            (FrameAction::Invalid, _) => {
                 self.last_surface_error = Some("Surface texture validation error".to_string());
                 return false;
             }
+            _ => return false,
         };
 
         // The acquired texture is the authority on frame dimensions; the surface
