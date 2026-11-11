@@ -996,3 +996,676 @@ fn page_gpu_hotplug_default_flow_keeps_settings(cx: &mut TestAppContext) {
     assert_eq!(placed(&mut r), before, "the same widgets come back");
     assert!(r.saved(1).is_none(), "a hotplug writes no entry");
 }
+
+/// tasklens-g00wx.4: the Usage, Load by app and VRAM by app switch, the `gpu_by_app` and
+/// `vram_by_app` widgets, their "Groups shown" items, legend click, demand, Add Widget, render
+/// contract and the rebuild sweep.
+mod by_app {
+    use gpui_kit::Focusable as _;
+    use tl_model::ids::{MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::snapshot::{ComponentHeader, SeriesSet};
+    use tl_model::system::MemGroupBand;
+    use tl_model::time::now_boot_ns;
+    use tl_ui_overview::overview::memory_apps::{AppsChart, AppsMetric, LEGEND_ID};
+    use tl_ui_perf::performance::gpu::{GpuView, VIEW_SWITCH_ID, layout_view};
+    use tl_ui_perf_core::core::actions::{PerfSetGpuByAppTopN, PerfSetVramByAppTopN};
+    use tl_ui_settings::layout_pages::gpu_page_for_preset;
+
+    use super::*;
+
+    const MIB: f32 = 1_048_576.;
+    /// GPU A's PCI bus id: the prefix of its group bands' device keys.
+    const PCI_A: &str = "0000:01:00.0";
+    /// Groups `exe:p0` to `exe:p3`.
+    const GROUPS: u16 = 4;
+    const OTHER_DEV: DeviceIdx = DeviceIdx(30);
+    const DRIVER_DEV: DeviceIdx = DeviceIdx(31);
+
+    fn group_dev(i: u16) -> DeviceIdx {
+        DeviceIdx(20 + i)
+    }
+
+    /// A band device of GPU A: `gpu:<pci>:<key>`.
+    fn band_entry(idx: DeviceIdx, key: &str, name: &str) -> DeviceEntry {
+        let key = format!("gpu:{PCI_A}:{key}");
+        DeviceEntry {
+            idx,
+            identity: DeviceIdentity::MemGroup {
+                key: Arc::from(key.as_str()),
+            },
+            generation: 0,
+            display_name: Arc::from(name),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(format!("memgroup:{key}")),
+            net_kind: None,
+            hot_c: None,
+        }
+    }
+
+    /// The two GPUs and GPU A's bands, indexed by position as the catalog reads them, the gaps
+    /// filled with inert bands.
+    fn group_catalog(version: u64) -> DeviceCatalog {
+        let mut entries = vec![entry(GPU_A, 1, true), entry(GPU_B, 2, true)];
+        for i in 0..GROUPS {
+            entries.push(band_entry(
+                group_dev(i),
+                &format!("exe:p{i}"),
+                &format!("p{i}"),
+            ));
+        }
+        entries.push(band_entry(OTHER_DEV, "other", "Other apps"));
+        entries.push(band_entry(DRIVER_DEV, "driver", "Other / driver"));
+        entries.sort_by_key(|e| e.idx);
+        let mut dense: Vec<DeviceEntry> = Vec::new();
+        for e in entries {
+            while dense.len() < usize::from(e.idx.0) {
+                let n = dense.len() as u16;
+                dense.push(DeviceEntry {
+                    idx: DeviceIdx(n),
+                    identity: DeviceIdentity::MemGroup {
+                        key: Arc::from(format!("filler:{n}")),
+                    },
+                    generation: 0,
+                    display_name: Arc::from("filler"),
+                    present: false,
+                    parent: None,
+                    persistent_key: Arc::from(format!("filler:{n}")),
+                    net_kind: None,
+                    hot_c: None,
+                });
+            }
+            dense.push(e);
+        }
+        DeviceCatalog {
+            version,
+            entries: dense.into(),
+        }
+    }
+
+    /// One GPU load and one VRAM sample a second for the last minute on GPU A: group `exe:p<i>`
+    /// at `gpu[i]` percent and `vram[i]` MiB (a group past a list has no series of it), "Other
+    /// apps" at 1% and 64 MiB, "Other / driver" at 2% and 128 MiB. The catalog changes once.
+    fn publish_groups(engine: &FakeEngine, gpu: &[f32], vram: &[f32]) {
+        const PERIOD: u64 = 1_000_000_000;
+        let now = now_boot_ns();
+        engine.publish_with(|s| {
+            if s.devices.entries.len() < 20 {
+                s.devices = Arc::new(group_catalog(s.devices.version + 1));
+            }
+            let version = s.series.header.version + 1;
+            let line = |device: DeviceIdx, metric: MetricId, value: f32| {
+                Arc::new(SeriesView {
+                    id: SeriesId { device, metric },
+                    version,
+                    period_ns: PERIOD,
+                    samples: (0..60u64)
+                        .map(|k| Sample::valid(now - (59 - k) * PERIOD, value))
+                        .collect::<Vec<_>>()
+                        .into(),
+                })
+            };
+            let mut views = Vec::new();
+            for (list, metric, scale) in [
+                (gpu, MetricId::GPU_GROUP, 1.),
+                (vram, MetricId::VRAM_GROUP, MIB),
+            ] {
+                for (i, v) in list.iter().enumerate() {
+                    views.push(line(group_dev(i as u16), metric, v * scale));
+                }
+            }
+            for (device, g, v) in [(OTHER_DEV, 1., 64.), (DRIVER_DEV, 2., 128.)] {
+                views.push(line(device, MetricId::GPU_GROUP, g));
+                views.push(line(device, MetricId::VRAM_GROUP, v * MIB));
+            }
+            views.sort_by_key(|v| v.id);
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+            let bands = |n: usize| {
+                Arc::new(
+                    (0..n as u16)
+                        .map(|i| MemGroupBand {
+                            key: Arc::from(format!("exe:p{i}")),
+                            name: Arc::from(format!("p{i}")),
+                            process_count: 2,
+                            device: group_dev(i),
+                            wine: None,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let mut a = totals_a();
+            a.groups = bands(gpu.len());
+            a.vram_groups = bands(vram.len());
+            sys.gpus = Arc::from(vec![(GPU_A, a), (GPU_B, totals_b())]);
+        });
+    }
+
+    /// Performance settings whose GPU A entry is the flow layout of `view`.
+    fn view_perf(view: GpuView) -> PerformanceSettings {
+        let mut perf = PerformanceSettings::default();
+        let layout = gpu_page_for_preset(&perf, &container(1), view.preset());
+        perf.layouts.set(layout);
+        perf
+    }
+
+    fn page_view(r: &mut Rig) -> Option<GpuView> {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| page.read(cx).view())
+    }
+
+    /// Clicks the switch button of `id` (`usage`, `gpu-apps` or `vram-apps`).
+    fn click_switch(r: &mut Rig, id: &str) {
+        let at = r.bounds(format!("{VIEW_SWITCH_ID}-{id}")).center();
+        r.vcx.simulate_click(at, Modifiers::none());
+        draw(r.vcx);
+    }
+
+    fn fixed_id(r: &mut Rig, kind: FixedWidget) -> Option<u32> {
+        let container = r.container();
+        r.vcx.update(|_, cx| {
+            container
+                .read(cx)
+                .layout()
+                .widgets
+                .iter()
+                .find(|w| w.content == WidgetContent::Fixed(kind.clone()))
+                .map(|w| w.id)
+        })
+    }
+
+    /// The entity id of the content view fixed widget `id` draws.
+    fn content_of(r: &mut Rig, id: u32) -> Option<EntityId> {
+        let container = r.container();
+        r.vcx.update(|_, cx| {
+            let fixed = container.read(cx).fixed(id).cloned()?;
+            fixed.read(cx).content().map(|v| v.entity_id())
+        })
+    }
+
+    fn charts(r: &mut Rig) -> (Option<Entity<AppsChart>>, Option<Entity<AppsChart>>) {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            (p.gpu_apps(), p.vram_apps())
+        })
+    }
+
+    fn demand(r: &mut Rig) -> (bool, bool) {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let d = page.read(cx).demand_part(cx);
+            (d.process_top, d.gpu_process)
+        })
+    }
+
+    /// The page menu's item labels.
+    fn menu_names(r: &mut Rig) -> Vec<String> {
+        let page = r.page.clone();
+        r.vcx.update(|window, cx| {
+            let focus = page.read(cx).focus_handle(cx);
+            let menu =
+                tl_ui_kit::components::menu::TlMenu::build(window, cx, focus, |menu, w, cx| {
+                    page.update(cx, |p, cx| p.menu_items(menu, w, cx))
+                });
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .map(|e| e.label.map(|l| l.to_string()).unwrap_or_default())
+                .collect()
+        })
+    }
+
+    /// Each segment of the switch sets the page's preset and its parts: GPU load by app in
+    /// the engine grid's place, VRAM by app in the Memory chart's place, each for this page's
+    /// GPU. Temperature, Power, Clocks, Details and Displays keep their ids, and the old key
+    /// stays.
+    #[gpui_kit::test]
+    fn page_gpu_view_switch(cx: &mut TestAppContext) {
+        let perf = PerformanceSettings {
+            gpu_optional_graphs: vec![GpuOptionalGraph::Power, GpuOptionalGraph::Clocks],
+            ..PerformanceSettings::default()
+        };
+        let mut r = open(cx, perf, 1200., 1400.);
+        publish_groups(&r.engine, &[20., 10., 5.], &[512., 256., 128.]);
+        draw(r.vcx);
+        assert_eq!(page_view(&mut r), Some(GpuView::Usage));
+        let kept = [
+            r.metric_id("temp"),
+            r.metric_id("power"),
+            r.metric_id("clocks"),
+            fixed_id(&mut r, FixedWidget::Details).expect("details"),
+            fixed_id(&mut r, FixedWidget::GpuDisplays).expect("displays"),
+        ];
+        let words: Vec<String> = {
+            let page = r.page.clone();
+            r.vcx.update(|_, cx| {
+                GpuView::ALL
+                    .map(|v| page.read(cx).words().view(v).to_string())
+                    .to_vec()
+            })
+        };
+        assert_eq!(words, ["Usage", "Load by app", "VRAM by app"]);
+        for (id, view, first, second) in [
+            (
+                "gpu-apps",
+                GpuView::GpuApps,
+                "fixed gpu_by_app",
+                "metric memory",
+            ),
+            (
+                "vram-apps",
+                GpuView::VramApps,
+                "fixed gpu_engine_grid",
+                "fixed vram_by_app",
+            ),
+            (
+                "usage",
+                GpuView::Usage,
+                "fixed gpu_engine_grid",
+                "metric memory",
+            ),
+        ] {
+            click_switch(&mut r, id);
+            let saved = r.saved(1).expect("the page's entry");
+            assert_eq!(layout_view(&saved), Some(view), "{id}");
+            let describe = |w: &WidgetSetting| match &w.content {
+                WidgetContent::Fixed(k) => format!("fixed {}", k.name()),
+                c => format!("metric {}", c.metric_key().map_or("", |k| k.as_str())),
+            };
+            assert_eq!(describe(&saved.widgets[0]), first, "{id}");
+            assert_eq!(describe(&saved.widgets[1]), second, "{id}");
+            assert_eq!(
+                metrics_of(&saved)[metrics_of(&saved).len() - 3..],
+                ["temp", "power", "clocks"],
+                "{id}: Power and Clocks stay"
+            );
+            for want in kept {
+                assert!(
+                    saved.widgets.iter().any(|w| w.id == want),
+                    "{id}: id {want}"
+                );
+            }
+            assert_eq!(page_view(&mut r), Some(view), "{id}");
+            let (gpu, vram) = charts(&mut r);
+            match view {
+                GpuView::GpuApps => {
+                    let gpu = gpu.expect("GPU load by app");
+                    let metric = r.vcx.update(|_, cx| gpu.read(cx).metric());
+                    assert_eq!(metric, AppsMetric::Gpu(GPU_A));
+                    let w = fixed_id(&mut r, FixedWidget::GpuByApp).expect("the widget");
+                    assert_eq!(content_of(&mut r, w), Some(gpu.entity_id()));
+                    let apps = r.bounds(widget_id(&container(1), w));
+                    assert!(near(apps.size.height, 300.), "{apps:?}");
+                }
+                GpuView::VramApps => {
+                    let vram = vram.expect("VRAM by app");
+                    let metric = r.vcx.update(|_, cx| vram.read(cx).metric());
+                    assert_eq!(metric, AppsMetric::Vram(GPU_A));
+                    let w = fixed_id(&mut r, FixedWidget::VramByApp).expect("the widget");
+                    assert_eq!(content_of(&mut r, w), Some(vram.entity_id()));
+                    // Temperature alone takes the full width under it.
+                    let apps = r.bounds(widget_id(&container(1), w));
+                    let temp = r.bounds(widget_id(&container(1), kept[0]));
+                    assert!(
+                        near(temp.size.width, f32::from(apps.size.width)),
+                        "{temp:?}"
+                    );
+                    assert!(near(temp.top() - apps.bottom(), 8.), "{temp:?}");
+                }
+                GpuView::Usage => {
+                    assert!(fixed_id(&mut r, FixedWidget::GpuByApp).is_none());
+                    assert!(fixed_id(&mut r, FixedWidget::VramByApp).is_none());
+                }
+            }
+        }
+        r.vcx.update(|_, cx| {
+            assert_eq!(
+                TlSettings::settings(cx).performance.gpu_optional_graphs,
+                [GpuOptionalGraph::Power, GpuOptionalGraph::Clocks],
+                "the old key stays"
+            );
+        });
+    }
+
+    /// The view is saved per GPU: GPU A set to VRAM by app is read by a new page of GPU A,
+    /// and GPU B stays on Usage with no entry.
+    #[gpui_kit::test]
+    fn page_gpu_view_saved_per_device(cx: &mut TestAppContext) {
+        let mut r = open(cx, PerformanceSettings::default(), 1200., 900.);
+        let page = r.page.clone();
+        r.vcx
+            .update(|_, cx| page.update(cx, |p, cx| p.set_view(GpuView::VramApps, cx)));
+        draw(r.vcx);
+        let saved = r.saved(1).expect("GPU A's entry");
+        assert_eq!(layout_view(&saved), Some(GpuView::VramApps));
+        assert!(r.saved(2).is_none(), "GPU B has no entry");
+        let (a, b) = (r.build_page(1), r.build_page(2));
+        let views = r.vcx.update(|_, cx| (a.read(cx).view(), b.read(cx).view()));
+        assert_eq!(views, (Some(GpuView::VramApps), Some(GpuView::Usage)));
+    }
+
+    /// With a grid layout the switch sits in the header with no segment on, and a pick asks
+    /// "Replace your widgets?" first: nothing is written until the dialog is confirmed.
+    #[gpui_kit::test]
+    fn page_gpu_view_grid_asks(cx: &mut TestAppContext) {
+        let cell = WidgetCell {
+            col: 0,
+            row: 0,
+            cols: 12,
+            rows: 6,
+        };
+        let mut perf = PerformanceSettings::default();
+        let grid = grid_layout(
+            1,
+            vec![metric(
+                1,
+                "memory",
+                FormSet::CHART | FormSet::VALUE | FormSet::LABEL,
+                Some(cell),
+            )],
+        );
+        perf.layouts.set(grid.clone());
+        let mut r = open(cx, perf, 1200., 900.);
+        assert_eq!(page_view(&mut r), None);
+        let switch = r.bounds(VIEW_SWITCH_ID.to_owned());
+        let body = r.bounds(widget_id(&container(1), 1));
+        assert!(
+            switch.bottom() <= body.top(),
+            "in the header: {switch:?} {body:?}"
+        );
+        let windows = r.vcx.update(|_, cx| cx.windows().len());
+        click_switch(&mut r, "gpu-apps");
+        assert_eq!(
+            r.vcx.update(|_, cx| cx.windows().len()),
+            windows + 1,
+            "the dialog opens"
+        );
+        assert_eq!(r.saved(1), Some(grid), "nothing written yet");
+        assert_eq!(page_view(&mut r), None);
+    }
+
+    /// "Groups shown" sets `top_n` of each placed chart: one item while one chart is placed,
+    /// "GPU by app groups shown" and "VRAM by app groups shown" while both are. Without a
+    /// by-app chart there is none.
+    #[gpui_kit::test]
+    fn page_gpu_by_app_groups_shown(cx: &mut TestAppContext) {
+        let mut r = open(cx, PerformanceSettings::default(), 1200., 1400.);
+        let names = menu_names(&mut r);
+        assert!(
+            !names.iter().any(|n| n.contains("roups shown")),
+            "{names:?}"
+        );
+        let page = r.page.clone();
+        r.vcx
+            .update(|_, cx| page.update(cx, |p, cx| p.set_view(GpuView::GpuApps, cx)));
+        draw(r.vcx);
+        let names = menu_names(&mut r);
+        assert_eq!(names.first().map(String::as_str), Some("Groups shown"));
+        // Both charts: VRAM by app in the Memory chart's place of the gpu_apps layout.
+        r.update_perf(|perf| {
+            let mut l = gpu_page_for_preset(perf, &container(1), GpuView::GpuApps.preset());
+            l.widgets[1].content = WidgetContent::Fixed(FixedWidget::VramByApp);
+            perf.layouts.set(l);
+        });
+        let names = menu_names(&mut r);
+        assert_eq!(
+            names[..2],
+            ["GPU by app groups shown", "VRAM by app groups shown"],
+            "{names:?}"
+        );
+        let focus = r.vcx.update(|_, cx| page.read(cx).focus_handle(cx));
+        r.vcx.update(|window, cx| focus.focus(window, cx));
+        r.vcx.dispatch_action(PerfSetGpuByAppTopN { count: 5 });
+        r.vcx.dispatch_action(PerfSetVramByAppTopN { count: 15 });
+        draw(r.vcx);
+        let top = r.vcx.update(|_, cx| {
+            let p = &TlSettings::settings(cx).performance;
+            (p.gpu_by_app.top_n, p.vram_by_app.top_n)
+        });
+        assert_eq!(top, (5, 15));
+    }
+
+    /// Clicking a group's legend row opens Processes filtered to that group; "Other apps" and
+    /// "Other / driver" open nothing.
+    #[gpui_kit::test]
+    fn page_gpu_by_app_legend_click(cx: &mut TestAppContext) {
+        let mut r = open(cx, view_perf(GpuView::GpuApps), 1200., 900.);
+        publish_groups(&r.engine, &[20., 10., 5.], &[]);
+        draw(r.vcx);
+        let apps = charts(&mut r).0.expect("GPU load by app");
+        let rows = r.vcx.update(|_, cx| apps.read(cx).bands().len());
+        let click = |r: &mut Rig, row: usize| {
+            let at = r.bounds(format!("{LEGEND_ID}-{row}")).center();
+            r.vcx.simulate_click(at, Modifiers::none());
+            draw(r.vcx);
+            r.vcx.read_entity(&apps, |a, _| {
+                a.last_open
+                    .as_ref()
+                    .map(|(key, name)| (key.to_string(), name.to_string()))
+            })
+        };
+        let opened: Vec<Option<(String, String)>> =
+            (0..rows).map(|row| click(&mut r, row)).collect();
+        let groups: Vec<&(String, String)> = opened.iter().flatten().collect();
+        assert!(
+            groups.contains(&&("exe:p2".to_owned(), "p2".to_owned())),
+            "{opened:?}"
+        );
+        assert!(
+            !groups.iter().any(|(k, _)| k == "other" || k == "driver"),
+            "{opened:?}"
+        );
+    }
+
+    /// A placed by-app chart asks for the process sweep and the per-process GPU rows; Usage
+    /// asks for neither.
+    #[gpui_kit::test]
+    fn page_gpu_by_app_demand(cx: &mut TestAppContext) {
+        let mut r = open(cx, PerformanceSettings::default(), 1200., 900.);
+        assert_eq!(demand(&mut r), (false, false), "Usage");
+        let page = r.page.clone();
+        for (view, want) in [
+            (GpuView::GpuApps, (true, true)),
+            (GpuView::VramApps, (true, true)),
+            (GpuView::Usage, (false, false)),
+        ] {
+            r.vcx
+                .update(|_, cx| page.update(cx, |p, cx| p.set_view(view, cx)));
+            draw(r.vcx);
+            assert_eq!(demand(&mut r), want, "{view:?}");
+        }
+    }
+
+    /// Edit Widgets on the GPU page lists GPU load by app and VRAM by app; added and applied
+    /// they save with their cells, draw the page's charts and ask for the per-process GPU rows.
+    #[gpui_kit::test]
+    fn page_gpu_by_app_add_widget(cx: &mut TestAppContext) {
+        let mut r = open(cx, PerformanceSettings::default(), 1200., 1400.);
+        let page = r.page.clone();
+        let editor = r.vcx.update(|_, cx| page.read(cx).editor().clone());
+        r.vcx
+            .update(|window, cx| editor.update(cx, |e, cx| e.start(window, cx)));
+        draw(r.vcx);
+        let offered = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                editor
+                    .read(cx)
+                    .fixed_adds(cx)
+                    .iter()
+                    .map(|a| (a.name.to_string(), a.label.to_string()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let adds = offered(&mut r);
+        for (name, label) in [
+            ("gpu_by_app", "GPU load by app"),
+            ("vram_by_app", "VRAM by app"),
+        ] {
+            assert!(
+                adds.contains(&(name.to_owned(), label.to_owned())),
+                "{adds:?}"
+            );
+        }
+        let mut added = Vec::new();
+        for name in ["gpu_by_app", "vram_by_app"] {
+            added.push(
+                r.vcx
+                    .update(|_, cx| editor.update(cx, |e, cx| e.add_fixed(name, cx)))
+                    .expect(name),
+            );
+            draw(r.vcx);
+        }
+        let adds = offered(&mut r);
+        assert!(
+            !adds.iter().any(|(n, _)| n.ends_with("_by_app")),
+            "a second copy is not offered: {adds:?}"
+        );
+        assert!(r.vcx.update(|_, cx| editor.update(cx, |e, cx| e.apply(cx))));
+        draw(r.vcx);
+        let saved = r.saved(1).expect("the page's entry");
+        assert!(saved.preset.is_none(), "a grid layout");
+        for (id, kind) in added
+            .iter()
+            .zip([FixedWidget::GpuByApp, FixedWidget::VramByApp])
+        {
+            let w = saved.widgets.iter().find(|w| w.id == *id).expect("saved");
+            assert_eq!(w.content, WidgetContent::Fixed(kind));
+            assert!(w.cell.is_some(), "it has its cells");
+        }
+        let (gpu, vram) = charts(&mut r);
+        let (gpu, vram) = (gpu.expect("gpu chart"), vram.expect("vram chart"));
+        assert_eq!(content_of(&mut r, added[0]), Some(gpu.entity_id()));
+        assert_eq!(content_of(&mut r, added[1]), Some(vram.entity_id()));
+        assert_eq!(demand(&mut r), (true, true));
+    }
+
+    /// Render contract: repeated samples with the same bands never notify the page or its
+    /// container and make or drop no entity; a sample in which a group enters the top N
+    /// notifies only the chart, once.
+    #[gpui_kit::test]
+    fn page_gpu_by_app_render_contract(cx: &mut TestAppContext) {
+        let mut r = open(cx, view_perf(GpuView::GpuApps), 1200., 900.);
+        let container = r.container();
+        let page = r.page.clone();
+        publish_groups(&r.engine, &[20., 10., 5.], &[]);
+        draw(r.vcx);
+        let chart = charts(&mut r).0.expect("the chart");
+        let bands = |r: &mut Rig| r.vcx.update(|_, cx| chart.read(cx).bands().len());
+        let shown_bands = bands(&mut r);
+        let notified = Rc::new(Cell::new(0u32));
+        let _watch = {
+            let notified = Rc::clone(&notified);
+            r.vcx
+                .update(|_, cx| cx.observe(&chart, move |_, _| notified.set(notified.get() + 1)))
+        };
+        let counts = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                (
+                    page.read(cx).notify_count.get(),
+                    container.read(cx).notify_count.get(),
+                )
+            })
+        };
+        let mut life = Lifecycle::new(&mut r);
+        let entities = shown_entities(&mut r, &mut life);
+        let before = counts(&mut r);
+        for _ in 0..3 {
+            publish_groups(&r.engine, &[20., 10., 5.], &[]);
+            draw(r.vcx);
+        }
+        assert_eq!(
+            counts(&mut r),
+            before,
+            "the page and container never notify"
+        );
+        assert_eq!(life.counts(), (0, 0), "no entity made or dropped");
+        assert_eq!(bands(&mut r), shown_bands, "the same bands");
+
+        notified.set(0);
+        publish_groups(&r.engine, &[20., 10., 5., 4.], &[]);
+        draw(r.vcx);
+        assert_eq!(bands(&mut r), shown_bands + 1, "p3 has its own band");
+        assert_eq!(notified.get(), 1, "the chart notifies once");
+        assert_eq!(
+            counts(&mut r),
+            before,
+            "the page and container never notify"
+        );
+        assert_eq!(life.counts(), (0, 0), "no entity made or dropped");
+        assert_eq!(
+            shown_entities(&mut r, &mut life),
+            entities,
+            "the same entities"
+        );
+    }
+
+    /// Every band rebuild keeps the values and process counts (the g00wx.2 decision): after a
+    /// window resize and after a view switch away and back, the bands of both charts are the
+    /// same right after the trigger, before any new samples.
+    #[gpui_kit::test]
+    fn gpu_by_app_rebuild_keeps_values(cx: &mut TestAppContext) {
+        let mut r = open(cx, view_perf(GpuView::GpuApps), 1200., 900.);
+        publish_groups(&r.engine, &[20., 10., 5.], &[512., 256., 128.]);
+        draw(r.vcx);
+        let page = r.page.clone();
+        r.vcx
+            .update(|_, cx| page.update(cx, |p, cx| p.set_view(GpuView::VramApps, cx)));
+        draw(r.vcx);
+        r.vcx
+            .update(|_, cx| page.update(cx, |p, cx| p.set_view(GpuView::GpuApps, cx)));
+        draw(r.vcx);
+        let (gpu, vram) = charts(&mut r);
+        let (gpu, vram) = (gpu.expect("gpu chart"), vram.expect("vram chart"));
+        let facts = |r: &mut Rig| {
+            [&gpu, &vram].map(|apps| {
+                r.vcx.read_entity(apps, |a, _| {
+                    a.bands()
+                        .iter()
+                        .map(|b| (b.key.clone(), b.value, b.processes))
+                        .collect::<Vec<_>>()
+                })
+            })
+        };
+        let before = facts(&mut r);
+        for bands in &before {
+            assert!(
+                bands.len() >= 4,
+                "three groups and Other apps at least: {bands:?}"
+            );
+            assert!(bands.iter().any(|b| b.1 > 0.), "{bands:?}");
+        }
+        assert!(
+            before[0]
+                .iter()
+                .any(|b| &*b.0 == "exe:p0" && b.2 == Some(2)),
+            "{:?}",
+            before[0]
+        );
+
+        // Resize.
+        r.vcx.simulate_resize(size(px(900.), px(900.)));
+        draw(r.vcx);
+        assert_eq!(facts(&mut r), before, "after the resize");
+
+        // View switch away and back: the same chart entities, the same bands.
+        for view in [GpuView::VramApps, GpuView::Usage, GpuView::GpuApps] {
+            r.vcx
+                .update(|_, cx| page.update(cx, |p, cx| p.set_view(view, cx)));
+            draw(r.vcx);
+            assert_eq!(facts(&mut r), before, "after the switch to {view:?}");
+        }
+        let (gpu_now, vram_now) = charts(&mut r);
+        assert_eq!(gpu_now.map(|c| c.entity_id()), Some(gpu.entity_id()));
+        assert_eq!(vram_now.map(|c| c.entity_id()), Some(vram.entity_id()));
+    }
+}
