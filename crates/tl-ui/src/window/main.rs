@@ -1713,14 +1713,14 @@ impl MainWindow {
         self.reconnect_cover
     }
 
-    /// Animation frames the page fade asked for.
-    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     /// How many times the window rendered.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn draws(&self) -> u64 {
         self.draws
     }
 
+    /// Animation frames the page fade asked for.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn fade_frames(&self) -> u32 {
         self.fade_frames
     }
