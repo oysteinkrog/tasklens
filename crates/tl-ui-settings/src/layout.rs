@@ -347,6 +347,12 @@ pub enum FixedWidget {
     /// The CPU by app stacked chart and its legend (UI-PRF-062, D-042), in `overview.cpu` and
     /// `page.cpu`.
     CpuByApp,
+    /// The GPU load by app stacked chart and its legend (g00wx), in `overview.gpu` (the first
+    /// GPU) and on GPU pages.
+    GpuByApp,
+    /// The VRAM by app stacked chart and its legend (g00wx), in `overview.gpu` (the first GPU)
+    /// and on GPU pages.
+    VramByApp,
     /// The "Details" heading and the page's Details grid (UI-PRF-021), on every page.
     Details,
     /// The CPU page's per-core charts (UI-PRF-023), in `page.cpu` only.
@@ -377,11 +383,13 @@ pub enum FixedWidget {
 
 impl FixedWidget {
     /// Each known fixed widget and its name, as written.
-    pub const NAMES: [(&'static str, FixedWidget); 16] = [
+    pub const NAMES: [(&'static str, FixedWidget); 18] = [
         ("processes", FixedWidget::Processes),
         ("timeline", FixedWidget::Timeline),
         ("memory_by_app", FixedWidget::MemoryByApp),
         ("cpu_by_app", FixedWidget::CpuByApp),
+        ("gpu_by_app", FixedWidget::GpuByApp),
+        ("vram_by_app", FixedWidget::VramByApp),
         ("details", FixedWidget::Details),
         ("cpu_core_grid", FixedWidget::CpuCoreGrid),
         ("cpu_core_board", FixedWidget::CpuCoreBoard),
@@ -422,6 +430,7 @@ impl FixedWidget {
             FixedWidget::Timeline => Some(TIMELINE_BOX_CONTAINER),
             FixedWidget::MemoryByApp => Some(MEMORY_BOX_CONTAINER),
             FixedWidget::CpuByApp => Some(CPU_BOX_CONTAINER),
+            FixedWidget::GpuByApp | FixedWidget::VramByApp => Some(GPU_BOX_CONTAINER),
             _ => None,
         }
     }
@@ -438,7 +447,10 @@ impl FixedWidget {
             FixedWidget::CpuByApp | FixedWidget::CpuCoreGrid | FixedWidget::CpuCoreBoard => {
                 Some(DeviceKind::Cpu)
             }
-            FixedWidget::GpuEngineGrid | FixedWidget::GpuDisplays => Some(DeviceKind::Gpu),
+            FixedWidget::GpuEngineGrid
+            | FixedWidget::GpuDisplays
+            | FixedWidget::GpuByApp
+            | FixedWidget::VramByApp => Some(DeviceKind::Gpu),
             FixedWidget::DiskPartitions => Some(DeviceKind::Disk),
             FixedWidget::NetSettings => Some(DeviceKind::Net),
             FixedWidget::BatteryHistory => Some(DeviceKind::Battery),
@@ -1297,6 +1309,16 @@ pub fn convert_gpu_box(entry: &OverviewGridSetting) -> ContainerLayout {
     let bar_value_label = FormSet::BAR | FormSet::VALUE | FormSet::LABEL;
     // (metric, forms, whether `hidden` can leave it out)
     let mut list: Vec<(MetricKey, FormSet, bool)> = Vec::new();
+    // The by app modes hold one fixed widget, for the first GPU.
+    let by_app = match preset.id.as_str() {
+        "apps" => Some(FixedWidget::GpuByApp),
+        "vram_apps" => Some(FixedWidget::VramByApp),
+        _ => None,
+    };
+    if let Some(kind) = by_app {
+        let widgets = [(WidgetContent::Fixed(kind), FormSet::empty())];
+        return ContainerLayout::flow(GPU_BOX_CONTAINER, preset, widgets);
+    }
     match preset.id.as_str() {
         "chart_engines" => {
             list.push((MetricKey::engine(GpuEngine::Gpu), FormSet::CHART, false));
@@ -1961,6 +1983,55 @@ mod tests {
         reset_to_default(&mut s.performance, GPU_BOX_CONTAINER);
         assert_eq!(s.performance.layouts.0.len(), 1);
         assert_eq!(s.performance.layouts.0[0].container(), Some("page.cpu"));
+    }
+
+    #[test]
+    fn gpu_by_app_stays_in_the_gpu_containers_only() {
+        for name in ["gpu_by_app", "vram_by_app"] {
+            let w =
+                format!("{{ id = 1, fixed = \"{name}\", col = 0, row = 0, cols = 2, rows = 2 }}");
+            let second =
+                format!("{{ id = 2, fixed = \"{name}\", col = 2, row = 0, cols = 2, rows = 2 }}");
+            for container in ["overview.gpu", "page.gpu:GPU-0a1b"] {
+                let (ids, changed) = ids_in(container, "", &[&w]);
+                assert_eq!((ids, changed), (vec![1], vec![]), "{container} {name}");
+                let (ids, changed) = ids_in(container, "", &[&w, &second]);
+                assert_eq!(
+                    (ids, changed),
+                    (vec![1], vec![LAYOUTS_KEY]),
+                    "{container} {name}"
+                );
+            }
+            for container in [
+                "overview.cpu",
+                "page.cpu",
+                "page.memory",
+                "page.aggregate:gpu",
+            ] {
+                let (ids, changed) = ids_in(container, "", &[&w]);
+                assert_eq!(
+                    (ids, changed),
+                    (vec![], vec![LAYOUTS_KEY]),
+                    "{container} {name}"
+                );
+            }
+        }
+        assert_eq!(FixedWidget::from_name("gpu_by_app"), FixedWidget::GpuByApp);
+        assert_eq!(FixedWidget::VramByApp.name(), "vram_by_app");
+    }
+
+    #[test]
+    fn gpu_box_by_app_modes_hold_one_fixed_widget() {
+        for (mode, kind) in [("apps", "gpu_by_app"), ("vram_apps", "vram_by_app")] {
+            let (s, _) = load(&box_entry("gpu", &format!("mode = \"{mode}\"")));
+            let l = known(&s, GPU_BOX_CONTAINER);
+            assert_eq!(l.preset.as_ref().map(|p| p.id.as_str()), Some(mode));
+            assert_eq!(l.widgets.len(), 1);
+            let WidgetContent::Fixed(f) = &l.widgets[0].content else {
+                panic!("a fixed widget");
+            };
+            assert_eq!(f.name(), kind);
+        }
     }
 
     #[test]

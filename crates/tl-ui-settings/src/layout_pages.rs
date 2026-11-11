@@ -212,6 +212,7 @@ pub fn page_presets(kind: DeviceKind) -> &'static [&'static str] {
             PRESET_APPS,
         ],
         DeviceKind::Memory => &[PRESET_USAGE, PRESET_APPS],
+        DeviceKind::Gpu => &[PRESET_DEFAULT, PRESET_GPU_APPS, PRESET_VRAM_APPS],
         k if PAGE_DEVICE_KINDS.contains(&k) => &[PRESET_DEFAULT],
         _ => &[],
     }
@@ -228,6 +229,10 @@ pub const PRESET_USAGE: &str = "usage";
 pub const PRESET_APPS: &str = "apps";
 /// The one preset of every other page.
 pub const PRESET_DEFAULT: &str = "default";
+/// The GPU page preset with GPU load by app in place of the engine grid.
+pub const PRESET_GPU_APPS: &str = "gpu_apps";
+/// The GPU page preset with VRAM by app in place of the memory chart.
+pub const PRESET_VRAM_APPS: &str = "vram_apps";
 
 /// The preset id of `mode`.
 pub fn cpu_preset(mode: CpuGraphMode) -> &'static str {
@@ -338,11 +343,33 @@ pub fn convert_memory_page(perf: &PerformanceSettings, container: &str) -> Conta
 /// `container`: the engine grid, Memory and Temperature, Power and Clocks when listed,
 /// Details, then Displays. Every widget names the page's own GPU key.
 pub fn convert_gpu_page(perf: &PerformanceSettings, container: &str) -> ContainerLayout {
+    gpu_page_for_preset(perf, container, PRESET_DEFAULT)
+}
+
+/// The GPU page layout of `container` for `preset`: `default`, or `gpu_apps` (GPU load by app
+/// in place of the engine grid), or `vram_apps` (VRAM by app in place of the memory chart).
+/// An unknown id reads as `default`.
+pub fn gpu_page_for_preset(
+    perf: &PerformanceSettings,
+    container: &str,
+    preset: &str,
+) -> ContainerLayout {
     let key = page_key(container).unwrap_or_default();
     let at = |k| metric(key, k, CHART_VALUE_LABEL);
+    let preset = match preset {
+        PRESET_GPU_APPS => PRESET_GPU_APPS,
+        PRESET_VRAM_APPS => PRESET_VRAM_APPS,
+        _ => PRESET_DEFAULT,
+    };
     let mut widgets = vec![
-        fixed(FixedWidget::GpuEngineGrid),
-        at(METRIC_GPU_MEMORY),
+        match preset {
+            PRESET_GPU_APPS => fixed(FixedWidget::GpuByApp),
+            _ => fixed(FixedWidget::GpuEngineGrid),
+        },
+        match preset {
+            PRESET_VRAM_APPS => fixed(FixedWidget::VramByApp),
+            _ => at(METRIC_GPU_MEMORY),
+        },
         at(METRIC_TEMP),
     ];
     let optional = &perf.gpu_optional_graphs;
@@ -354,7 +381,7 @@ pub fn convert_gpu_page(perf: &PerformanceSettings, container: &str) -> Containe
     }
     widgets.push(fixed(FixedWidget::Details));
     widgets.push(fixed(FixedWidget::GpuDisplays));
-    flow(container, PRESET_DEFAULT, widgets)
+    flow(container, preset, widgets)
 }
 
 /// The default flow layout of a page with no old keys: a disk, an adapter, a fan, a battery,
@@ -747,6 +774,30 @@ mod tests {
         }
         assert!(page_presets(DeviceKind::Cpu).contains(&PRESET_APPS));
         assert_eq!(cpu_preset(CpuGraphMode::Apps), "apps");
+    }
+
+    #[test]
+    fn gpu_by_app_presets_convert() {
+        let perf = PerformanceSettings::default();
+        let describe_of = |preset| describe(&gpu_page_for_preset(&perf, GPU, preset));
+        let default = describe_of(PRESET_DEFAULT);
+        assert_eq!(default, describe(&convert_gpu_page(&perf, GPU)));
+        let gpu = describe_of(PRESET_GPU_APPS);
+        assert_eq!(gpu[0], "fixed gpu_by_app");
+        assert_eq!(gpu[1..], default[1..]);
+        let vram = describe_of(PRESET_VRAM_APPS);
+        assert_eq!(vram[0], default[0]);
+        assert_eq!(vram[1], "fixed vram_by_app");
+        assert_eq!(vram[2..], default[2..]);
+        assert_eq!(
+            page_presets(DeviceKind::Gpu),
+            [PRESET_DEFAULT, PRESET_GPU_APPS, PRESET_VRAM_APPS]
+        );
+        for p in [PRESET_GPU_APPS, PRESET_VRAM_APPS] {
+            let l = gpu_page_for_preset(&perf, GPU, p);
+            assert_eq!(l.preset.as_ref().map(|x| x.id.as_str()), Some(p));
+        }
+        assert_eq!(describe_of("nope"), default);
     }
 
     #[test]

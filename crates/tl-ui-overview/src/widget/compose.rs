@@ -200,7 +200,10 @@ pub fn fixed_min(kind: &FixedWidget) -> Size<f32> {
     match kind {
         FixedWidget::Processes => size(256., 192.),
         FixedWidget::Timeline => size(376., 92.),
-        FixedWidget::MemoryByApp | FixedWidget::CpuByApp => size(160., 100.),
+        FixedWidget::MemoryByApp
+        | FixedWidget::CpuByApp
+        | FixedWidget::GpuByApp
+        | FixedWidget::VramByApp => size(160., 100.),
         FixedWidget::Details
         | FixedWidget::MemoryCompressed
         | FixedWidget::SwapDevices

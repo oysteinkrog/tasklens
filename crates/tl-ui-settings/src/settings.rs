@@ -879,7 +879,16 @@ pub const OVERVIEW_BOX_MODES: [(&str, &[&str]); 7] = [
         &["chart_cores", "chart", "cores", "core_charts", "apps"],
     ),
     ("memory", &["rows", "chart_rows", "chart", "charts", "apps"]),
-    ("gpu", &["engine_charts", "chart_engines", "chart"]),
+    (
+        "gpu",
+        &[
+            "engine_charts",
+            "chart_engines",
+            "chart",
+            "apps",
+            "vram_apps",
+        ],
+    ),
     ("disk", &["disk_charts", "rows", "total_chart"]),
     ("net", &["stacked", "columns", "combined", "adapter_charts"]),
     ("processes", &["list"]),
