@@ -2145,8 +2145,8 @@ fn overview_widget_corner_double_click_minimum(cx: &mut TestAppContext) {
     assert_eq!(r.selected(&e), Some(1));
 }
 
-/// Add Widget lists the sources by GPU, then "All engines" of each GPU (ADR-019 phase 2);
-/// choosing one adds and selects the widget.
+/// Add Widget lists the sources by GPU, then "All engines" of each GPU (ADR-019 phase 2), then
+/// GPU load by app and VRAM by app (tasklens-g00wx.4); choosing one adds and selects the widget.
 #[gpui_kit::test]
 fn overview_widget_add_menu_adds(cx: &mut TestAppContext) {
     let mut r = open(cx);
@@ -2171,6 +2171,9 @@ fn overview_widget_add_menu_adds(cx: &mut TestAppContext) {
                 MenuEntryKind::Item,
                 false
             ),
+            (String::new(), MenuEntryKind::Separator, false),
+            ("GPU load by app".to_owned(), MenuEntryKind::Item, false),
+            ("VRAM by app".to_owned(), MenuEntryKind::Item, false),
         ]
     );
     let card_b = r.submenu_entries(&entries[1]);
