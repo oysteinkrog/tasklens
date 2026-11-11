@@ -442,8 +442,11 @@ impl Rig<'_> {
     }
 }
 
+/// The chart kind of a by-app mode, for a GPU.
+type KindOf = fn(DeviceIdx) -> AppsMetric;
+
 /// The two by-app modes, their fixed widget and the chart kind each draws.
-const MODES: [(&str, FixedWidget, fn(DeviceIdx) -> AppsMetric); 2] = [
+const MODES: [(&str, FixedWidget, KindOf); 2] = [
     ("apps", FixedWidget::GpuByApp, AppsMetric::Gpu),
     ("vram_apps", FixedWidget::VramByApp, AppsMetric::Vram),
 ];
