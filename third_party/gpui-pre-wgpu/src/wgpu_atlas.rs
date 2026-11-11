@@ -28,9 +28,37 @@ struct PendingUpload {
     data: Vec<u8>,
 }
 
+/// One tile upload, handed to the renderer, which copies it from its staging
+/// buffer into `texture` with the frame's other uploads (tasklens-x12tr.1).
+pub(crate) struct AtlasUpload {
+    pub(crate) texture: wgpu::Texture,
+    pub(crate) origin: wgpu::Origin3d,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) bytes_per_pixel: u32,
+    /// Tightly packed rows, `width * bytes_per_pixel` bytes each.
+    pub(crate) data: Vec<u8>,
+}
+
+impl AtlasUpload {
+    pub(crate) fn row_bytes(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.bytes_per_pixel)
+    }
+
+    /// Row pitch in the staging buffer. `copy_buffer_to_texture` needs rows on
+    /// `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT` (256 bytes); `Queue::write_texture` did not.
+    pub(crate) fn padded_row_bytes(&self) -> u64 {
+        self.row_bytes()
+            .next_multiple_of(u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT))
+    }
+
+    pub(crate) fn staging_bytes(&self) -> u64 {
+        self.padded_row_bytes() * u64::from(self.height)
+    }
+}
+
 struct WgpuAtlasTextures {
     device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
     max_texture_size: u32,
     color_texture_format: wgpu::TextureFormat,
     storage: WgpuAtlasStorage,
@@ -45,15 +73,16 @@ pub struct WgpuTextureInfo {
 }
 
 impl WgpuAtlas {
+    /// `_queue` is unused since the renderer uploads tiles through its own staging
+    /// buffers (tasklens-x12tr.1). It stays so the signature matches upstream.
     pub fn new(
         device: Arc<wgpu::Device>,
-        queue: Arc<wgpu::Queue>,
+        _queue: Arc<wgpu::Queue>,
         color_texture_format: wgpu::TextureFormat,
     ) -> Self {
         let max_texture_size = device.limits().max_texture_dimension_2d;
         WgpuAtlas(Mutex::new(AtlasState::new(WgpuAtlasTextures {
             device,
-            queue,
             max_texture_size,
             color_texture_format,
             storage: WgpuAtlasStorage::default(),
@@ -70,9 +99,11 @@ impl WgpuAtlas {
         )
     }
 
-    pub fn before_frame(&self) {
+    /// Moves the pending tile uploads into `out`, skipping those whose texture was
+    /// removed. The renderer copies them in the next submit.
+    pub(crate) fn drain_uploads(&self, out: &mut Vec<AtlasUpload>) {
         let mut lock = self.0.lock();
-        lock.backend.flush_uploads();
+        lock.backend.drain_uploads(out);
     }
 
     /// Returns the view backing `id`, or `None` once every tile in it has been
@@ -102,7 +133,6 @@ impl WgpuAtlas {
     pub fn handle_device_lost(&self, context: &WgpuContext) {
         self.0.lock().clear(|textures| {
             textures.device = context.device.clone();
-            textures.queue = context.queue.clone();
             textures.color_texture_format = context.color_texture_format();
             textures.storage = WgpuAtlasStorage::default();
             textures.pending_uploads.clear();
@@ -264,36 +294,26 @@ impl WgpuAtlasTextures {
             .push(PendingUpload { id, bounds, data });
     }
 
-    fn flush_uploads(&mut self) {
+    fn drain_uploads(&mut self, out: &mut Vec<AtlasUpload>) {
         for upload in self.pending_uploads.drain(..) {
             let Some(texture) = self.storage.get(upload.id) else {
                 continue;
             };
-            let bytes_per_pixel = texture.bytes_per_pixel();
-
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: upload.bounds.origin.x.0 as u32,
-                        y: upload.bounds.origin.y.0 as u32,
-                        z: 0,
-                    },
-                    aspect: wgpu::TextureAspect::All,
+            if upload.bounds.size.width.0 <= 0 || upload.bounds.size.height.0 <= 0 {
+                continue;
+            }
+            out.push(AtlasUpload {
+                texture: texture.texture.clone(),
+                origin: wgpu::Origin3d {
+                    x: upload.bounds.origin.x.0 as u32,
+                    y: upload.bounds.origin.y.0 as u32,
+                    z: 0,
                 },
-                &upload.data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(upload.bounds.size.width.0 as u32 * bytes_per_pixel as u32),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: upload.bounds.size.width.0 as u32,
-                    height: upload.bounds.size.height.0 as u32,
-                    depth_or_array_layers: 1,
-                },
-            );
+                width: upload.bounds.size.width.0 as u32,
+                height: upload.bounds.size.height.0 as u32,
+                bytes_per_pixel: u32::from(texture.bytes_per_pixel()),
+                data: upload.data,
+            });
         }
     }
 }
@@ -433,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn before_frame_skips_uploads_for_removed_texture() -> anyhow::Result<()> {
+    fn drain_skips_uploads_for_removed_texture() -> anyhow::Result<()> {
         let (device, queue) = test_device_and_queue()?;
 
         let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
@@ -452,7 +472,48 @@ mod tests {
             .get_or_insert_with(key.clone(), &mut build)?
             .expect("tile should be created");
         atlas.remove(&key);
-        atlas.before_frame();
+        let mut uploads = Vec::new();
+        atlas.drain_uploads(&mut uploads);
+        assert!(uploads.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn drain_hands_over_live_uploads_once() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let key = AtlasKey::Image(RenderImageParams {
+            image_id: ImageId(1),
+            frame_index: 0,
+        });
+        let size = Size {
+            width: DevicePixels(3),
+            height: DevicePixels(2),
+        };
+        let tile = atlas
+            .get_or_insert_with(key, &mut || {
+                Ok(Some((size, Cow::Owned(vec![7; 3 * 2 * 4]))))
+            })?
+            .expect("tile should be created");
+
+        let mut uploads = Vec::new();
+        atlas.drain_uploads(&mut uploads);
+        assert_eq!(uploads.len(), 1);
+        let upload = &uploads[0];
+        assert_eq!(
+            (upload.width, upload.height, upload.bytes_per_pixel),
+            (3, 2, 4)
+        );
+        assert_eq!(upload.origin.x, tile.bounds.origin.x.0 as u32);
+        assert_eq!(upload.origin.y, tile.bounds.origin.y.0 as u32);
+        assert_eq!(upload.data, vec![7; 24]);
+        assert_eq!(upload.row_bytes(), 12);
+        assert_eq!(upload.padded_row_bytes(), 256);
+        assert_eq!(upload.staging_bytes(), 512);
+
+        uploads.clear();
+        atlas.drain_uploads(&mut uploads);
+        assert!(uploads.is_empty());
         Ok(())
     }
 

@@ -1197,7 +1197,9 @@ fn check_is_known_emoji_font(postscript_name: &str) -> bool {
     postscript_name == "NotoColorEmoji"
 }
 
-#[cfg(test)]
+// These tests read Zed's fonts from `assets/fonts/{lilex,ibm-plex-sans}`, which are not
+// vendored here, so they only build with `--cfg gpui_wgpu_zed_fonts` (tasklens-x12tr.1).
+#[cfg(all(test, gpui_wgpu_zed_fonts))]
 mod tests {
     use super::*;
     #[cfg(feature = "test-support")]

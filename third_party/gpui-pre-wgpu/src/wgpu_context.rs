@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::TextureFormat;
 
+const MIB: u64 = 1024 * 1024;
+
 pub struct WgpuContext {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -424,7 +426,13 @@ impl WgpuContext {
                 label: Some("gpui_device"),
                 required_features,
                 required_limits,
-                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                // Blocks of 64 to 128 MiB device memory and 32 to 64 MiB host memory, so
+                // the first host block holds a normal frame's staging and is never freed
+                // (tasklens-x12tr.1). `MemoryUsage` starts host blocks at 4 MiB, and a busy
+                // frame then allocated and freed a block every frame.
+                memory_hints: wgpu::MemoryHints::Manual {
+                    suballocated_device_memory_block_size: 64 * MIB..128 * MIB,
+                },
                 trace: wgpu::Trace::Off,
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
             })

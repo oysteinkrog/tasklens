@@ -1,4 +1,6 @@
 use crate::half_float::pack_st;
+use crate::staging_ring::{SlotPlan, StagingRing};
+use crate::wgpu_atlas::AtlasUpload;
 use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
@@ -16,6 +18,7 @@ use std::num::NonZeroU64;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAX_INSTANCE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
 
@@ -260,6 +263,75 @@ struct WgpuRendererCore {
     /// Reused each frame so path batches do not allocate (tasklens-3z9l1).
     path_record_scratch: Vec<PathRasterizationPath>,
     path_vertex_scratch: Vec<PathRasterizationVertex>,
+    /// This frame's instance and atlas bytes, copied in one go at submit.
+    uploads: FrameUploads,
+    /// Which staging slot each frame uses; `staging_slots` holds the buffer of each
+    /// slot at the same index (tasklens-x12tr.1).
+    staging_ring: StagingRing,
+    staging_slots: Vec<StagingSlot>,
+}
+
+/// One persistent `MAP_WRITE | COPY_SRC` buffer of the staging ring.
+struct StagingSlot {
+    buffer: wgpu::Buffer,
+    /// Set by the `map_async` callback once the GPU is done with the slot and the
+    /// buffer is mapped again.
+    mapped: Arc<AtomicBool>,
+}
+
+/// Uploads gathered while a frame is recorded. All buffers are reused across
+/// frames, so a warm frame allocates nothing here (tasklens-x12tr.1).
+#[derive(Default)]
+struct FrameUploads {
+    /// Instance bytes in the order of the instance buffers they go to. The bytes of
+    /// one buffer start at its offset 0, including the alignment gaps.
+    instance_bytes: Vec<u8>,
+    /// Start of the current instance buffer's bytes in `instance_bytes`.
+    instance_base: usize,
+    /// One copy per instance buffer written this frame: the buffer, the start in
+    /// `instance_bytes` and the length. An instance buffer that grows mid-frame
+    /// gets its own entry, because bind groups made earlier still point at it.
+    instance_segments: Vec<(wgpu::Buffer, usize, usize)>,
+    atlas: Vec<AtlasUpload>,
+}
+
+impl FrameUploads {
+    /// Puts `data` at byte `offset` of the current instance buffer.
+    fn stage_instance_bytes(&mut self, offset: u64, data: &[u8]) {
+        let start = self.instance_base + offset as usize;
+        // Allocations only move forward within one buffer.
+        debug_assert!(self.instance_bytes.len() <= start);
+        self.instance_bytes.resize(start, 0);
+        self.instance_bytes.extend_from_slice(data);
+    }
+
+    /// Ends the bytes of `buffer`, the current instance buffer, so later bytes go
+    /// to the next one.
+    fn finish_instance_segment(&mut self, buffer: &wgpu::Buffer) {
+        if self.instance_bytes.len() > self.instance_base {
+            // Buffer copies move whole 4-byte words.
+            let end = self
+                .instance_bytes
+                .len()
+                .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT as usize);
+            self.instance_bytes.resize(end, 0);
+            let len = (end - self.instance_base).min(buffer.size() as usize);
+            self.instance_segments
+                .push((buffer.clone(), self.instance_base, len));
+        }
+        self.instance_base = self.instance_bytes.len();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.instance_segments.is_empty() && self.atlas.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.instance_bytes.clear();
+        self.instance_base = 0;
+        self.instance_segments.clear();
+        self.atlas.clear();
+    }
 }
 
 /// GPU resources of a windowed renderer. A surface is only ever configured against the
@@ -1405,6 +1477,9 @@ impl WgpuRendererCore {
             max_texture_size,
             path_record_scratch: Vec::new(),
             path_vertex_scratch: Vec::new(),
+            uploads: FrameUploads::default(),
+            staging_ring: StagingRing::new(),
+            staging_slots: Vec::new(),
         }
     }
 
@@ -1471,7 +1546,7 @@ impl WgpuRendererCore {
             self.max_texture_size
         );
 
-        self.atlas.before_frame();
+        self.reclaim_staging_slots();
         self.ensure_intermediate_textures(size);
 
         let gamma_params = GammaParams {
@@ -1510,7 +1585,158 @@ impl WgpuRendererCore {
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
+                // The frame's instance bytes die with it. Atlas uploads are drained only
+                // after a frame records, so they wait in the atlas for the next frame.
+                self.uploads.clear();
             })
+    }
+
+    /// Marks staging slots free whose buffer the GPU has finished with and mapped again.
+    fn reclaim_staging_slots(&mut self) {
+        if !self.staging_ring.any_in_flight() {
+            return;
+        }
+        // Runs the map callbacks of finished submissions. Never blocks.
+        if let Err(error) = self.resources.device.poll(wgpu::PollType::Poll) {
+            log::warn!("Failed to poll device for staging buffers: {error:?}");
+        }
+        for (index, slot) in self.staging_slots.iter().enumerate() {
+            if self.staging_ring.is_in_flight(index) && slot.mapped.swap(false, Ordering::AcqRel) {
+                self.staging_ring.mark_free(index);
+            }
+        }
+    }
+
+    /// Writes the frame's atlas and instance bytes into one staging slot and records
+    /// the copies out of it. Returns the copy commands, which must be submitted
+    /// before the frame's draw commands, and the slot to map again after that submit.
+    fn encode_uploads(&mut self) -> Option<(wgpu::CommandBuffer, usize)> {
+        self.atlas.drain_uploads(&mut self.uploads.atlas);
+        if let InstanceData::Storage(buffer) = &self.resources.instance_data {
+            self.uploads.finish_instance_segment(buffer);
+        }
+        if self.uploads.is_empty() {
+            self.uploads.clear();
+            return None;
+        }
+
+        // Layout: each atlas upload at a 256-byte offset with 256-byte rows, then the
+        // instance bytes.
+        let row_alignment = u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let mut atlas_end: u64 = 0;
+        for upload in &self.uploads.atlas {
+            atlas_end = atlas_end.next_multiple_of(row_alignment) + upload.staging_bytes();
+        }
+        let instance_start = atlas_end.next_multiple_of(row_alignment);
+        let total = (instance_start + self.uploads.instance_bytes.len() as u64)
+            .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+
+        let plan = self.staging_ring.acquire(total);
+        let index = plan.index(self.staging_ring.len());
+        match plan {
+            SlotPlan::Reuse(_) => {}
+            SlotPlan::Replace { capacity, .. } => {
+                self.staging_slots[index] =
+                    Self::create_staging_slot(&self.resources.device, capacity);
+            }
+            SlotPlan::Push { capacity } => {
+                self.staging_slots
+                    .push(Self::create_staging_slot(&self.resources.device, capacity));
+            }
+        }
+        let slot = &self.staging_slots[index];
+
+        {
+            let mut view = slot.buffer.get_mapped_range_mut(0..total);
+            let mut offset: u64 = 0;
+            for upload in &self.uploads.atlas {
+                offset = offset.next_multiple_of(row_alignment);
+                let row_bytes = upload.row_bytes() as usize;
+                let padded_row_bytes = upload.padded_row_bytes() as usize;
+                for (row, source) in upload.data.chunks_exact(row_bytes).enumerate() {
+                    let start = offset as usize + row * padded_row_bytes;
+                    view.slice(start..start + row_bytes).copy_from_slice(source);
+                }
+                offset += upload.staging_bytes();
+            }
+            let start = instance_start as usize;
+            view.slice(start..start + self.uploads.instance_bytes.len())
+                .copy_from_slice(&self.uploads.instance_bytes);
+        }
+        slot.buffer.unmap();
+
+        let mut encoder =
+            self.resources
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("upload_encoder"),
+                });
+        let mut offset: u64 = 0;
+        for upload in &self.uploads.atlas {
+            offset = offset.next_multiple_of(row_alignment);
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &slot.buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset,
+                        bytes_per_row: Some(upload.padded_row_bytes() as u32),
+                        rows_per_image: None,
+                    },
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &upload.texture,
+                    mip_level: 0,
+                    origin: upload.origin,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: upload.width,
+                    height: upload.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            offset += upload.staging_bytes();
+        }
+        for (buffer, start, len) in &self.uploads.instance_segments {
+            encoder.copy_buffer_to_buffer(
+                &slot.buffer,
+                instance_start + *start as u64,
+                buffer,
+                0,
+                *len as u64,
+            );
+        }
+        self.uploads.clear();
+        Some((encoder.finish(), index))
+    }
+
+    fn create_staging_slot(device: &wgpu::Device, capacity: u64) -> StagingSlot {
+        log::debug!("staging buffer of {capacity} bytes created");
+        StagingSlot {
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("staging_buffer"),
+                size: capacity,
+                usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: true,
+            }),
+            mapped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Maps `index` again once the GPU is done with the submit that copied from it.
+    /// Call only after that submit: a buffer with a pending map cannot be submitted.
+    fn remap_staging_slot(&mut self, index: usize) {
+        let slot = &self.staging_slots[index];
+        let mapped = Arc::clone(&slot.mapped);
+        mapped.store(false, Ordering::Release);
+        slot.buffer
+            .map_async(wgpu::MapMode::Write, .., move |result| match result {
+                Ok(()) => mapped.store(true, Ordering::Release),
+                // The slot stays in flight; the ring adds another one. This happens on
+                // device loss, which rebuilds the renderer anyway.
+                Err(error) => log::warn!("Failed to map staging buffer: {error}"),
+            });
+        self.staging_ring.mark_in_flight(index);
     }
 
     fn record_frame(
@@ -1654,10 +1880,18 @@ impl WgpuRendererCore {
             }
         }
 
-        let submission = self
-            .resources()
-            .queue
-            .submit(std::iter::once(encoder.finish()));
+        let frame_commands = encoder.finish();
+        let submission = match self.encode_uploads() {
+            Some((upload_commands, slot)) => {
+                let submission = self
+                    .resources
+                    .queue
+                    .submit([upload_commands, frame_commands]);
+                self.remap_staging_slot(slot);
+                submission
+            }
+            None => self.resources.queue.submit(std::iter::once(frame_commands)),
+        };
         Ok(submission)
     }
 
@@ -2002,15 +2236,17 @@ impl WgpuRendererCore {
             0
         };
 
-        let resources = self.resources();
         if !data.is_empty() {
-            match &resources.instance_data {
-                InstanceData::Storage(buffer) => resources.queue.write_buffer(buffer, offset, data),
+            match &self.resources.instance_data {
+                // Copied from the staging ring at submit (tasklens-x12tr.1).
+                InstanceData::Storage(_) => self.uploads.stage_instance_bytes(offset, data),
+                // WebGL only (wasm), left on `Queue::write_texture`.
                 InstanceData::Texture { .. } => {
-                    Self::write_instance_texture(resources, offset, data)
+                    Self::write_instance_texture(&self.resources, offset, data)
                 }
             }
         }
+        let resources = self.resources();
         let bind_group = resources
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2192,7 +2428,11 @@ impl WgpuRendererCore {
         );
         // Bind groups created earlier in the frame keep the previous buffer or
         // texture alive, so allocations written before the grow remain valid;
-        // only subsequent writes land in the new allocation.
+        // only subsequent writes land in the new allocation. The bytes staged for
+        // the previous buffer still get copied into it at submit.
+        if let InstanceData::Storage(buffer) = &self.resources.instance_data {
+            self.uploads.finish_instance_segment(buffer);
+        }
         let uses_webgl_instance_data = self.uses_webgl_instance_data;
         let resources = self.resources_mut();
         if uses_webgl_instance_data {
@@ -2721,13 +2961,19 @@ impl RenderingParameters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use gpui::{
+        AtlasKey, DevicePixels, PlatformAtlas, PlatformHeadlessRenderer, RenderSvgParams, Scene,
+        TransformationMatrix, point, px,
+    };
     use gpui::{
         BorderStyle, ColorSpace, ContentMask, Corners, Edges, Hsla, MonochromeSprite,
         PolychromeSprite, Quad, Shadow, Size, SubpixelSprite, Underline, linear_color_stop,
         linear_gradient,
     };
     #[cfg(target_os = "linux")]
-    use gpui::{DevicePixels, PlatformHeadlessRenderer, Scene};
+    use std::borrow::Cow;
+    use wgpu::naga;
 
     #[cfg(target_os = "linux")]
     fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
@@ -2876,6 +3122,194 @@ mod tests {
         // Rejection must leave the renderer usable.
         let image = renderer.render_scene_to_image(&Scene::default(), device_size(4, 4))?;
         assert_eq!(image.dimensions(), (4, 4));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn monochrome_tile(atlas: &WgpuAtlas, name: String) -> anyhow::Result<gpui::AtlasTile> {
+        let size = device_size(16, 16);
+        atlas
+            .get_or_insert_with(
+                AtlasKey::Svg(RenderSvgParams {
+                    path: name.into(),
+                    size,
+                }),
+                &mut || Ok(Some((size, Cow::Owned(vec![255; 16 * 16])))),
+            )?
+            .context("atlas tile should be created")
+    }
+
+    /// A busy frame: 2000 quads, 200 shadows and underlines, 500 monochrome sprites
+    /// from one atlas tile, and 10 paths with 315 000 vertices in all (5.04 MB of
+    /// vertices, above the old 4 MiB host memory block).
+    #[cfg(target_os = "linux")]
+    fn busy_scene(atlas: &WgpuAtlas) -> anyhow::Result<Scene> {
+        let viewport: Bounds<ScaledPixels> = Bounds {
+            origin: Point::default(),
+            size: Size {
+                width: 800.0.into(),
+                height: 600.0.into(),
+            },
+        };
+        let mask = ContentMask { bounds: viewport };
+        let cell = |index: usize, width: f32, height: f32| -> Bounds<ScaledPixels> {
+            Bounds {
+                origin: Point {
+                    x: ((index % 50) as f32 * 16.0).into(),
+                    y: ((index / 50) as f32 * 15.0).into(),
+                },
+                size: Size {
+                    width: width.into(),
+                    height: height.into(),
+                },
+            }
+        };
+        let mut scene = Scene::default();
+        for index in 0..2000 {
+            let bounds = cell(index, 12.0, 10.0);
+            let color = Hsla {
+                h: index as f32 / 2000.0,
+                s: 0.7,
+                l: 0.5,
+                a: 1.0,
+            };
+            scene.insert_primitive(solid_quad(
+                bounds.origin.x.0,
+                bounds.origin.y.0,
+                12.0,
+                10.0,
+                color,
+            ));
+        }
+        for index in 0..200 {
+            let bounds = cell(index, 12.0, 10.0);
+            scene.insert_primitive(Shadow {
+                order: 0,
+                blur_radius: 4.0.into(),
+                bounds,
+                corner_radii: Corners::default(),
+                content_mask: mask.clone(),
+                color: gpui::black(),
+                element_bounds: bounds,
+                element_corner_radii: Corners::default(),
+                inset: 0,
+                pad: 0,
+            });
+            scene.insert_primitive(Underline {
+                order: 0,
+                pad: 0,
+                bounds: cell(index, 12.0, 1.0),
+                content_mask: mask.clone(),
+                color: gpui::blue(),
+                thickness: 1.0.into(),
+                wavy: (index % 2 == 0).into(),
+            });
+        }
+        let tile = monochrome_tile(atlas, "busy-scene".to_string())?;
+        for index in 0..500 {
+            scene.insert_primitive(MonochromeSprite {
+                order: 0,
+                pad: 0,
+                bounds: cell(index, 16.0, 16.0),
+                content_mask: mask.clone(),
+                color: gpui::white(),
+                tile,
+                transformation: TransformationMatrix::unit(),
+            });
+        }
+        for path_index in 0..10_usize {
+            let mut path = gpui::Path::new(point(px(0.0), px(0.0)));
+            for triangle in 0..10_500_usize {
+                let x = ((path_index * 10_500 + triangle) % 790) as f32;
+                let y = (path_index * 55 + triangle % 50) as f32;
+                path.push_triangle(
+                    (
+                        point(px(x), px(y)),
+                        point(px(x + 8.0), px(y)),
+                        point(px(x), px(y + 8.0)),
+                    ),
+                    (point(0.0, 1.0), point(0.0, 1.0), point(0.0, 1.0)),
+                );
+            }
+            path.content_mask = ContentMask {
+                bounds: Bounds {
+                    origin: point(px(0.0), px(0.0)),
+                    size: gpui::size(px(800.0), px(600.0)),
+                },
+            };
+            path.color = gpui::red().into();
+            scene.insert_primitive(path.into_scaled(1.0));
+        }
+        scene.finish();
+        Ok(scene)
+    }
+
+    /// tasklens-x12tr.1: after warm-up, a busy frame makes and frees no GPU memory
+    /// block. Each frame also adds one new atlas tile, so atlas uploads go through
+    /// the staging ring too. The report is read before and after the GPU finishes
+    /// each frame, so a block made and freed within one frame shows up as well.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "real system: needs a GPU; run with TL_GPU_TESTS=1 and --ignored"]
+    fn steady_frames_allocate_no_memory_blocks() -> anyhow::Result<()> {
+        if std::env::var_os("TL_GPU_TESTS").is_none_or(|v| v != "1") {
+            return Ok(());
+        }
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let scene = busy_scene(&renderer.core.atlas)?;
+        let size = device_size(800, 600);
+        let report = |renderer: &WgpuHeadlessRenderer| {
+            renderer
+                .core
+                .resources
+                .device
+                .generate_allocator_report()
+                .map(|report| (report.blocks.len(), report.total_reserved_bytes))
+                .context("no allocator report; this test needs the Vulkan backend")
+        };
+        let wait = |renderer: &WgpuHeadlessRenderer| {
+            renderer
+                .core
+                .resources
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(std::time::Duration::from_secs(30)),
+                })
+                .map_err(|error| anyhow::anyhow!("failed to wait for the frame: {error}"))
+        };
+        let draw = |renderer: &mut WgpuHeadlessRenderer, frame: usize| {
+            monochrome_tile(&renderer.core.atlas, format!("frame-{frame}"))?;
+            renderer.render_scene(&scene, size)
+        };
+
+        for frame in 0..60 {
+            draw(&mut renderer, frame)?;
+            wait(&renderer)?;
+        }
+        let warm = report(&renderer)?;
+        let warm_allocations = renderer.core.staging_ring.allocations();
+        assert!(warm.0 > 0, "the warm renderer should hold memory blocks");
+
+        for frame in 60..660 {
+            draw(&mut renderer, frame)?;
+            assert_eq!(
+                report(&renderer)?,
+                warm,
+                "frame {frame} changed the memory blocks before it finished"
+            );
+            wait(&renderer)?;
+            assert_eq!(
+                report(&renderer)?,
+                warm,
+                "frame {frame} changed the memory blocks"
+            );
+            assert_eq!(
+                renderer.core.staging_ring.allocations(),
+                warm_allocations,
+                "frame {frame} made a staging buffer"
+            );
+        }
         Ok(())
     }
 
