@@ -75,6 +75,7 @@ use tl_ui_base::anim::{AnimationDriver, FrameStats};
 use tl_ui_base::app_env::{AppRequestHandler, BootSettings, StartOptions, ToastKindTag};
 use tl_ui_base::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use tl_ui_base::host::{HostContext, HostRegistry, HostTab};
+use tl_ui_base::host_settings;
 use tl_ui_base::hosts_edit;
 use tl_ui_base::hub::{ComponentMask, HiddenChanged, LinkChanged, SnapshotChanged, SnapshotHub};
 use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
@@ -141,8 +142,6 @@ const GLOBAL_WITH_HOSTS: &str = "Global Hosts";
 
 /// How often the host tabs read the link status and flip the connecting pulse (1 Hz pulse).
 const HOST_TICK: Duration = Duration::from_millis(500);
-/// HOST_TICK ticks per update in an inactive window: one sample interval (1 s by default).
-const HOST_IDLE_TICKS: u32 = 2;
 /// How opaque the page looks while its host reconnects (UI-SHL-008): a cover of the window
 /// background at `1 - RECONNECT_OPACITY` alpha.
 const RECONNECT_OPACITY: f32 = 0.6;
@@ -1287,10 +1286,9 @@ pub struct MainWindow {
     host_tabs: Entity<HostTabs>,
     /// Reads the link status and flips the connecting pulse while there are host tabs.
     _host_tick: Option<Task<()>>,
-    /// Whether the window is the active one; kept by the activation observer.
+    /// Whether the window is the active one; kept by the activation observer. An inactive
+    /// window slows its host and FPS ticks to one sample interval (tasklens-x12tr.4).
     window_active: bool,
-    /// Host ticks skipped since the last update while the window is inactive.
-    host_idle_ticks: u32,
     /// Key context "Global".
     root_focus: FocusHandle,
     titlebar: Entity<TitleBarView>,
@@ -1447,7 +1445,7 @@ impl MainWindow {
         // First focus starts the Shift-at-launch window (E29-030, R-124, U-43).
         subs.push(
             cx.observe_window_activation(window, |this: &mut Self, window, cx| {
-                this.window_active = window.is_window_active();
+                this.set_window_active(window.is_window_active(), cx);
                 if this.first_focus_at.is_none() && window.is_window_active() {
                     this.first_focus_at = Some(cx.background_executor().now());
                 }
@@ -1590,7 +1588,6 @@ impl MainWindow {
             host_tabs,
             _host_tick: None,
             window_active: window.is_window_active(),
-            host_idle_ticks: 0,
             root_focus,
             titlebar,
             tabstrip,
@@ -1666,6 +1663,7 @@ impl MainWindow {
         let driver = self._anim.clone();
         self.fps
             .update(cx, |fps, cx| fps.set_shown(show, &driver, cx));
+        self.sync_tick_periods(cx);
     }
 
     /// Selects `tab`. Nothing happens for the active tab or a tab that is not built.
@@ -1809,6 +1807,9 @@ impl MainWindow {
                 if this.host.hub() != Some(hub) {
                     return;
                 }
+                if ev.mask.contains(ComponentMask::HOST_SETTINGS) {
+                    this.sync_tick_periods(cx);
+                }
                 if ev.mask.contains(ComponentMask::HEALTH) {
                     this.sync_health(cx);
                     // The shield follows the helper state; set_model notifies only on a
@@ -1933,29 +1934,61 @@ impl MainWindow {
                 }
             });
         }
-        self._host_tick = multi.then(|| {
-            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                loop {
-                    cx.background_executor().timer(HOST_TICK).await;
-                    let alive = this.update(cx, |this, cx| {
-                        // An inactive window waits one sample interval between ticks.
-                        if !this.window_active {
-                            this.host_idle_ticks += 1;
-                            if this.host_idle_ticks < HOST_IDLE_TICKS {
-                                return;
-                            }
-                        }
-                        this.host_idle_ticks = 0;
-                        this.host_tabs.update(cx, |t, cx| t.flip_pulse(cx));
-                        this.sync_host_tabs(cx);
-                    });
-                    if alive.is_err() {
-                        break;
-                    }
-                }
-            })
-        });
+        self._host_tick = multi.then(|| Self::host_tick(cx));
         self.sync_host_tabs(cx);
+    }
+
+    /// The host tab status tick. Each wait is read again, so an inactive window waits one
+    /// sample interval of the shown host and follows a change of that interval.
+    fn host_tick(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                let Ok(wait) = this.update(cx, |this, cx| this.tick_period(HOST_TICK, cx)) else {
+                    break;
+                };
+                cx.background_executor().timer(wait).await;
+                let alive = this.update(cx, |this, cx| {
+                    this.host_tabs.update(cx, |t, cx| t.flip_pulse(cx));
+                    this.sync_host_tabs(cx);
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// The wait between ticks of a `tick` timer in this window (tasklens-x12tr.4).
+    fn tick_period(&self, tick: Duration, cx: &App) -> Duration {
+        let interval_ms = host_settings::current(&self.host, cx).values.interval_ms;
+        tick_period(tick, self.window_active, interval_ms)
+    }
+
+    /// Notes the window's activation. A window that turns active starts its ticks again at
+    /// the fast period, so it does not wait out a long inactive wait.
+    fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if active == self.window_active {
+            return;
+        }
+        self.window_active = active;
+        if active && self._host_tick.is_some() {
+            self._host_tick = Some(Self::host_tick(cx));
+        }
+        self.sync_tick_periods(cx);
+    }
+
+    /// Gives the FPS overlay its tick period for the window state and the shown host's
+    /// sample interval.
+    fn sync_tick_periods(&mut self, cx: &mut Context<Self>) {
+        let period = self.tick_period(FPS_TICK, cx);
+        self.fps.update(cx, |fps, cx| fps.set_period(period, cx));
+    }
+
+    /// The window's animation driver follows the shown host's hub: a hidden hub arms no
+    /// frames (tasklens-x12tr.4).
+    fn sync_hidden(&mut self, cx: &mut Context<Self>) {
+        let hidden = self.host.hub().is_some_and(|hub| hub.read(cx).is_hidden());
+        self._anim.update(cx, |d, _| d.set_hidden(hidden));
     }
 
     /// Sets the host tabs from the hosts' status and CPU, and shows them in the title bar with
@@ -2046,6 +2079,8 @@ impl MainWindow {
         self.shown = index;
         self.host = host;
         cx.default_global::<ShellState>().shown_host = Some(self.host.clone());
+        self.sync_hidden(cx);
+        self.sync_tick_periods(cx);
         // Graph summary mode belongs to the host's own Performance page (UI-PRF-016).
         let summary = self
             .page_entity::<PerformancePage>(Tab::Performance)
@@ -2996,8 +3031,9 @@ const FPS_PAD_Y: f32 = 4.;
 const FPS_PAD_X: f32 = 8.;
 
 /// The developer FPS overlay. While shown it turns on the driver's sampling and reads the
-/// statistics every 500 ms; it never requests frames, so it does not change what it measures.
-/// Hidden, it has no timer and the driver does not sample.
+/// statistics every 500 ms, or every sample interval in an inactive window. It never requests
+/// frames, so it does not change what it measures. Hidden, it has no timer and the driver does
+/// not sample.
 pub struct FpsOverlay {
     text: SharedString,
     /// `stats.frames` at the last tick.
@@ -3006,6 +3042,8 @@ pub struct FpsOverlay {
     driver: Option<WeakEntity<AnimationDriver>>,
     /// The CPU times of one tick, reused so a tick allocates only the text.
     cpu_ns: Vec<u64>,
+    /// The wait between ticks: `FPS_TICK`, or one sample interval in an inactive window.
+    period: Duration,
     _tick: Option<Task<()>>,
 }
 
@@ -3017,12 +3055,46 @@ impl FpsOverlay {
             last_tick: None,
             driver: None,
             cpu_ns: Vec::new(),
+            period: FPS_TICK,
             _tick: None,
         }
     }
 
     pub fn is_shown(&self) -> bool {
         self._tick.is_some()
+    }
+
+    /// The wait between ticks.
+    pub fn period(&self) -> Duration {
+        self.period
+    }
+
+    /// Sets the wait between ticks. A shorter wait starts the timer again, so it does not
+    /// wait out the longer one.
+    pub fn set_period(&mut self, period: Duration, cx: &mut Context<Self>) {
+        if period == self.period {
+            return;
+        }
+        let shorter = period < self.period;
+        self.period = period;
+        if shorter && self.is_shown() {
+            self._tick = Some(Self::tick_task(cx));
+        }
+    }
+
+    /// Reads the statistics after each wait of `period`.
+    fn tick_task(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                let Ok(wait) = this.update(cx, |this, _| this.period) else {
+                    break;
+                };
+                cx.background_executor().timer(wait).await;
+                if this.update(cx, |this, cx| this.on_timer(cx)).is_err() {
+                    break;
+                }
+            }
+        })
     }
 
     pub fn text(&self) -> &SharedString {
@@ -3058,16 +3130,7 @@ impl FpsOverlay {
         self.last_tick = Some(cx.background_executor().now());
         self.driver = Some(driver.downgrade());
         self.text = fps_text(0, FPS_TICK, &mut [], stalls).into();
-        self._tick = Some(
-            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                loop {
-                    cx.background_executor().timer(FPS_TICK).await;
-                    if this.update(cx, |this, cx| this.on_timer(cx)).is_err() {
-                        break;
-                    }
-                }
-            }),
-        );
+        self._tick = Some(Self::tick_task(cx));
         cx.notify();
     }
 
@@ -3101,6 +3164,16 @@ impl FpsOverlay {
             self.text = text;
             cx.notify();
         }
+    }
+}
+
+/// The wait between ticks of a `tick` timer: an inactive window waits one sample interval
+/// (`interval_ms`), and never less than `tick` (tasklens-x12tr.4).
+pub fn tick_period(tick: Duration, active: bool, interval_ms: u32) -> Duration {
+    if active {
+        tick
+    } else {
+        tick.max(Duration::from_millis(interval_ms.into()))
     }
 }
 

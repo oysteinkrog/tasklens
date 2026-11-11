@@ -2571,6 +2571,11 @@ mod main_window {
 
     impl Global for Log {}
 
+    /// The fake engine of an `engine: true` rig, for tests that publish to it.
+    struct TestEngine(Arc<FakeEngine>);
+
+    impl Global for TestEngine {}
+
     struct FakePage {
         tab: Tab,
         focus: FocusHandle,
@@ -2682,6 +2687,7 @@ mod main_window {
             TlSettings::init(cx);
             if opts.engine {
                 let engine = FakeEngine::new();
+                cx.set_global(TestEngine(engine.clone()));
                 let client: Arc<dyn EngineClient> = engine;
                 cx.set_global(EngineGlobal(client.clone()));
                 // The tracker reads the hub's helper state later, when GlobalHub is set, so
@@ -3464,6 +3470,111 @@ mod main_window {
             vcx.run_until_parked();
             assert_eq!(vcx.read_entity(&driver, |d, _| d.is_hidden()), hidden);
         }
+    }
+
+    /// Asks the window's driver for a frame that notifies the main window, then delivers
+    /// whatever frame was armed.
+    fn request_main_frame(vcx: &mut VisualTestContext, main: &Entity<MainWindow>) {
+        let id = main.entity_id();
+        vcx.update(|window, cx| {
+            AnimationDriver::global(window, cx).update(cx, |d, cx| d.request(id, window, cx));
+        });
+        frame(vcx);
+    }
+
+    fn set_hub_hidden(vcx: &mut VisualTestContext, main: &Entity<MainWindow>, hidden: bool) {
+        let hub = vcx.read_entity(main, |m, _| m.host().hub().cloned().expect("hub"));
+        vcx.update(|_, cx| {
+            hub.update(cx, |_, cx| {
+                cx.emit(tl_ui_base::hub::HiddenChanged { hidden });
+            })
+        });
+        vcx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn hidden_window_draws_no_frames(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                engine: true,
+                ..Opts::default()
+            },
+        );
+        frame(&mut vcx);
+        let main = main(&mut vcx);
+        let draws = |vcx: &mut VisualTestContext| vcx.read_entity(&main, |m, _| m.draws());
+        // Visible: a frame request draws the window.
+        let before = draws(&mut vcx);
+        request_main_frame(&mut vcx, &main);
+        assert!(draws(&mut vcx) > before, "a visible window draws");
+
+        set_hub_hidden(&mut vcx, &main, true);
+        let hidden_at = draws(&mut vcx);
+        for _ in 0..10 {
+            request_main_frame(&mut vcx, &main);
+            wait(&mut vcx, 500);
+        }
+        assert_eq!(draws(&mut vcx), hidden_at, "a hidden window draws nothing");
+        let driver = vcx.update(|window, cx| AnimationDriver::global(window, cx));
+        assert!(!vcx.read_entity(&driver, |d, _| d.is_armed()));
+
+        // Visible again: the next request draws.
+        set_hub_hidden(&mut vcx, &main, false);
+        request_main_frame(&mut vcx, &main);
+        assert!(draws(&mut vcx) > hidden_at, "drawing resumes when shown");
+    }
+
+    #[test]
+    fn tick_period_follows_activation_and_interval() {
+        let tick = Duration::from_millis(500);
+        assert_eq!(shell::tick_period(tick, true, 2000), tick);
+        assert_eq!(
+            shell::tick_period(tick, false, 2000),
+            Duration::from_millis(2000)
+        );
+        assert_eq!(
+            shell::tick_period(tick, false, 250),
+            tick,
+            "never faster than the tick"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn inactive_window_slows_fps_tick_to_the_interval(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                engine: true,
+                ..Opts::default()
+            },
+        );
+        let engine = vcx.update(|_, cx| cx.global::<TestEngine>().0.clone());
+        engine.publish_host_settings(|v| v.interval_ms = 2000);
+        vcx.run_until_parked();
+        set_show_fps(&mut vcx, true);
+        let main = main(&mut vcx);
+        let period = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| main.read(cx).fps_overlay().read(cx).period())
+        };
+        assert_eq!(period(&mut vcx), shell::FPS_TICK, "active window");
+
+        vcx.deactivate_window();
+        vcx.run_until_parked();
+        assert_eq!(
+            period(&mut vcx),
+            Duration::from_millis(2000),
+            "inactive window"
+        );
+
+        // The period follows a new sample interval.
+        engine.publish_host_settings(|v| v.interval_ms = 5000);
+        vcx.run_until_parked();
+        assert_eq!(period(&mut vcx), Duration::from_millis(5000));
+
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        assert_eq!(period(&mut vcx), shell::FPS_TICK, "active again");
     }
 
     fn set_show_fps(vcx: &mut VisualTestContext, on: bool) {
