@@ -1,12 +1,13 @@
-// x12tr.5: per-minute NVIDIA RM and renderer counts for one tasklens pid, plus write-lock holds.
-// Usage: bpftrace tlgpu.bt <pid> <draw-symbol> <present-symbol>   (uprobes use $4 = binary path)
+// x12tr.5 rerun. Per-minute RM and renderer counts for one tasklens pid, RM write-lock holds,
+// and KWin stalls woken by this pid.
+// Usage: bpftrace gpu-idle-validation.tlgpu.bt <pid> <draw-symbol> <present-symbol> <binary-path> <kwin-pid>
 kprobe:nvidia:nvidia_unlocked_ioctl /pid == $1/ { @ioctl++; }
 kprobe:nvidia:nvos_create_alloc /pid == $1/ { @alloc++; }
 kprobe:nvidia:nvidia_mmap_helper /pid == $1/ { @map++; }
 kprobe:nvidia:nv_alloc_pages /pid == $1/ { @dmamap++; }
 uprobe:$4:$2 /pid == $1/ { @draw++; }
 uprobe:$4:$3 /pid == $1/ { @present++; }
-kprobe:nvidia:os_acquire_rwlock_write /pid == $1/ { @lk[tid] = arg0; }
+kprobe:nvidia:os_acquire_rwlock_write /pid == $1/ { @lk[tid] = arg0; @wstk[kstack(6)] = count(); }
 kretprobe:nvidia:os_acquire_rwlock_write /pid == $1 && @lk[tid]/ { @t0[tid] = nsecs; }
 kprobe:nvidia:os_release_rwlock_write /pid == $1 && @t0[tid] && @lk[tid] == arg0/ {
   $d = (uint64)(nsecs - @t0[tid]) / 1000;
@@ -15,10 +16,27 @@ kprobe:nvidia:os_release_rwlock_write /pid == $1 && @t0[tid] && @lk[tid] == arg0
   if ($d > 10000) { printf("HOLD>10ms %d us tid %d\n", $d, tid); print(kstack(12)); }
   delete(@t0[tid]); delete(@lk[tid]);
 }
+// syscalls of this pid: ioctl, mmap, munmap, mprotect, madvise
+tracepoint:syscalls:sys_enter_ioctl /pid == $1/ { @sc_ioctl++; }
+tracepoint:syscalls:sys_enter_mmap /pid == $1/ { @sc_mmap++; }
+tracepoint:syscalls:sys_enter_munmap /pid == $1/ { @sc_munmap++; }
+// KWin main thread off-CPU, woken by this pid
+tracepoint:sched:sched_switch /args.prev_pid == $5/ { @off = nsecs; }
+tracepoint:sched:sched_waking /args.pid == $5 && @off/ {
+  $d = (uint64)(nsecs - @off);
+  if (pid == $1) {
+    @kw_by_tl++;
+    if ($d > 10000000) { @kw_tl_gt10ms++; printf("KWIN-OFF-WOKEN-BY-TL %d ms tid %d\n", $d / 1000000, tid); }
+    if ($d > 100000000) { @kw_tl_gt100ms++; }
+  }
+  if ($d > 100000000) { @kw_all_gt100ms++; }
+  @off = 0;
+}
 interval:s:60 {
   time("%H:%M:%S ");
-  printf("ioctl=%d nvos_alloc=%d mmap=%d allocpages=%d draw=%d present=%d lockholds=%d max_hold_us=%d\n",
-    @ioctl, @alloc, @map, @dmamap, @draw, @present, @holds, @max_hold_us);
+  printf("ioctl=%d nvos_alloc=%d mmap=%d allocpages=%d draw=%d present=%d lockholds=%d max_hold_us=%d sc_ioctl=%d sc_mmap=%d sc_munmap=%d kwin_woken_by_tl=%d kwin_tl_gt10ms=%d kwin_tl_gt100ms=%d kwin_all_gt100ms=%d\n",
+    @ioctl, @alloc, @map, @dmamap, @draw, @present, @holds, @max_hold_us, @sc_ioctl, @sc_mmap, @sc_munmap, @kw_by_tl, @kw_tl_gt10ms, @kw_tl_gt100ms, @kw_all_gt100ms);
   clear(@ioctl); clear(@alloc); clear(@map); clear(@dmamap); clear(@draw); clear(@present); clear(@holds); clear(@max_hold_us);
+  clear(@sc_ioctl); clear(@sc_mmap); clear(@sc_munmap); clear(@kw_by_tl); clear(@kw_tl_gt10ms); clear(@kw_tl_gt100ms); clear(@kw_all_gt100ms);
 }
-END { clear(@lk); clear(@t0); }
+END { clear(@lk); clear(@t0); clear(@off); }

@@ -1,0 +1,5 @@
+// x12tr.5 coverage run: RM write-lock entry stacks per minute (outermost of 6 frames is the RM API entry).
+// Usage: bpftrace gpu-idle-validation.rmentry.bt <pid>
+kprobe:nvidia:os_acquire_rwlock_write /pid == $1/ { @wstk[kstack(6)] = count(); }
+interval:s:60 { time("MINUTE %H:%M:%S\n"); print(@wstk); clear(@wstk); }
+interval:s:420 { exit(); }
