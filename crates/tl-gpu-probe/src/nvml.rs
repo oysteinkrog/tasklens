@@ -250,35 +250,40 @@ pub fn merge_process_rows(
     uuid: [u8; 16],
     util_supported: Reading<()>,
 ) -> Vec<GpuProcessSample> {
-    // Per pid: the newest utilisation sample, and the memory sum (`None` once an entry is
-    // `Unavailable`, or when the pid is in neither list).
+    // Per pid: the newest utilisation sample, and the memory from each list. Entries for one pid
+    // in one list add up. The two lists do not: NVML reports the same total for a pid in both
+    // the graphics and the compute list (a "C+G" process), so the larger of the two is the
+    // pid's memory. Summing them showed every C+G process at twice its size (seen 2026-11-11
+    // against nvidia-smi on an RTX 5070 Ti). `None` once an entry is `Unavailable`.
     struct Acc<'a> {
         util: Option<&'a ProcessUtilizationSample>,
-        mem: Option<Option<u64>>,
+        mem: [Option<Option<u64>>; 2],
     }
     let mut by_pid: BTreeMap<u32, Acc<'_>> = BTreeMap::new();
     for s in util {
         let acc = by_pid.entry(s.pid).or_insert(Acc {
             util: None,
-            mem: None,
+            mem: [None; 2],
         });
         if acc.util.is_none_or(|old| s.timestamp > old.timestamp) {
             acc.util = Some(s);
         }
     }
-    for p in graphics.iter().chain(compute) {
-        let acc = by_pid.entry(p.pid).or_insert(Acc {
-            util: None,
-            mem: None,
-        });
-        let used = match p.used_gpu_memory {
-            UsedGpuMemory::Used(bytes) => Some(bytes),
-            UsedGpuMemory::Unavailable => None,
-        };
-        acc.mem = Some(match acc.mem {
-            None => used,
-            Some(sum) => sum.zip(used).map(|(a, b)| a.saturating_add(b)),
-        });
+    for (list, procs) in [graphics, compute].into_iter().enumerate() {
+        for p in procs {
+            let acc = by_pid.entry(p.pid).or_insert(Acc {
+                util: None,
+                mem: [None; 2],
+            });
+            let used = match p.used_gpu_memory {
+                UsedGpuMemory::Used(bytes) => Some(bytes),
+                UsedGpuMemory::Unavailable => None,
+            };
+            acc.mem[list] = Some(match acc.mem[list] {
+                None => used,
+                Some(sum) => sum.zip(used).map(|(a, b)| a.saturating_add(b)),
+            });
+        }
     }
     by_pid.remove(&0);
 
@@ -302,8 +307,8 @@ pub fn merge_process_rows(
                 enc_pct: pct(|s| s.enc_util),
                 dec_pct: pct(|s| s.dec_util),
                 mem_used: match acc.mem {
-                    Some(Some(bytes)) => Reading::Ok(bytes),
-                    Some(None) | None => Reading::Unsupported,
+                    [Some(None), _] | [_, Some(None)] | [None, None] => Reading::Unsupported,
+                    [g, c] => Reading::Ok(g.flatten().max(c.flatten()).unwrap_or(0)),
                 },
             }
         })
@@ -698,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_rows_sum_memory_and_newest_util() {
+    fn merge_rows_max_memory_across_lists_and_newest_util() {
         let rows = merge_process_rows(
             &[util(200, 3, 5, 1), util(100, 4, 30, 10)],
             &[proc_info(100, UsedGpuMemory::Used(GIB))],
@@ -720,7 +725,7 @@ mod tests {
                 mem_pct: Reading::Ok(10),
                 enc_pct: Reading::Ok(0),
                 dec_pct: Reading::Ok(0),
-                mem_used: Reading::Ok(GIB + 512 * MIB),
+                mem_used: Reading::Ok(GIB),
             }
         );
         assert_eq!(rows[1].sm_pct, Reading::Ok(5));
@@ -729,6 +734,56 @@ mod tests {
         assert_eq!(rows[2].enc_pct, Reading::Ok(0));
         assert_eq!(rows[2].mem_used, Reading::Unsupported);
         assert!(rows.iter().all(|r| r.uuid == UUID));
+    }
+
+    /// A "C+G" process is in both lists with the same total; it counts once, as in nvidia-smi
+    /// (2026-11-11: every C+G process showed at twice its size in VRAM by app).
+    #[test]
+    fn merge_counts_a_graphics_and_compute_pid_once() {
+        for (g, c) in [(GIB, GIB), (300 * MIB, 300 * MIB), (GIB, 0)] {
+            let rows = merge_process_rows(
+                &[],
+                &[proc_info(7, UsedGpuMemory::Used(g))],
+                &[proc_info(7, UsedGpuMemory::Used(c))],
+                UUID,
+                Reading::Ok(()),
+            );
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].mem_used, Reading::Ok(g.max(c)), "{g} {c}");
+        }
+    }
+
+    /// Two entries for one pid in the same list are two contexts, so they add up.
+    #[test]
+    fn merge_sums_entries_within_one_list() {
+        let rows = merge_process_rows(
+            &[],
+            &[
+                proc_info(7, UsedGpuMemory::Used(GIB)),
+                proc_info(7, UsedGpuMemory::Used(512 * MIB)),
+            ],
+            &[proc_info(7, UsedGpuMemory::Used(GIB))],
+            UUID,
+            Reading::Ok(()),
+        );
+        assert_eq!(rows[0].mem_used, Reading::Ok(GIB + 512 * MIB));
+    }
+
+    #[test]
+    fn merge_unavailable_in_either_list_is_unsupported() {
+        for (g, c) in [
+            (UsedGpuMemory::Unavailable, UsedGpuMemory::Used(GIB)),
+            (UsedGpuMemory::Used(GIB), UsedGpuMemory::Unavailable),
+        ] {
+            let rows = merge_process_rows(
+                &[],
+                &[proc_info(7, g)],
+                &[proc_info(7, c)],
+                UUID,
+                Reading::Ok(()),
+            );
+            assert_eq!(rows[0].mem_used, Reading::Unsupported);
+        }
     }
 
     #[test]
