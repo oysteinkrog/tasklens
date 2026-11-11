@@ -79,7 +79,7 @@ use self::device_page::DevicePage;
 use self::disk_box::DiskBox;
 use self::edit::EditState;
 use self::fixed_box::{FixedBox, FixedPlaced};
-use self::gpu_box::GpuBox;
+use self::gpu_box::{GpuAppsPlaced, GpuBox};
 use self::inner_split::{InnerSplitChanged, hit_selector};
 use self::layout::{BoxKind, GridBox, OverviewLayout, Placement, ROW_UNIT_DEFAULT, place_rows};
 use self::mem_box::{MemAppsPlaced, MemBox};
@@ -217,6 +217,9 @@ pub struct OverviewPage {
     /// The CPU box shows CPU by app (`CpuBox::apps_placed`): the page asks for the process
     /// sweep while the box is placed (UI-PRF-062).
     cpu_apps: bool,
+    /// The GPU box shows GPU load by app or VRAM by app (`GpuBox::apps_placed`): the page asks
+    /// for the process sweep and the per-process GPU rows while the box is placed.
+    gpu_apps: bool,
     gpu: Entity<GpuBox>,
     disk: Entity<DiskBox>,
     net: Entity<NetBox>,
@@ -382,6 +385,11 @@ impl OverviewPage {
             this.send_demand(cx);
         }));
         let cpu_apps = cpu.read(cx).apps_placed();
+        subs.push(cx.subscribe(&gpu, |this, _, ev: &GpuAppsPlaced, cx| {
+            this.gpu_apps = ev.0;
+            this.send_demand(cx);
+        }));
+        let gpu_apps = gpu.read(cx).apps_placed();
         subs.push(cx.subscribe(&gpu, Self::on_gpu_split));
         subs.push(cx.subscribe(&disk, Self::on_disk_split));
         subs.push(cx.subscribe(&net, Self::on_net_split));
@@ -409,6 +417,7 @@ impl OverviewPage {
             mem,
             mem_apps,
             cpu_apps,
+            gpu_apps,
             gpu,
             disk,
             net,
@@ -496,16 +505,24 @@ impl OverviewPage {
         }
     }
 
+    /// Whether the GPU box is placed and shows GPU load by app or VRAM by app.
+    fn gpu_apps_shown(&self) -> bool {
+        self.layout.has(BoxKind::Gpu) && self.gpu_apps
+    }
+
     /// Everything the boxes draw, CPU per core at 10 Hz, the process sweep while the Top
-    /// processes box is placed or the Memory or CPU box shows "By app" (its groups are summed on
-    /// each sweep, UI-PRF-060, UI-PRF-062), the device metric history for 1 h, 24 h and 7 d and
-    /// for every range while held at a time, and the timeline while its box is placed.
+    /// processes box is placed or the Memory, CPU or GPU box shows "By app" (its groups are
+    /// summed on each sweep, UI-PRF-060, UI-PRF-062), the per-process GPU rows while the GPU box
+    /// shows it, the device metric history for 1 h, 24 h and 7 d and for every range while held
+    /// at a time, and the timeline while its box is placed.
     pub fn demand_part(&self) -> Demand {
         let (paused, at) = self.paused.unzip();
         Demand {
             process_top: self.procs.as_ref().is_some_and(|p| p.placed)
                 || (self.layout.has(BoxKind::Memory) && self.mem_apps)
-                || (self.layout.has(BoxKind::Cpu) && self.cpu_apps),
+                || (self.layout.has(BoxKind::Cpu) && self.cpu_apps)
+                || self.gpu_apps_shown(),
+            gpu_process: self.gpu_apps_shown(),
             device_history_range: history_request(self.range, paused, at.unwrap_or(0)),
             device_timeline: self.layout.has(BoxKind::Timeline) && self.timeline.placed,
             any_surface_visible: true,
@@ -886,10 +903,11 @@ impl OverviewPage {
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
         let procs = layout.has(BoxKind::TopProcs);
         let timeline_moved = layout.has(BoxKind::Timeline) != self.layout.has(BoxKind::Timeline);
-        // Memory by app or CPU by app coming or going inside its box reaches the page as
-        // `MemAppsPlaced` or `CpuAppsPlaced`.
+        // Memory by app, CPU by app or GPU by app coming or going inside its box reaches the
+        // page as `MemAppsPlaced`, `CpuAppsPlaced` or `GpuAppsPlaced`.
         let mem_apps_moved = layout.has(BoxKind::Memory) != self.layout.has(BoxKind::Memory)
-            || layout.has(BoxKind::Cpu) != self.layout.has(BoxKind::Cpu);
+            || layout.has(BoxKind::Cpu) != self.layout.has(BoxKind::Cpu)
+            || layout.has(BoxKind::Gpu) != self.layout.has(BoxKind::Gpu);
         let split = layout.split(BoxKind::Cpu);
         let cpu_arrange = layout.arrange(BoxKind::Cpu);
         let cpu_mode = layout.config(BoxKind::Cpu).mode.id;

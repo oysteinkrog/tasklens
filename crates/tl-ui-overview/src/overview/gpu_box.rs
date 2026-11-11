@@ -40,6 +40,14 @@
 //! A grid layout (the user's own widgets, after Apply) is drawn by the box's [`WidgetEditor`]
 //! and its `WidgetContainer`, one cached entity per widget; so is the box while Edit Widgets is
 //! on.
+//!
+//! The `apps` ("Load by app") and `vram_apps` ("VRAM by app") modes (`tasklens-g00wx.4`) show
+//! [`AppsChart`] of [`AppsMetric::Gpu`] or [`AppsMetric::Vram`] for the first GPU (slot 0) in
+//! its Overview place, filling the body, drawn by the fixed widget `gpu_by_app` or
+//! `vram_by_app`. The box makes each chart the first time it shows it, in the preset or as a
+//! widget of the user's layout, and makes it again when the first GPU changes. With no GPU it
+//! draws nothing. While it shows one, the page asks for the process sweep and the per-process
+//! GPU rows ([`GpuAppsPlaced`]).
 
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash as _, Hasher as _};
@@ -59,7 +67,8 @@ use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::units;
 use tl_model::validity::Validity;
 use tl_ui_settings::layout::{
-    ContainerLayout, FormSet, GPU_BOX_CONTAINER, METRIC_POWER, METRIC_TEMP, METRIC_VRAM,
+    ContainerLayout, FixedWidget, FormSet, GPU_BOX_CONTAINER, METRIC_POWER, METRIC_TEMP,
+    METRIC_VRAM,
 };
 use tl_ui_settings::settings::NetworkUnit;
 
@@ -74,6 +83,7 @@ use super::gpu_flow::{
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
 use super::mem_box::MeterRow;
+use super::memory_apps::{AppsChart, AppsMetric, AppsPlace};
 use super::parts::{
     ChartSettings, ListFit, MIN_CHART_H, SPARK_GRID, arrange_min_h, box_chart, box_frame,
     chart_section_versions, class_probe, edit_chrome, grid_cells, list_fit, meter_fits,
@@ -84,6 +94,7 @@ use super::range::RangeText;
 use super::timeline::OverviewPause;
 use crate::widget::container::WidgetContainer;
 use crate::widget::edit::{WidgetEditEvent, WidgetEditor};
+use crate::widget::fixed_widget::FixedContent;
 use crate::widget::grid::SlotDevice;
 use crate::widget::metric_widget::{FlowLook, MetricWidget};
 use crate::widget::source::SourceStore;
@@ -127,7 +138,33 @@ pub const MODES: &[BoxMode] = &[
         label: "perf-overview-mode-chart",
         split: None,
     },
+    BoxMode {
+        id: APPS_MODE,
+        label: "perf-overview-mode-gpu-apps",
+        split: None,
+    },
+    BoxMode {
+        id: VRAM_APPS_MODE,
+        label: "perf-overview-mode-vram-apps",
+        split: None,
+    },
 ];
+
+/// The id of the "Load by app" mode: GPU load by app for the first GPU.
+pub const APPS_MODE: &str = "apps";
+/// The id of the "VRAM by app" mode: VRAM by app for the first GPU.
+pub const VRAM_APPS_MODE: &str = "vram_apps";
+
+/// The debug selector of the by-app part in `apps` and `vram_apps`.
+pub const GPU_APPS_ID: &str = "perf-overview-gpu-apps";
+
+/// Whether the box shows GPU load by app or VRAM by app now: in the `apps` or `vram_apps`
+/// preset, or as a widget of the user's layout or of Edit Widgets. The page asks for the process
+/// sweep and the per-process GPU rows while it does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GpuAppsPlaced(pub bool);
+
+impl EventEmitter<GpuAppsPlaced> for GpuBox {}
 
 /// The modes with an Arrange choice (UI-PRF-019, D-027): the grid of `engine_charts` and the two
 /// parts of `chart_engines` (chart on top, or on the left for Side by side), automatic by default.
@@ -157,6 +194,8 @@ enum GpuMode {
     ChartEngines,
     EngineCharts,
     Chart,
+    Apps,
+    VramApps,
 }
 
 impl GpuMode {
@@ -165,6 +204,8 @@ impl GpuMode {
         match id {
             "chart_engines" => Self::ChartEngines,
             "chart" => Self::Chart,
+            APPS_MODE => Self::Apps,
+            VRAM_APPS_MODE => Self::VramApps,
             _ => Self::EngineCharts,
         }
     }
@@ -174,8 +215,67 @@ impl GpuMode {
             Self::EngineCharts => MODES[0].id,
             Self::ChartEngines => MODES[1].id,
             Self::Chart => MODES[2].id,
+            Self::Apps => MODES[3].id,
+            Self::VramApps => MODES[4].id,
         }
     }
+
+    /// The by-app fixed widget the mode shows.
+    fn apps_kind(self) -> Option<FixedWidget> {
+        match self {
+            Self::Apps => Some(FixedWidget::GpuByApp),
+            Self::VramApps => Some(FixedWidget::VramByApp),
+            _ => None,
+        }
+    }
+}
+
+/// The box's by-app charts, GPU load by app then VRAM by app, and the first GPU they are for.
+#[derive(Default)]
+struct AppsCharts {
+    charts: [Option<Entity<AppsChart>>; 2],
+    gpu: Option<DeviceIdx>,
+}
+
+type AppsCell = Rc<RefCell<AppsCharts>>;
+
+/// The by-app chart of fixed widget `kind` for the first GPU, made in its Overview place the
+/// first time it is asked for. `None` for another kind or with no GPU.
+fn apps_chart(
+    cell: &AppsCell,
+    kind: &FixedWidget,
+    hub: &Entity<SnapshotHub>,
+    cx: &mut App,
+) -> Option<Entity<AppsChart>> {
+    let i = match kind {
+        FixedWidget::GpuByApp => 0,
+        FixedWidget::VramByApp => 1,
+        _ => return None,
+    };
+    let gpu = {
+        let c = cell.borrow();
+        if let Some(chart) = &c.charts[i] {
+            return Some(chart.clone());
+        }
+        c.gpu?
+    };
+    let metric = if i == 0 {
+        AppsMetric::Gpu(gpu)
+    } else {
+        AppsMetric::Vram(gpu)
+    };
+    let hub = hub.clone();
+    let chart = cx.new(|cx| AppsChart::new_in(hub, metric, AppsPlace::Overview, cx));
+    cell.borrow_mut().charts[i] = Some(chart.clone());
+    Some(chart)
+}
+
+/// The content of the box's fixed widgets: `gpu_by_app` and `vram_by_app` draw the box's
+/// by-app charts.
+fn fixed_content(cell: AppsCell, hub: Entity<SnapshotHub>) -> FixedContent {
+    Rc::new(move |kind: &FixedWidget, cx: &mut App| {
+        apps_chart(&cell, kind, &hub, cx).map(Into::into)
+    })
 }
 
 /// The page saves the share the box ended a drag or a double-click on.
@@ -781,8 +881,12 @@ pub struct GpuBox {
     store: Rc<RefCell<SourceStore>>,
     /// The plan of the last flow render, which the container's placer reads.
     plan: PlanCell,
+    /// GPU load by app and VRAM by app, made the first time the box or a widget shows them.
+    apps: AppsCell,
+    /// Whether the box shows a by-app chart now ([`GpuAppsPlaced`]).
+    apps_placed: bool,
     _subs: [Subscription; 5],
-    _editor_sub: Subscription,
+    _widget_subs: [Subscription; 2],
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -813,18 +917,25 @@ impl GpuBox {
         let grid = saved_grid(cx);
         let plan = PlanCell::default();
         let shown = grid.clone().unwrap_or_else(|| flow.clone());
+        let apps: AppsCell = Rc::default();
         let container = {
             let store = Rc::clone(&store);
+            let content = fixed_content(Rc::clone(&apps), hub.clone());
             cx.new(|cx| {
                 let mut c = WidgetContainer::new(GPU_BOX_CONTAINER, shown, hub, store, cx);
                 c.set_flow_placer(Some(gpu_flow::placer(plan.clone())), cx);
+                c.set_fixed_content(Some(content), cx);
                 // The box draws the widgets of its flow layouts in their 1.1.0 parts.
                 c.set_hosted(true, cx);
                 c
             })
         };
         let editor = cx.new(|cx| WidgetEditor::new(container.clone(), hub, cx));
-        let editor_sub = cx.subscribe(&editor, Self::on_widget_edit);
+        let widget_subs = [
+            cx.subscribe(&editor, Self::on_widget_edit),
+            // The editor's layout changes reach the container: a by-app chart may come or go.
+            cx.observe(&container, |this, _, cx| this.sync_apps(cx)),
+        ];
         let mut this = Self {
             range_text: RangeText::default(),
             hub: hub.clone(),
@@ -872,7 +983,9 @@ impl GpuBox {
             container,
             store,
             plan,
-            _editor_sub: editor_sub,
+            apps,
+            apps_placed: false,
+            _widget_subs: widget_subs,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -880,6 +993,8 @@ impl GpuBox {
         };
         this.build_sections(gpus, cx);
         this.sync_slots(gpus, cx);
+        this.sync_first_gpu(cx);
+        this.sync_apps(cx);
         this
     }
 
@@ -963,6 +1078,7 @@ impl GpuBox {
                 self.show_saved(cx);
             }
         }
+        self.sync_apps(cx);
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
@@ -985,6 +1101,7 @@ impl GpuBox {
             return;
         }
         self.show_saved(cx);
+        self.sync_apps(cx);
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
@@ -993,7 +1110,8 @@ impl GpuBox {
     /// The flow layout of the shown mode, arrangement, split and hidden names. Returns whether
     /// it changed.
     fn sync_flow(&mut self, cx: &mut Context<Self>) -> bool {
-        let arrange = (self.mode != GpuMode::Chart).then_some(self.arrange);
+        let arrange = matches!(self.mode, GpuMode::EngineCharts | GpuMode::ChartEngines)
+            .then_some(self.arrange);
         let split = (self.mode == GpuMode::ChartEngines
             && self.chart_split.saved() != self.chart_split.default_share())
         .then(|| self.chart_split.saved());
@@ -1024,9 +1142,62 @@ impl GpuBox {
         }
         self.build_sections(gpus, cx);
         self.sync_slots(gpus, cx);
+        self.sync_first_gpu(cx);
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
+    }
+
+    /// The first GPU changed: the by-app charts are for the old one, so they go, and the box
+    /// makes them again for the new one when it shows them. The fixed widgets take the new
+    /// charts. With no GPU there is no chart.
+    fn sync_first_gpu(&mut self, cx: &mut Context<Self>) {
+        let gpu = self.sections.first().map(|s| s.idx);
+        {
+            let mut apps = self.apps.borrow_mut();
+            if apps.gpu == gpu {
+                return;
+            }
+            apps.gpu = gpu;
+            apps.charts = [None, None];
+        }
+        if let Some(kind) = self.mode.apps_kind() {
+            apps_chart(&self.apps, &kind, &self.hub, cx);
+        }
+        self.container.update(cx, |c, cx| {
+            c.place_again(cx);
+        });
+    }
+
+    /// Whether a by-app chart is shown changed: the page asks for the process sweep and the
+    /// per-process GPU rows while one is.
+    fn sync_apps(&mut self, cx: &mut Context<Self>) {
+        let host_draws = !self.editing && self.grid.is_none();
+        let placed = if host_draws {
+            self.mode.apps_kind().is_some() && gpu_flow::any_apps_of(&self.flow).is_some()
+        } else {
+            gpu_flow::any_apps_of(self.container.read(cx).layout()).is_some()
+        };
+        if placed != self.apps_placed {
+            self.apps_placed = placed;
+            cx.emit(GpuAppsPlaced(placed));
+        }
+    }
+
+    /// Whether the box shows GPU load by app or VRAM by app now: in the `apps` or `vram_apps`
+    /// preset, or as a widget of the user's layout or of Edit Widgets.
+    pub fn apps_placed(&self) -> bool {
+        self.apps_placed
+    }
+
+    /// GPU load by app, once the box or one of its widgets has shown it for the first GPU.
+    pub fn gpu_apps(&self) -> Option<Entity<AppsChart>> {
+        self.apps.borrow().charts[0].clone()
+    }
+
+    /// VRAM by app, once the box or one of its widgets has shown it for the first GPU.
+    pub fn vram_apps(&self) -> Option<Entity<AppsChart>> {
+        self.apps.borrow().charts[1].clone()
     }
 
     /// The GPUs of slot 0 and slot 1 for the widget sources and the editor: the first two GPUs
@@ -1095,11 +1266,15 @@ impl GpuBox {
         let mode = GpuMode::from_id(id);
         if mode != self.mode {
             self.mode = mode;
+            if let Some(kind) = mode.apps_kind() {
+                apps_chart(&self.apps, &kind, &self.hub, cx);
+            }
             self.sync_flow(cx);
             let snap = box_snapshot(&self.hub, cx);
             if self.sync_engines(&snap, cx) {
                 self.sync_text(&snap, true);
             }
+            self.sync_apps(cx);
             cx.notify();
         }
     }
@@ -1856,6 +2031,8 @@ impl GpuBox {
             GpuMode::EngineCharts => PlanLook::Cells,
             GpuMode::ChartEngines => PlanLook::Rows,
             GpuMode::Chart => PlanLook::Chart,
+            GpuMode::Apps => PlanLook::Apps,
+            GpuMode::VramApps => PlanLook::VramApps,
         };
         let sections = self
             .sections
@@ -1905,7 +2082,41 @@ impl GpuBox {
             busiest: self.sections.first().map_or(0, |s| busiest(&s.engines)),
             collapsed: false,
             line: LineWidths::default(),
+            apps: self
+                .mode
+                .apps_kind()
+                .filter(|_| !self.sections.is_empty())
+                .and_then(|kind| gpu_flow::apps_of(flow, kind)),
         }
+    }
+
+    /// `apps` and `vram_apps`: the by-app chart filling the body, drawn by its fixed widget.
+    /// Nothing with no GPU.
+    fn apps_part(&self, m: &UiMetrics, cx: &mut Context<Self>) -> AnyElement {
+        let plan = self.make_plan(None, m);
+        let mut drawn: SmallVec<[u32; 16]> = SmallVec::new();
+        let part = plan.apps.and_then(|id| {
+            let f = self.container.update(cx, |c, cx| c.flow_fixed(id, cx))?;
+            drawn.push(id);
+            Some(
+                f.cached(StyleRefinement::default().size_full())
+                    .into_any_element(),
+            )
+        });
+        place_plan(
+            &self.container,
+            &self.plan,
+            plan,
+            drawn,
+            LineWidths::default(),
+            cx,
+        );
+        div()
+            .tl_selector(|| GPU_APPS_ID.into())
+            .relative()
+            .size_full()
+            .children(part)
+            .into_any_element()
     }
 
     /// `chart_engines` and `chart`: the sections of UI-PRF-017, or only their charts and VRAM rows.
@@ -2363,6 +2574,7 @@ impl Render for GpuBox {
             let body = match self.mode {
                 GpuMode::EngineCharts => self.charts_body(&m, &theme, cx),
                 GpuMode::ChartEngines | GpuMode::Chart => self.list_body(&m, &theme, window, cx),
+                GpuMode::Apps | GpuMode::VramApps => self.apps_part(&m, cx),
             };
             // The editor sits under the body with no widgets, so its container knows the body's
             // size when Edit Widgets starts.

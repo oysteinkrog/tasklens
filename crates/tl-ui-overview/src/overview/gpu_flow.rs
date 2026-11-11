@@ -32,6 +32,9 @@
 //! plan, so a sample that changes the shape (a value appears or goes away, or a value gains or
 //! loses a character, as 9.9 W to 10.0 W) places again, and a sample that keeps it places
 //! nothing (tasklens-lhliq.7, leader decision D).
+//!
+//! The `apps` and `vram_apps` presets hold one fixed widget, GPU load by app or VRAM by app
+//! for the first GPU (`tasklens-g00wx.4`). It fills the body ([`FlowPlan::apps`]).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -42,8 +45,8 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::system::GpuEngine;
 use tl_ui_settings::layout::{
-    ContainerLayout, DeviceSelector, FormSet, METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey,
-    WidgetSetting, convert_gpu_box, grid_cols,
+    ContainerLayout, DeviceSelector, FixedWidget, FormSet, METRIC_POWER, METRIC_TEMP, METRIC_VRAM,
+    MetricKey, WidgetContent, WidgetSetting, convert_gpu_box, grid_cols,
 };
 use tl_ui_settings::settings::OverviewGridSetting;
 
@@ -137,6 +140,20 @@ pub fn shows_line(layout: &ContainerLayout, slot: usize) -> (bool, bool) {
     )
 }
 
+/// The id of the by-app fixed widget `kind` (`gpu_by_app` or `vram_by_app`).
+pub fn apps_of(layout: &ContainerLayout, kind: FixedWidget) -> Option<u32> {
+    layout
+        .widgets
+        .iter()
+        .find(|w| w.content == WidgetContent::Fixed(kind.clone()))
+        .map(|w| w.id)
+}
+
+/// The id of either by-app fixed widget, GPU load by app first.
+pub fn any_apps_of(layout: &ContainerLayout) -> Option<u32> {
+    apps_of(layout, FixedWidget::GpuByApp).or_else(|| apps_of(layout, FixedWidget::VramByApp))
+}
+
 /// One part of a section and the widget that draws it: the widget's id and its metric.
 pub type Part = (u32, MetricKey);
 
@@ -149,6 +166,10 @@ pub enum PlanLook {
     Rows,
     /// `chart`: the section chart and the VRAM row.
     Chart,
+    /// `apps`: GPU load by app alone.
+    Apps,
+    /// `vram_apps`: VRAM by app alone.
+    VramApps,
 }
 
 impl PlanLook {
@@ -158,6 +179,17 @@ impl PlanLook {
             Self::Cells => "engine_charts",
             Self::Rows => "chart_engines",
             Self::Chart => "chart",
+            Self::Apps => "apps",
+            Self::VramApps => "vram_apps",
+        }
+    }
+
+    /// The by-app fixed widget of an apps look.
+    pub fn apps_kind(self) -> Option<FixedWidget> {
+        match self {
+            Self::Apps => Some(FixedWidget::GpuByApp),
+            Self::VramApps => Some(FixedWidget::VramByApp),
+            _ => None,
         }
     }
 }
@@ -205,6 +237,8 @@ pub struct FlowPlan {
     pub collapsed: bool,
     /// The drawn widths of the temperature and power values and of the " · " between them.
     pub line: LineWidths,
+    /// `apps` and `vram_apps`: the by-app widget, which fills the body. `None` with no GPU.
+    pub apps: Option<u32>,
 }
 
 impl FlowPlan {
@@ -232,8 +266,20 @@ impl FlowPlan {
         match self.look {
             PlanLook::Cells => self.cell_rects(area, &mut out),
             PlanLook::Rows | PlanLook::Chart => self.row_rects(area, &mut out),
+            // The by-app widget is fixed, not a metric part: see `apps_rect`.
+            PlanLook::Apps | PlanLook::VramApps => {}
         }
         out
+    }
+
+    /// `apps` and `vram_apps`: the by-app widget and its rectangle, the whole body.
+    pub fn apps_rect(&self, area: Size<Pixels>) -> Option<(u32, Bounds<Pixels>)> {
+        self.look.apps_kind()?;
+        let id = self.apps?;
+        Some((
+            id,
+            rect(0., 0., f32::from(area.width), f32::from(area.height)),
+        ))
     }
 
     /// `engine_charts`: the engine cells of each section's grid and its VRAM row, as
@@ -660,6 +706,14 @@ fn place(cell: &PlanCell, input: &FlowInput<'_>) -> InnerPlacement {
         let st = cell.0.borrow();
         let preset = input.layout.preset.as_ref().map(|p| p.id.as_str());
         if let Some(plan) = st.plan.as_ref().filter(|p| preset == Some(p.look.id())) {
+            if let (Some(kind), Some((id, bounds))) =
+                (plan.look.apps_kind(), plan.apps_rect(input.area))
+                && input.items.iter().any(|i| {
+                    i.setting.id == id && i.setting.content == WidgetContent::Fixed(kind.clone())
+                })
+            {
+                widgets.push(PlacedWidget { id, bounds });
+            }
             for ((id, metric), bounds) in plan.rects(input.area) {
                 let Some(item) = input.items.iter().find(|i| i.setting.id == *id) else {
                     continue;
@@ -762,6 +816,7 @@ mod tests {
             busiest: 2,
             collapsed: false,
             line: line_widths(),
+            apps: None,
         }
     }
 
@@ -940,6 +995,34 @@ mod tests {
     }
 
     /// Only a change that can move a widget asks for a new placement: a new busiest engine
+    /// `apps` and `vram_apps`: the by-app widget fills the body and no metric part is placed.
+    /// With no GPU there is no widget to place.
+    #[test]
+    fn apps_fills_the_body() {
+        let area = gpui_kit::size(px(400.), px(300.));
+        for (mode, look, kind) in [
+            ("apps", PlanLook::Apps, FixedWidget::GpuByApp),
+            ("vram_apps", PlanLook::VramApps, FixedWidget::VramByApp),
+        ] {
+            let l = flow_layout(mode, None, None, &[]);
+            let id = apps_of(&l, kind.clone()).expect("the by-app widget");
+            assert_eq!(any_apps_of(&l), Some(id));
+            assert_eq!(look.id(), mode);
+            assert_eq!(look.apps_kind(), Some(kind));
+            let plan = FlowPlan {
+                look,
+                sections: SmallVec::new(),
+                apps: Some(id),
+                ..rows_plan()
+            };
+            assert!(rects_of(&plan, 400., 300.).is_empty());
+            assert_eq!(plan.apps_rect(area), Some((id, rect(0., 0., 400., 300.))));
+            let none = FlowPlan { apps: None, ..plan };
+            assert_eq!(none.apps_rect(area), None);
+        }
+        assert_eq!(rows_plan().apps_rect(area), None, "not an apps look");
+    }
+
     /// counts only while the first section is collapsed.
     #[test]
     fn plan_cell_ignores_the_busiest_engine_unless_collapsed() {
