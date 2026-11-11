@@ -31,8 +31,8 @@ use super::GraphColor;
 use super::menu::{CardMenuCtx, card_menu};
 use super::panel::MinigraphPanel;
 use super::sources::{
-    MinigraphEntry, MinigraphId, MinigraphSource, ProcessLabel, ProcessSourceView,
-    resolve_process_source,
+    GraphColumn, MinigraphEntry, MinigraphId, MinigraphSource, ProcessLabel, ProcessSourceView,
+    column_scale, resolve_process_source,
 };
 use crate::core::DeviceKey;
 use tl_ui_base::hub::{SnapshotChanged, SnapshotHub};
@@ -176,7 +176,8 @@ impl MinigraphCard {
                 &theme,
             ),
         };
-        let chart = cx.new(|cx| ChartView::new(spec, chart_labels(), hub, cx));
+        let fmt = readout_format(&entry.source, entry.column);
+        let chart = cx.new(|cx| ChartView::new(spec, chart_labels(fmt), hub, cx));
         let (label, process_label) = match &process {
             Some(view) => (view.label.clone(), Some(view.label_parts.clone())),
             None => (label_for(&entry.source, cx), None),
@@ -1102,11 +1103,29 @@ fn value_width(value: &str, m: &UiMetrics, window: &Window, cx: &mut App) -> Pix
     })
 }
 
-/// The card draws the label and value itself.
-fn chart_labels() -> ChartLabels {
+/// The format of the hover readout: the unit of the series the chart draws (tasklens-iiugi).
+/// It follows the chart, not the card's value text: the Disk chart draws active time in
+/// percent while its value text is the read plus write rate. Memory reads in bytes, because its
+/// percent needs a total that can still be 0 when the card is made.
+pub fn readout_format(source: &MinigraphSource, column: GraphColumn) -> ValueFormat {
+    match source {
+        MinigraphSource::Cpu | MinigraphSource::Gpu(_) | MinigraphSource::Disk => {
+            ValueFormat::Percent
+        }
+        MinigraphSource::Memory | MinigraphSource::Vram(_) => ValueFormat::Bytes,
+        MinigraphSource::Network => ValueFormat::RateNetwork,
+        MinigraphSource::GpuTemp(_) => ValueFormat::Celsius,
+        MinigraphSource::Process { .. } | MinigraphSource::Name(_) | MinigraphSource::App(_) => {
+            column_scale(source, column).1
+        }
+    }
+}
+
+/// The card draws the label and value itself; the chart only formats its hover readout.
+fn chart_labels(value_fmt: ValueFormat) -> ChartLabels {
     ChartLabels {
         heading: None,
-        value_fmt: ValueFormat::Percent,
+        value_fmt,
         value_align: ValueAlign::Hidden,
         range_word: SharedString::default(),
         legend: SmallVec::new(),
@@ -1247,6 +1266,63 @@ fn newest(snap: &Snapshot, id: SeriesId) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tasklens-iiugi: every card's hover readout uses the unit of the series its chart draws.
+    /// A system card's readout must fit its chart's y scale; a process, name or app card's must
+    /// be its column's format. The Memory card read "44016365568.0%" before.
+    #[test]
+    fn readout_format_fits_every_card_chart() {
+        let theme = tl_ui_base::theme::tests::test_theme(tl_ui_base::theme::ThemeMode::Dark);
+        let sys = SystemSnapshot::default();
+        let system = [
+            MinigraphSource::Cpu,
+            MinigraphSource::Memory,
+            MinigraphSource::Disk,
+            MinigraphSource::Network,
+            MinigraphSource::Gpu(None),
+            MinigraphSource::Vram(None),
+            MinigraphSource::GpuTemp(None),
+        ];
+        for source in &system {
+            let spec = chart_spec_for(
+                source,
+                DeviceIdx(0),
+                &[],
+                &sys,
+                GraphColor::Accent,
+                60,
+                false,
+                &theme,
+            );
+            let fmt = readout_format(source, GraphColumn::Cpu);
+            let fits = match spec.y {
+                YScale::Fixed { max: 100.0, .. } => fmt == ValueFormat::Percent,
+                YScale::FixedTotal(_) => fmt == ValueFormat::Bytes,
+                YScale::AutoRate { iec: false } => fmt == ValueFormat::RateNetwork,
+                YScale::StickyTemp => fmt == ValueFormat::Celsius,
+                _ => false,
+            };
+            assert!(fits, "{source:?}: {fmt:?} on {:?}", spec.y);
+        }
+        let process = [
+            MinigraphSource::parse("process:0123456789abcdef:4242:1234567").expect("process"),
+            MinigraphSource::Name("firefox".into()),
+            MinigraphSource::App("org.mozilla.firefox".into()),
+        ];
+        for source in &process {
+            for column in GraphColumn::ALL {
+                assert_eq!(
+                    readout_format(source, column),
+                    column_scale(source, column).1,
+                    "{source:?} {column:?}"
+                );
+            }
+        }
+        assert_eq!(
+            readout_format(&MinigraphSource::Memory, GraphColumn::Cpu),
+            ValueFormat::Bytes
+        );
+    }
 
     #[test]
     fn cut_middle_keeps_both_ends() {
