@@ -4051,6 +4051,10 @@ mod sweep {
                     gpu_box::chart_id(0),
                     gpu_box::vram_id(0),
                     gpu_box::grid_id(0),
+                    // GPU load by app and VRAM by app (tasklens-g00wx.4).
+                    gpu_box::GPU_APPS_ID.to_owned(),
+                    memory_apps::APPS_ID.to_owned(),
+                    memory_apps::LEGEND_ID.to_owned(),
                 ]);
                 for key in ["gpu", "enc", "dec"] {
                     ids.push(gpu_box::engine_row_id(0, key));
@@ -4444,14 +4448,15 @@ mod sweep {
         }
         assert!(failures.0.is_empty(), "{failures}");
         // The checks ran: every mode drew rows, and every mode whose body shows values drew
-        // body values. The CPU, Top processes and Timeline bodies and the one-chart modes show
-        // none.
+        // body values. The CPU, Top processes and Timeline bodies, the one-chart modes and the
+        // GPU by-app modes show none.
         for kind in BoxKind::ALL {
             for mode in kind.modes() {
                 let with_values = matches!(
                     (kind, mode.id),
                     (BoxKind::Memory, "rows" | "chart_rows" | "charts")
-                        | (BoxKind::Gpu | BoxKind::Net, _)
+                        | (BoxKind::Gpu, "engine_charts" | "chart_engines" | "chart")
+                        | (BoxKind::Net, _)
                         | (BoxKind::Disk, "rows" | "disk_charts")
                 );
                 let key = format!("{} {}", kind.key(), mode.id);

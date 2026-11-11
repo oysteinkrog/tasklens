@@ -4030,6 +4030,41 @@ mod page {
         assert_eq!(items, expected);
     }
 
+    /// The GPU box gear lists its modes with Load by app and VRAM by app after Chart
+    /// (tasklens-g00wx.4), the shown one checked.
+    #[gpui_kit::test]
+    fn overview_gpu_gear_lists_by_app_modes(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
+        let at = center(r.bounds_of(gear_id(BoxKind::Gpu)));
+        r.press(at, 1);
+        r.release(at);
+        let items: Vec<(String, bool)> = r.vcx.update(|window, cx| {
+            let menu = tl_ui_kit::components::menu::open_context_menu(window, cx)
+                .expect("the gear menu is open");
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.label.map(|l| l.to_string()).unwrap_or_default(),
+                        e.checked,
+                    )
+                })
+                .collect()
+        });
+        let expected: Vec<(String, bool)> = [
+            ("Engine charts", true),
+            ("Chart and engines", false),
+            ("Chart", false),
+            ("Load by app", false),
+            ("VRAM by app", false),
+        ]
+        .map(|(l, c)| (l.to_owned(), c))
+        .into();
+        assert_eq!(items[..5], expected, "{items:?}");
+    }
+
     #[gpui_kit::test]
     fn overview_gap_accent_line_after_150ms(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
