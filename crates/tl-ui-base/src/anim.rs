@@ -303,6 +303,10 @@ impl AnimationDriver {
         self.hidden = hidden;
     }
 
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
     pub fn is_armed(&self) -> bool {
         self.armed
     }

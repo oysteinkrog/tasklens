@@ -779,6 +779,16 @@ impl HistoryPage {
             self.drive(cx, |q, c| q.on_view(&history, c));
             return;
         }
+        // An answer that carries nothing new draws nothing (tasklens-x12tr.4).
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|old| same_content(old, &history))
+        {
+            self.view = Some(Arc::clone(&history));
+            self.drive(cx, |q, c| q.on_view(&history, c));
+            return;
+        }
         // A TopAt answer changes only `top`: the card repaints, nothing else.
         if self
             .view
@@ -1680,4 +1690,31 @@ impl Render for HistoryPage {
             .child(minimap)
             .child(table)
     }
+}
+
+/// True when `new` shows the same data as `old`: the header sequence may differ, nothing the page
+/// draws does. The `Arc` pointers are tried first, so an unchanged view costs a few compares.
+fn same_content(old: &HistoryView, new: &HistoryView) -> bool {
+    fn same<T: PartialEq>(a: &Arc<[T]>, b: &Arc<[T]>) -> bool {
+        Arc::ptr_eq(a, b) || a[..] == b[..]
+    }
+    old.query_id == new.query_id
+        && old.source == new.source
+        && old.store_state == new.store_state
+        && old.span == new.span
+        && old.frame_t == new.frame_t
+        && old.range == new.range
+        && old.process_count == new.process_count
+        && old.totals == new.totals
+        && old.realtime_offset_ns == new.realtime_offset_ns
+        && match (&old.top, &new.top) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+        && same(&old.gaps, &new.gaps)
+        && same(&old.rows, &new.rows)
+        && same(&old.series, &new.series)
+        && same(&old.stack, &new.stack)
+        && same(&old.overview, &new.overview)
 }

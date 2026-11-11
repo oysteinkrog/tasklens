@@ -3418,6 +3418,54 @@ mod main_window {
         assert!(!vcx.read_entity(&driver, |d, _| d.is_armed()));
     }
 
+    #[gpui_kit::test]
+    fn idle_window_draws_no_frames(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                engine: true,
+                ..Opts::default()
+            },
+        );
+        frame(&mut vcx);
+        frame(&mut vcx);
+        wait(&mut vcx, 3000);
+        let main = main(&mut vcx);
+        let draws = vcx.read_entity(&main, |m, _| m.draws());
+        for _ in 0..50 {
+            wait(&mut vcx, 100);
+        }
+        assert_eq!(
+            vcx.read_entity(&main, |m, _| m.draws()),
+            draws,
+            "no draw in 5 s without a new sample"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn hidden_hub_hides_the_driver(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                engine: true,
+                ..Opts::default()
+            },
+        );
+        frame(&mut vcx);
+        let main = main(&mut vcx);
+        let hub = vcx.read_entity(&main, |m, _| m.host().hub().cloned().expect("hub"));
+        let driver = vcx.update(|window, cx| AnimationDriver::global(window, cx));
+        for hidden in [true, false] {
+            vcx.update(|_, cx| {
+                hub.update(cx, |_, cx| {
+                    cx.emit(tl_ui_base::hub::HiddenChanged { hidden });
+                })
+            });
+            vcx.run_until_parked();
+            assert_eq!(vcx.read_entity(&driver, |d, _| d.is_hidden()), hidden);
+        }
+    }
+
     fn set_show_fps(vcx: &mut VisualTestContext, on: bool) {
         vcx.update(|_, cx| TlSettings::update(cx, |d| d.settings.debug.show_fps = on));
         vcx.run_until_parked();

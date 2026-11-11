@@ -76,7 +76,7 @@ use tl_ui_base::app_env::{AppRequestHandler, BootSettings, StartOptions, ToastKi
 use tl_ui_base::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use tl_ui_base::host::{HostContext, HostRegistry, HostTab};
 use tl_ui_base::hosts_edit;
-use tl_ui_base::hub::{ComponentMask, LinkChanged, SnapshotChanged, SnapshotHub};
+use tl_ui_base::hub::{ComponentMask, HiddenChanged, LinkChanged, SnapshotChanged, SnapshotHub};
 use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
 use tl_ui_base::registry::{GlobalRegistry, WindowKey};
 use tl_ui_base::selector::TlSelector;
@@ -141,6 +141,8 @@ const GLOBAL_WITH_HOSTS: &str = "Global Hosts";
 
 /// How often the host tabs read the link status and flip the connecting pulse (1 Hz pulse).
 const HOST_TICK: Duration = Duration::from_millis(500);
+/// HOST_TICK ticks per update in an inactive window: one sample interval (1 s by default).
+const HOST_IDLE_TICKS: u32 = 2;
 /// How opaque the page looks while its host reconnects (UI-SHL-008): a cover of the window
 /// background at `1 - RECONNECT_OPACITY` alpha.
 const RECONNECT_OPACITY: f32 = 0.6;
@@ -1285,6 +1287,10 @@ pub struct MainWindow {
     host_tabs: Entity<HostTabs>,
     /// Reads the link status and flips the connecting pulse while there are host tabs.
     _host_tick: Option<Task<()>>,
+    /// Whether the window is the active one; kept by the activation observer.
+    window_active: bool,
+    /// Host ticks skipped since the last update while the window is inactive.
+    host_idle_ticks: u32,
     /// Key context "Global".
     root_focus: FocusHandle,
     titlebar: Entity<TitleBarView>,
@@ -1364,6 +1370,9 @@ pub struct MainWindow {
     /// Animation frames the fade asked for.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     fade_frames: u32,
+    /// Times `render` ran.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    draws: u64,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     first_frames: u32,
     /// `select_by_pid` calls made by `run_select_pid`.
@@ -1438,6 +1447,7 @@ impl MainWindow {
         // First focus starts the Shift-at-launch window (E29-030, R-124, U-43).
         subs.push(
             cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+                this.window_active = window.is_window_active();
                 if this.first_focus_at.is_none() && window.is_window_active() {
                     this.first_focus_at = Some(cx.background_executor().now());
                 }
@@ -1579,6 +1589,8 @@ impl MainWindow {
             shown: 0,
             host_tabs,
             _host_tick: None,
+            window_active: window.is_window_active(),
+            host_idle_ticks: 0,
             root_focus,
             titlebar,
             tabstrip,
@@ -1623,6 +1635,8 @@ impl MainWindow {
             reconnect_cover: None,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             fade_frames: 0,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            draws: 0,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             first_frames: 0,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -1701,6 +1715,12 @@ impl MainWindow {
 
     /// Animation frames the page fade asked for.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    /// How many times the window rendered.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub fn draws(&self) -> u64 {
+        self.draws
+    }
+
     pub fn fade_frames(&self) -> u32 {
         self.fade_frames
     }
@@ -1755,7 +1775,13 @@ impl MainWindow {
         let hub = tab
             .host
             .hub()
-            .map(|hub| vec![Self::watch_hub(hub, window, cx), Self::watch_link(hub, cx)])
+            .map(|hub| {
+                vec![
+                    Self::watch_hub(hub, window, cx),
+                    Self::watch_link(hub, cx),
+                    Self::watch_hidden(hub, cx),
+                ]
+            })
             .unwrap_or_default();
         HostSlot {
             name: tab.name,
@@ -1807,6 +1833,16 @@ impl MainWindow {
                 this.note_next_frame(hub.clone(), window, cx);
             },
         )
+    }
+
+    /// The shown host's hub going hidden or visible: a hidden window arms no frames
+    /// (tasklens-x12tr.4).
+    fn watch_hidden(hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe(hub, |this: &mut Self, hub, ev: &HiddenChanged, cx| {
+            if this.host.hub() == Some(&hub) {
+                this._anim.update(cx, |d, _| d.set_hidden(ev.hidden));
+            }
+        })
     }
 
     /// One host's link state (ADR-018 Reconnect): the shown host's pages dim and show the
@@ -1902,6 +1938,14 @@ impl MainWindow {
                 loop {
                     cx.background_executor().timer(HOST_TICK).await;
                     let alive = this.update(cx, |this, cx| {
+                        // An inactive window waits one sample interval between ticks.
+                        if !this.window_active {
+                            this.host_idle_ticks += 1;
+                            if this.host_idle_ticks < HOST_IDLE_TICKS {
+                                return;
+                            }
+                        }
+                        this.host_idle_ticks = 0;
                         this.host_tabs.update(cx, |t, cx| t.flip_pulse(cx));
                         this.sync_host_tabs(cx);
                     });
@@ -3052,8 +3096,11 @@ impl FpsOverlay {
         self.cpu_ns
             .extend(stats.samples.iter().map(|s| s.thread_cpu_ns));
         stats.samples.clear();
-        self.text = fps_text(frames, elapsed, &mut self.cpu_ns, stats.stalls).into();
-        cx.notify();
+        let text: SharedString = fps_text(frames, elapsed, &mut self.cpu_ns, stats.stalls).into();
+        if text != self.text {
+            self.text = text;
+            cx.notify();
+        }
     }
 }
 
@@ -3103,6 +3150,10 @@ impl Render for FpsOverlay {
 
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        {
+            self.draws += 1;
+        }
         if let Some(hub) = self.host.hub().cloned() {
             hub.update(cx, |hub, cx| hub.note_render(cx));
         }
