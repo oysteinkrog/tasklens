@@ -5,7 +5,12 @@ use gpui::{
     AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
 };
 use parking_lot::Mutex;
-use std::{borrow::Cow, ops, sync::Arc};
+use std::{
+    borrow::Cow,
+    ops,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::WgpuContext;
 
@@ -64,7 +69,12 @@ struct WgpuAtlasTextures {
     storage: WgpuAtlasStorage,
     pending_uploads: Vec<PendingUpload>,
     next_texture_generation: u64,
+    /// Device textures made by `push_texture` so far. A spare reuse does not count.
+    textures_created: u64,
 }
+
+/// A spare is dropped when it has not been reused for this long (tasklens-x12tr.2).
+const SPARE_IDLE_RELEASE: Duration = Duration::from_secs(60);
 
 pub struct WgpuTextureInfo {
     pub view: wgpu::TextureView,
@@ -88,6 +98,7 @@ impl WgpuAtlas {
             storage: WgpuAtlasStorage::default(),
             pending_uploads: Vec::new(),
             next_texture_generation: 0,
+            textures_created: 0,
         })))
     }
 
@@ -181,6 +192,18 @@ impl AtlasBackend for WgpuAtlasTextures {
                 self.storage[id.kind]
                     .free_list
                     .push(texture.id.index as usize);
+                let extent = texture.texture.size();
+                self.storage.spares.push(SpareTexture {
+                    kind: id.kind,
+                    size: Size {
+                        width: DevicePixels(extent.width as i32),
+                        height: DevicePixels(extent.height as i32),
+                    },
+                    format: texture.format,
+                    texture: texture.texture,
+                    view: texture.view,
+                    emptied_at: Instant::now(),
+                });
             } else {
                 *texture_slot = Some(texture);
             }
@@ -231,22 +254,17 @@ impl WgpuAtlasTextures {
             AtlasTextureKind::Subpixel | AtlasTextureKind::Polychrome => self.color_texture_format,
         };
 
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("atlas"),
-            size: wgpu::Extent3d {
-                width: size.width.0 as u32,
-                height: size.height.0 as u32,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let spare =
+            self.storage.spares.iter().position(|spare| {
+                spare.kind == kind && spare.size == size && spare.format == format
+            });
+        let (texture, view) = if let Some(ix) = spare {
+            let spare = self.storage.spares.swap_remove(ix);
+            (spare.texture, spare.view)
+        } else {
+            self.textures_created += 1;
+            self.create_texture(size, format)
+        };
 
         let texture_list = &mut self.storage[kind];
         let index = texture_list.free_list.pop();
@@ -283,6 +301,36 @@ impl WgpuAtlasTextures {
         }
     }
 
+    fn create_texture(
+        &self,
+        size: Size<DevicePixels>,
+        format: wgpu::TextureFormat,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("atlas"),
+            size: wgpu::Extent3d {
+                width: size.width.0 as u32,
+                height: size.height.0 as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
+    /// Drops the spares that have not been reused for `SPARE_IDLE_RELEASE`.
+    fn release_idle_spares(&mut self, now: Instant) {
+        self.storage
+            .spares
+            .retain(|spare| now.saturating_duration_since(spare.emptied_at) < SPARE_IDLE_RELEASE);
+    }
+
     fn upload_texture(&mut self, id: AtlasTextureId, bounds: Bounds<DevicePixels>, bytes: &[u8]) {
         let data = self
             .storage
@@ -295,6 +343,7 @@ impl WgpuAtlasTextures {
     }
 
     fn drain_uploads(&mut self, out: &mut Vec<AtlasUpload>) {
+        self.release_idle_spares(Instant::now());
         for upload in self.pending_uploads.drain(..) {
             let Some(texture) = self.storage.get(upload.id) else {
                 continue;
@@ -323,6 +372,28 @@ struct WgpuAtlasStorage {
     monochrome_textures: AtlasTextureList<WgpuAtlasTexture>,
     subpixel_textures: AtlasTextureList<WgpuAtlasTexture>,
     polychrome_textures: AtlasTextureList<WgpuAtlasTexture>,
+    /// Emptied textures kept for reuse, so a later insert of the same kind, size
+    /// and format takes one instead of making a new device texture
+    /// (tasklens-x12tr.2). Bound: a spare was a live texture, so the live plus
+    /// spare textures of one kind never exceed the peak live count of that kind.
+    /// A spare is dropped when it has not been reused for `SPARE_IDLE_RELEASE`
+    /// (60 s, checked in `drain_uploads`, once per drawn frame, so the check waits
+    /// for the next frame when none is drawn), on `clear()` and on device loss,
+    /// which replace the whole storage. Desktop platforms send no memory-pressure
+    /// signal (`Platform::on_memory_warning` is never called), so there is no
+    /// release on memory pressure.
+    spares: Vec<SpareTexture>,
+}
+
+/// An emptied atlas texture. Its old pixels stay; new tiles overwrite only
+/// their own bounds, the same as a tile reused inside a live texture.
+struct SpareTexture {
+    kind: AtlasTextureKind,
+    size: Size<DevicePixels>,
+    format: wgpu::TextureFormat,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    emptied_at: Instant,
 }
 
 impl ops::Index<AtlasTextureKind> for WgpuAtlasStorage {
@@ -605,6 +676,103 @@ mod tests {
 
         assert_eq!(second_tile.texture_id, first_tile.texture_id);
         assert_ne!(second_generation, first_generation);
+        Ok(())
+    }
+
+    fn image_key(image_id: usize) -> AtlasKey {
+        AtlasKey::Image(RenderImageParams {
+            image_id: ImageId(image_id),
+            frame_index: 0,
+        })
+    }
+
+    /// Inserts a 700x700 image. Two of them never share one 1024x1024 texture.
+    fn insert_big(atlas: &WgpuAtlas, key: AtlasKey) -> AtlasTile {
+        let size = Size {
+            width: DevicePixels(700),
+            height: DevicePixels(700),
+        };
+        atlas
+            .get_or_insert_with(key, &mut || {
+                Ok(Some((size, Cow::Owned(vec![0; 700 * 700 * 4]))))
+            })
+            .expect("allocation should succeed")
+            .expect("callback returns Some")
+    }
+
+    fn textures_created(atlas: &WgpuAtlas) -> u64 {
+        atlas.0.lock().backend.textures_created
+    }
+
+    fn spare_count(atlas: &WgpuAtlas) -> usize {
+        atlas.0.lock().backend.storage.spares.len()
+    }
+
+    #[test]
+    fn reinsert_after_remove_creates_no_texture() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let (key_a, key_b) = (image_key(1), image_key(2));
+
+        let tile_a = insert_big(&atlas, key_a.clone());
+        let tile_b = insert_big(&atlas, key_b.clone());
+        assert_ne!(tile_a.texture_id, tile_b.texture_id);
+        assert_eq!(textures_created(&atlas), 2);
+
+        for _ in 0..100 {
+            atlas.remove(&key_a);
+            atlas.remove(&key_b);
+            assert_eq!(spare_count(&atlas), 2);
+            insert_big(&atlas, key_a.clone());
+            insert_big(&atlas, key_b.clone());
+            assert_eq!(spare_count(&atlas), 0);
+        }
+        assert_eq!(textures_created(&atlas), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn idle_spare_is_released() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let key = image_key(1);
+
+        insert_big(&atlas, key.clone());
+        atlas.remove(&key);
+        assert_eq!(spare_count(&atlas), 1);
+
+        // Not idle long enough: kept.
+        atlas
+            .0
+            .lock()
+            .backend
+            .release_idle_spares(Instant::now() + Duration::from_secs(59));
+        assert_eq!(spare_count(&atlas), 1);
+
+        atlas
+            .0
+            .lock()
+            .backend
+            .release_idle_spares(Instant::now() + Duration::from_secs(61));
+        assert_eq!(spare_count(&atlas), 0);
+
+        let created = textures_created(&atlas);
+        insert_big(&atlas, key);
+        assert_eq!(textures_created(&atlas), created + 1);
+        Ok(())
+    }
+
+    #[test]
+    fn clear_drops_spares() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let key = image_key(1);
+
+        insert_big(&atlas, key.clone());
+        atlas.remove(&key);
+        assert_eq!(spare_count(&atlas), 1);
+        atlas.clear();
+        assert_eq!(spare_count(&atlas), 0);
         Ok(())
     }
 
