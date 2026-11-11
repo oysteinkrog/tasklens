@@ -293,6 +293,24 @@ pub struct PerfSetCpuByAppTopN {
     pub count: u8,
 }
 
+/// Sets `performance.gpu_by_app.top_n` to `count` (the GPU load by app chart's "Groups shown"
+/// items on the GPU page).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSetGpuByAppTopN {
+    pub count: u8,
+}
+
+/// Sets `performance.vram_by_app.top_n` to `count` (the VRAM by app chart's "Groups shown"
+/// items on the GPU page).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSetVramByAppTopN {
+    pub count: u8,
+}
+
 /// Sets `performance.timeline_click` to `click`: `pause`, `preview` or `history` (the timeline
 /// box menu's "Click" submenu, UI-PRF-057).
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]

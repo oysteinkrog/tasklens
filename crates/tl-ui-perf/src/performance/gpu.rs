@@ -23,17 +23,26 @@
 //! (ADR-009 rule 7).
 //!
 //! The page's words are `en-US.ftl` keys, translated once per strings version into [`Words`].
+//!
+//! Views (`tasklens-g00wx.4`): the Usage, Load by app and VRAM by app switch picks the flow
+//! layout's preset, saved per GPU in its own entry: `default`, `gpu_apps` (GPU load by app,
+//! [`AppsChart`] of [`AppsMetric::Gpu`], in the engine grid's place) or `vram_apps` (VRAM by
+//! app, [`AppsMetric::Vram`], in the Memory chart's place). The other widgets keep their ids.
+//! As on the Memory page, a flow layout draws the switch above its first part and a grid layout
+//! draws it in the header, where a pick asks "Replace your widgets?" first. "Groups shown" in
+//! the page menu sets `top_n` of each placed by-app chart. A placed by-app chart asks for the
+//! process sweep and the per-process GPU rows (`process_top`, `gpu_process`).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div, px,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, ElementId, Entity,
+    EntityId, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
@@ -48,12 +57,14 @@ use tl_ui_settings::layout::{
     SourceSelector, WidgetContent, WidgetOptions, WidgetSetting, container_layout,
 };
 use tl_ui_settings::layout_pages::{
-    METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, convert_page, page_container, page_needs_conversion,
+    METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, PRESET_DEFAULT, PRESET_GPU_APPS, PRESET_VRAM_APPS,
+    convert_page, gpu_page_for_preset, page_container, page_needs_conversion,
 };
-use tl_ui_settings::settings::GpuOptionalGraph;
+use tl_ui_settings::settings::{GpuOptionalGraph, PerformanceSettings};
 
 use super::actions::{
-    PerfToggleGpuEngine, PerfToggleGpuOptionalGraph, PerfWidgetEditStart, PerfWidgetResetPage,
+    PerfSetGpuByAppTopN, PerfSetVramByAppTopN, PerfToggleGpuEngine, PerfToggleGpuOptionalGraph,
+    PerfWidgetEditStart, PerfWidgetResetPage,
 };
 use super::aggregate::{
     add_demand, page_layout_on, page_store, reset_page, show_page_layout, start_page_edit,
@@ -73,31 +84,45 @@ use super::gpu_views::{
     DisplaysShown, EnginesShown, GpuDisplaysView, GpuEngineGridView, PartResized,
 };
 pub use super::gpu_views::{ENGINE_CELL_H, ENGINE_CELL_MIN_W, ENGINE_TIP_ID};
+use super::memory_views::{MemoryPartView, PART_SWITCH, PartDraw, PartShown};
+use super::overview::memory_apps::{AppsChart, AppsMetric, GROUPS_SHOWN};
 use super::page::{
     DevicePage, DevicePageFrame, details_draw, header_text, page_history_request, page_range_ns,
     page_words,
 };
 use super::page_flow::gpu::{GpuParts, gpu_flow};
-use super::widget::container::WidgetContainer;
+use super::widget::container::{FlowDecor, WidgetContainer};
 use super::widget::details_widget::{DetailsResized, DetailsShown, DetailsView};
 use super::widget::edit::{WidgetEditor, default_layout};
 use super::widget::fixed_widget::FixedContent;
+use super::widget::menu::confirm_preset_page;
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_base::app_env::AppEnv;
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
+use tl_ui_base::selector::TlSelector;
 use tl_ui_base::settings_global::{Section, TlSettings};
 use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 use tl_ui_chart::chart::{
     ChartBg, ChartGridSpec, ChartGridView, ChartLabels, ChartSeries, ChartSpec, ChartState,
     ChartView, GridCellSpec, GridStyle, LegendStyle, ValueAlign, ValueFormat, YScale,
 };
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use tl_ui_kit::components::menu::TlMenu;
 
 /// The debug selector prefix of the engine grid box; the box's selector adds the page
 /// container id (`gpu_views::engines_id`).
 pub const ENGINES_ID: &str = "perf-gpu-engines";
+
+/// The debug selector of the Usage, Load by app and VRAM by app switch; each button adds
+/// `-usage`, `-gpu-apps` or `-vram-apps`.
+pub const VIEW_SWITCH_ID: &str = "perf-gpu-view";
+
+/// "Groups shown", and its two names while the page places both by-app charts.
+const KEY_GROUPS_SHOWN: &str = "perf-mem-apps-groups-shown";
+const KEY_GPU_GROUPS: &str = "shell-settings-perf-gpu-groups";
+const KEY_VRAM_GROUPS: &str = "shell-settings-perf-vram-groups";
 
 /// Every engine name key and the "Own processes only" tooltip key, for [`Words`].
 const WORD_KEYS: [&str; 14] = [
@@ -161,6 +186,11 @@ pub struct Words {
     pub missing: SharedString,
     pub displays: SharedString,
     pub no_display: SharedString,
+    /// The switch's words, in [`GpuView::ALL`] order.
+    pub views: [SharedString; 3],
+    pub groups_shown: SharedString,
+    pub gpu_groups: SharedString,
+    pub vram_groups: SharedString,
 }
 
 impl Words {
@@ -181,7 +211,16 @@ impl Words {
         self.missing = t(KEY_MISSING);
         self.displays = t("perf-gpu-block-displays");
         self.no_display = t("perf-gpu-no-display");
+        self.views = GpuView::ALL.map(|v| t(v.word_key()));
+        self.groups_shown = t(KEY_GROUPS_SHOWN);
+        self.gpu_groups = t(KEY_GPU_GROUPS);
+        self.vram_groups = t(KEY_VRAM_GROUPS);
         true
+    }
+
+    /// The switch's word of `view`.
+    pub fn view(&self, view: GpuView) -> SharedString {
+        self.views[view as usize].clone()
     }
 
     /// The word of the `en-US.ftl` key `name`; empty before the first refresh.
@@ -430,6 +469,151 @@ pub fn toggle_optional(layout: &mut ContainerLayout, key: &str, which: GpuOption
     );
 }
 
+/// The GPU page's views: the presets of its flow layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuView {
+    /// `default`: the engine grid and the Memory chart.
+    Usage = 0,
+    /// `gpu_apps`: GPU load by app in the engine grid's place.
+    GpuApps = 1,
+    /// `vram_apps`: VRAM by app in the Memory chart's place.
+    VramApps = 2,
+}
+
+impl GpuView {
+    /// The views in the switch's order.
+    pub const ALL: [Self; 3] = [Self::Usage, Self::GpuApps, Self::VramApps];
+
+    /// The view's preset id.
+    pub fn preset(self) -> &'static str {
+        match self {
+            Self::Usage => PRESET_DEFAULT,
+            Self::GpuApps => PRESET_GPU_APPS,
+            Self::VramApps => PRESET_VRAM_APPS,
+        }
+    }
+
+    /// The view of preset `id`; `None` for an id that is not one.
+    pub fn of_preset(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.preset() == id)
+    }
+
+    /// The switch button's `en-US.ftl` key.
+    fn word_key(self) -> &'static str {
+        match self {
+            Self::Usage => "perf-gpu-view-usage",
+            Self::GpuApps => "perf-gpu-view-gpu-apps",
+            Self::VramApps => "perf-gpu-view-vram-apps",
+        }
+    }
+
+    /// The switch button's id suffix.
+    fn id(self) -> &'static str {
+        match self {
+            Self::Usage => "usage",
+            Self::GpuApps => "gpu-apps",
+            Self::VramApps => "vram-apps",
+        }
+    }
+}
+
+/// The view of `layout`: its preset's, `None` for a grid layout.
+pub fn layout_view(layout: &ContainerLayout) -> Option<GpuView> {
+    layout
+        .preset
+        .as_ref()
+        .and_then(|p| GpuView::of_preset(&p.id))
+}
+
+/// Whether `w` is the first part of a view: the engine grid or GPU load by app.
+fn is_first_part(w: &WidgetSetting) -> bool {
+    matches!(
+        w.content,
+        WidgetContent::Fixed(FixedWidget::GpuEngineGrid | FixedWidget::GpuByApp)
+    )
+}
+
+/// Whether `w` is the second part of a view: the Memory chart or VRAM by app.
+fn is_second_part(w: &WidgetSetting) -> bool {
+    is_metric(w, METRIC_GPU_MEMORY) || w.content == WidgetContent::Fixed(FixedWidget::VramByApp)
+}
+
+/// Puts `want` in the place of the widget `pick` chooses, with a new id; at `default_at` when
+/// the layout has none. Nothing when that widget already shows the same content.
+fn swap_part(
+    layout: &mut ContainerLayout,
+    pick: fn(&WidgetSetting) -> bool,
+    want: WidgetSetting,
+    default_at: usize,
+) {
+    let at = layout.widgets.iter().position(pick);
+    if let Some(i) = at {
+        if layout.widgets[i].content == want.content {
+            return;
+        }
+        layout.widgets.remove(i);
+    }
+    let at = at.unwrap_or(default_at).min(layout.widgets.len());
+    let id = layout.next_id;
+    layout.next_id += 1;
+    layout.widgets.insert(
+        at,
+        WidgetSetting {
+            id,
+            cell: None,
+            options: WidgetOptions::default(),
+            ..want
+        },
+    );
+}
+
+/// Sets the preset of the flow layout `layout` to `view`'s and puts the preset's first and
+/// second parts in place of the old ones (`gpu_page_for_preset`). Temperature, Power, Clocks,
+/// Details and Displays keep their ids. Nothing for a grid layout.
+pub fn set_gpu_preset(layout: &mut ContainerLayout, view: GpuView) {
+    let Some(preset) = layout.preset.as_mut() else {
+        return;
+    };
+    let id = view.preset();
+    if preset.id == id {
+        return;
+    }
+    preset.id = id.to_owned();
+    let mut parts = gpu_page_for_preset(&PerformanceSettings::default(), &layout.container, id)
+        .widgets
+        .into_iter();
+    if let Some(first) = parts.next() {
+        swap_part(layout, is_first_part, first, 0);
+    }
+    if let Some(second) = parts.next() {
+        let after = layout
+            .widgets
+            .iter()
+            .position(is_first_part)
+            .map_or(0, |i| i + 1);
+        swap_part(layout, is_second_part, second, after);
+    }
+}
+
+/// A by-app chart of the page, made the first time a layout places it.
+type AppsSlot = Rc<RefCell<Option<Entity<AppsChart>>>>;
+
+/// The chart of `slot`, made now as `metric` when it has none.
+fn apps_of(
+    slot: &AppsSlot,
+    hub: &Entity<SnapshotHub>,
+    metric: AppsMetric,
+    cx: &mut App,
+) -> Entity<AppsChart> {
+    if let Some(apps) = &*slot.borrow() {
+        return apps.clone();
+    }
+    let hub = hub.clone();
+    let apps = cx.new(|cx| AppsChart::new(hub, metric, cx));
+    *slot.borrow_mut() = Some(apps.clone());
+    apps
+}
+
 /// The GPU device page.
 pub struct GpuPage {
     key: DeviceKey,
@@ -449,6 +633,16 @@ pub struct GpuPage {
     /// The cells the engine grid draws, shared with the flow placer: 0 takes no space.
     engine_cells: Rc<Cell<usize>>,
     displays_view: Entity<GpuDisplaysView>,
+    /// GPU load by app and VRAM by app, once a layout placed them.
+    gpu_apps: AppsSlot,
+    vram_apps: AppsSlot,
+    /// The Usage, Load by app and VRAM by app switch the flow layout draws above its first
+    /// part.
+    switch_view: Entity<MemoryPartView>,
+    /// The preset of the layout the page shows; `None` for a grid layout.
+    view: Option<GpuView>,
+    /// This page, for the switch's click closures.
+    this: WeakEntity<Self>,
     details: KeyValueModel,
     details_view: Entity<DetailsView>,
     container: Entity<WidgetContainer>,
@@ -470,7 +664,7 @@ pub struct GpuPage {
     words: Words,
     /// One formatted row per display of this GPU's adapter (PERF-073).
     display_rows: Vec<SharedString>,
-    _subs: SmallVec<[Subscription; 10]>,
+    _subs: SmallVec<[Subscription; 12]>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -538,33 +732,60 @@ impl GpuPage {
             let id = container_id.clone();
             cx.new(|_| DetailsView::new(id, shown, draw))
         };
+        let this = cx.weak_entity();
+        let switch_view = {
+            let id = container_id.clone();
+            let page = this.clone();
+            let draw: PartDraw = Rc::new(move |_: &mut Window, cx: &mut App| {
+                page.upgrade()
+                    .map(|p| p.update(cx, |p, cx| p.view_switch(cx)))
+            });
+            cx.new(move |_| MemoryPartView::new(id, PART_SWITCH, PartShown::default(), draw))
+        };
         let parts = GpuParts {
+            switch: switch_view.read(cx).natural_height(),
+            switch_at: Rc::default(),
             engines: engines_view.read(cx).natural_height(),
             engine_cells: Rc::clone(&engine_cells),
             details: details_view.read(cx).natural_height(),
             displays: displays_view.read(cx).natural_height(),
         };
+        let (gpu_apps, vram_apps): (AppsSlot, AppsSlot) = (Rc::default(), Rc::default());
         let content: FixedContent = {
             let details: AnyView = details_view.clone().into();
             let engines: AnyView = engines_view.clone().into();
             let displays: AnyView = displays_view.clone().into();
-            Rc::new(move |kind: &FixedWidget, _: &mut App| match kind {
+            let (gpu_slot, vram_slot) = (Rc::clone(&gpu_apps), Rc::clone(&vram_apps));
+            let (hub, idx) = (hub.clone(), row.idx);
+            Rc::new(move |kind: &FixedWidget, cx: &mut App| match kind {
                 FixedWidget::Details => Some(details.clone()),
                 FixedWidget::GpuEngineGrid => Some(engines.clone()),
                 FixedWidget::GpuDisplays => Some(displays.clone()),
+                FixedWidget::GpuByApp => {
+                    Some(apps_of(&gpu_slot, &hub, AppsMetric::Gpu(idx), cx).into())
+                }
+                FixedWidget::VramByApp => {
+                    Some(apps_of(&vram_slot, &hub, AppsMetric::Vram(idx), cx).into())
+                }
                 _ => None,
             })
         };
         let page = page_layout_on(&container_id, &hub, cx);
+        let view = layout_view(&page.layout);
         let container = {
             let store = page_store(&hub, &page, cx);
             let layout = page.layout.clone();
             let id = container_id.clone();
             let hub = hub.clone();
+            let decor = FlowDecor {
+                view: switch_view.clone().into(),
+                bounds: Rc::clone(&parts.switch_at),
+            };
             cx.new(move |cx| {
                 let mut c = WidgetContainer::new(id, layout, &hub, store, cx);
                 c.set_flow_placer(Some(gpu_flow(parts)), cx);
                 c.set_fixed_content(Some(content), cx);
+                c.set_flow_decor(Some(decor), cx);
                 c
             })
         };
@@ -577,6 +798,8 @@ impl GpuPage {
                 e.set_page_parts(vec![
                     FixedWidget::Details,
                     FixedWidget::GpuEngineGrid,
+                    FixedWidget::GpuByApp,
+                    FixedWidget::VramByApp,
                     FixedWidget::GpuDisplays,
                 ]);
                 e.set_save_container(borrowed);
@@ -603,6 +826,9 @@ impl GpuPage {
                 this.place_again(cx);
             }),
         );
+        subs.push(cx.subscribe(&switch_view, |this, _, _: &PartResized, cx| {
+            this.place_again(cx);
+        }));
         // A layout change can change what the page asks for.
         subs.push(cx.observe(&container, |this, _, cx| this.send_demand(cx)));
         let id = cx.entity_id();
@@ -622,6 +848,11 @@ impl GpuPage {
             engines_view,
             engine_cells,
             displays_view,
+            gpu_apps,
+            vram_apps,
+            switch_view,
+            view,
+            this,
             details,
             details_view,
             container,
@@ -646,6 +877,7 @@ impl GpuPage {
             notify_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
+        this.sync_switch(cx);
         this
     }
 
@@ -684,6 +916,36 @@ impl GpuPage {
     /// The page's widget container.
     pub fn container(&self) -> &Entity<WidgetContainer> {
         &self.container
+    }
+
+    /// GPU load by app, once a layout has placed it.
+    pub fn gpu_apps(&self) -> Option<Entity<AppsChart>> {
+        self.gpu_apps.borrow().clone()
+    }
+
+    /// VRAM by app, once a layout has placed it.
+    pub fn vram_apps(&self) -> Option<Entity<AppsChart>> {
+        self.vram_apps.borrow().clone()
+    }
+
+    /// The preset of the layout the page shows: Usage, Load by app or VRAM by app, `None` with
+    /// a grid layout.
+    pub fn view(&self) -> Option<GpuView> {
+        self.view
+    }
+
+    /// The Usage, Load by app and VRAM by app switch.
+    pub fn switch_view(&self) -> &Entity<MemoryPartView> {
+        &self.switch_view
+    }
+
+    /// Whether the page places a fixed widget of `kind`.
+    fn placed(&self, kind: &FixedWidget, cx: &App) -> bool {
+        let c = self.container.read(cx);
+        let placed = c.placed_ids();
+        c.layout().widgets.iter().any(|w| {
+            placed.contains(&w.id) && matches!(&w.content, WidgetContent::Fixed(k) if k == kind)
+        })
     }
 
     /// The editor around the container (Edit Widgets).
@@ -758,7 +1020,10 @@ impl GpuPage {
 
     /// This page's demand part while it is active: the GPU component, the inventory for the
     /// adapter's vendor and static rows, the device metric history at 1 h, 24 h and 7 d, and
-    /// what the placed widgets read. With the default layout it equals 1.3.0's.
+    /// what the placed widgets read. With the default layout it equals 1.3.0's. A placed by-app
+    /// chart asks for the process sweep and the per-process GPU rows (`process_top`,
+    /// `gpu_process`): the workers read those rows only then, and the engine sums the groups on
+    /// each sweep.
     pub fn demand_part(&self, cx: &App) -> Demand {
         let mut demand = Demand {
             any_surface_visible: true,
@@ -767,7 +1032,9 @@ impl GpuPage {
             device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
         };
-        add_demand(&mut demand, &self.container.read(cx).demand_part());
+        let part = self.container.read(cx).demand_part();
+        add_demand(&mut demand, &part);
+        demand.gpu_process |= part.gpu_process;
         demand
     }
 
@@ -1017,13 +1284,22 @@ impl GpuPage {
         if a.key != self.key {
             return;
         }
-        // A borrowed page writes the local page with the local key (tasklens-jmc36).
+        let which = a.which;
+        self.edit_flow(|layout, key| toggle_optional(layout, key, which), cx);
+    }
+
+    /// Writes `edit` to the page's flow layout, with the page's key; a page without an entry
+    /// gets one, from its built-in default. Nothing with a grid layout. A borrowed page writes
+    /// the local page with the local key (tasklens-jmc36).
+    fn edit_flow(&mut self, edit: impl FnOnce(&mut ContainerLayout, &str), cx: &mut Context<Self>) {
+        if !cx.has_global::<TlSettings>() {
+            return;
+        }
         let container = self.editor.read(cx).save_id().to_string();
         let remap = self.container.read(cx).remap();
         let key = remap
             .pin()
             .map_or_else(|| Arc::clone(&self.key.0), |(local, _)| Arc::clone(local));
-        let which = a.which;
         TlSettings::update(cx, |d| {
             let perf = &mut d.settings.performance;
             let mut layout =
@@ -1031,10 +1307,129 @@ impl GpuPage {
             if layout.preset.is_none() {
                 return;
             }
-            toggle_optional(&mut layout, &key, which);
+            edit(&mut layout, &key);
             perf.layouts.set(layout);
         });
         self.sync_settings(cx);
+    }
+
+    /// Shows `view` with a flow layout: the page takes the view's preset and its parts; a page
+    /// without an entry gets one. Nothing with a grid layout, where the switch asks first
+    /// ([`Self::pick_view`]).
+    pub fn set_view(&mut self, view: GpuView, cx: &mut Context<Self>) {
+        self.edit_flow(|layout, _| set_gpu_preset(layout, view), cx);
+    }
+
+    /// The switch: [`Self::set_view`] with a flow layout. With a grid layout it asks "Replace
+    /// your widgets?" first, then saves the view's flow layout with the built-in widgets.
+    fn pick_view(&mut self, view: GpuView, window: &mut Window, cx: &mut Context<Self>) {
+        if !cx.has_global::<TlSettings>() {
+            return;
+        }
+        if self.view.is_some() {
+            self.set_view(view, cx);
+            return;
+        }
+        let container = self.editor.read(cx).save_id().to_string();
+        let page = cx.weak_entity();
+        let word = self.words.view(view);
+        confirm_preset_page(self.header.0.clone(), word, window, cx, move |_, cx| {
+            let perf = PerformanceSettings::default();
+            let layout = gpu_page_for_preset(&perf, &container, view.preset());
+            TlSettings::update(cx, |d| d.settings.performance.layouts.set(layout));
+            let _ = page.update(cx, |p, cx| p.sync_settings(cx));
+        });
+    }
+
+    /// "Groups shown" of GPU load by app: sets `performance.gpu_by_app.top_n`.
+    fn on_gpu_groups_shown(
+        &mut self,
+        a: &PerfSetGpuByAppTopN,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !cx.has_global::<TlSettings>() {
+            return;
+        }
+        AppsMetric::Gpu(self.row.idx).set_top_n(a.count, cx);
+        self.sync_settings(cx);
+    }
+
+    /// "Groups shown" of VRAM by app: sets `performance.vram_by_app.top_n`.
+    fn on_vram_groups_shown(
+        &mut self,
+        a: &PerfSetVramByAppTopN,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !cx.has_global::<TlSettings>() {
+            return;
+        }
+        AppsMetric::Vram(self.row.idx).set_top_n(a.count, cx);
+        self.sync_settings(cx);
+    }
+
+    /// The switch's words and selected view; it renders only when they changed.
+    fn sync_switch(&mut self, cx: &mut Context<Self>) {
+        let view = self.view;
+        let shown = PartShown {
+            texts: self.words.views.to_vec(),
+            flags: GpuView::ALL.map(|v| view == Some(v)).to_vec(),
+            ..PartShown::default()
+        };
+        self.switch_view.update(cx, |v, cx| v.set_shown(shown, cx));
+    }
+
+    /// The switch follows the shown layout's preset. A grid layout draws it in the header, so
+    /// the header renders when the layout turns from or to a grid.
+    fn sync_view(&mut self, cx: &mut Context<Self>) {
+        let view = layout_view(self.container.read(cx).layout());
+        if view == self.view {
+            return;
+        }
+        let header = view.is_none() || self.view.is_none();
+        self.view = view;
+        self.sync_switch(cx);
+        if header {
+            self.notify(cx);
+        }
+    }
+
+    /// The Usage, Load by app and VRAM by app switch, right-aligned: above the first part of a
+    /// flow layout, in the header with a grid layout.
+    fn view_switch(&self, cx: &App) -> AnyElement {
+        let m = metrics(cx);
+        let mut row = div().flex().flex_none();
+        for view in GpuView::ALL {
+            let weak = self.this.clone();
+            let id = format!("{VIEW_SWITCH_ID}-{}", view.id());
+            let selector = id.clone();
+            row = row.child(
+                div().tl_selector(move || selector).child(
+                    TlButton::new(
+                        ElementId::Name(id.into()),
+                        TlButtonKind::Segment {
+                            on: self.view == Some(view),
+                        },
+                    )
+                    .size(TlButtonSize::Sm)
+                    .label(self.words.view(view))
+                    .on_click(move |_, window, cx| {
+                        weak.update(cx, |page, cx| page.pick_view(view, window, cx))
+                            .ok();
+                    }),
+                ),
+            );
+        }
+        div()
+            .tl_selector(|| VIEW_SWITCH_ID.into())
+            .flex()
+            .flex_row()
+            .justify_end()
+            .w_full()
+            .pb(m.sp[1])
+            .child(row)
+            .into_any_element()
     }
 
     /// Applies the page's settings when one of their sections changed. A saved layout (Apply,
@@ -1043,6 +1438,7 @@ impl GpuPage {
         if !self.editor.read(cx).is_editing() {
             let page = page_layout_on(&self.container_id, &self.hub, cx);
             show_page_layout(&self.container, &self.editor, page, cx);
+            self.sync_view(cx);
         }
         let versions = section_versions(cx);
         if versions == self.settings_versions {
@@ -1101,6 +1497,52 @@ impl GpuPage {
         let snap = Arc::clone(self.hub.read(cx).current());
         self.apply_snapshot(&snap, ComponentMask::INVENTORY, cx);
         self.sync_displays(cx);
+        self.sync_switch(cx);
+    }
+
+    /// The "Groups shown" submenus of the placed by-app charts, then a separator.
+    fn groups_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
+        let gpu = self.placed(&FixedWidget::GpuByApp, cx);
+        let vram = self.placed(&FixedWidget::VramByApp, cx);
+        if !(gpu || vram) || !cx.has_global::<TlSettings>() {
+            return menu;
+        }
+        let (gpu_n, vram_n) = {
+            let perf = &TlSettings::settings(cx).performance;
+            (perf.gpu_by_app.top_n, perf.vram_by_app.top_n)
+        };
+        let w = &self.words;
+        let both = gpu && vram;
+        let mut menu = menu;
+        if gpu {
+            let label = if both { &w.gpu_groups } else { &w.groups_shown };
+            menu = menu.submenu(label.clone(), window, cx, move |sub, _, _| {
+                GROUPS_SHOWN.iter().fold(sub, |sub, &n| {
+                    sub.radio_item(
+                        n.to_string(),
+                        n == gpu_n,
+                        Box::new(PerfSetGpuByAppTopN { count: n }),
+                    )
+                })
+            });
+        }
+        if vram {
+            let label = if both {
+                &w.vram_groups
+            } else {
+                &w.groups_shown
+            };
+            menu = menu.submenu(label.clone(), window, cx, move |sub, _, _| {
+                GROUPS_SHOWN.iter().fold(sub, |sub, &n| {
+                    sub.radio_item(
+                        n.to_string(),
+                        n == vram_n,
+                        Box::new(PerfSetVramByAppTopN { count: n }),
+                    )
+                })
+            });
+        }
+        menu.separator()
     }
 
     /// "Edit Widgets…" in the page menu.
@@ -1984,8 +2426,13 @@ impl DevicePage for GpuPage {
         self.header.clone()
     }
 
-    fn toggles(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 2]> {
-        SmallVec::new()
+    /// With a grid layout the Usage, Load by app and VRAM by app switch sits in the header; a
+    /// flow layout draws it above its first part.
+    fn toggles(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 2]> {
+        if self.view.is_some() {
+            return SmallVec::new();
+        }
+        smallvec![self.view_switch(cx)]
     }
 
     fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {
@@ -2002,10 +2449,13 @@ impl DevicePage for GpuPage {
         SmallVec::new()
     }
 
-    /// "Select GPU engine graphs >": one check item per reported engine while the page has the
-    /// engine grid, then the Power and Clocks graphs, checked from the page's flow layout
-    /// (PERF-063, UI-PRF-032). A grid layout hides Power and Clocks (ADR-019 phase 3).
+    /// "Groups shown" for each by-app chart the page places, named "GPU by app groups shown"
+    /// and "VRAM by app groups shown" while it places both. Then "Select GPU engine graphs >":
+    /// one check item per reported engine while the page has the engine grid, then the Power
+    /// and Clocks graphs, checked from the page's flow layout (PERF-063, UI-PRF-032). A grid
+    /// layout hides Power and Clocks (ADR-019 phase 3).
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
+        let menu = self.groups_items(menu, window, cx);
         let layout = page_layout_on(&self.container_id, &self.hub, cx).layout;
         let has_grid = layout
             .widgets
@@ -2146,6 +2596,8 @@ impl Render for GpuPage {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle_engine))
             .on_action(cx.listener(Self::on_toggle_optional))
+            .on_action(cx.listener(Self::on_gpu_groups_shown))
+            .on_action(cx.listener(Self::on_vram_groups_shown))
             .on_action(cx.listener(Self::on_edit_start))
             .on_action(cx.listener(Self::on_reset_page))
             .child(

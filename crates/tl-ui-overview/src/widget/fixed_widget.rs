@@ -51,7 +51,7 @@ const KEY_NOTHING: &str = "perf-widget-nothing-to-show";
 
 /// The name key of each device page part, in the order of the ADR-019 phase 3 fixed widget
 /// table (Details first): Add Widget lists them so, and an empty part shows its name.
-pub const PAGE_FIXED_NAMES: [(FixedWidget, &str); 14] = [
+pub const PAGE_FIXED_NAMES: [(FixedWidget, &str); 16] = [
     (FixedWidget::Details, "perf-widget-fixed-details"),
     (FixedWidget::CpuCoreGrid, "perf-widget-fixed-cpu-core-grid"),
     (
@@ -65,6 +65,8 @@ pub const PAGE_FIXED_NAMES: [(FixedWidget, &str); 14] = [
     (FixedWidget::MemoryBar, "perf-widget-fixed-memory-bar"),
     (FixedWidget::MemoryByApp, "perf-widget-fixed-by-app"),
     (FixedWidget::CpuByApp, "perf-widget-fixed-cpu-by-app"),
+    (FixedWidget::GpuByApp, "perf-widget-fixed-gpu-by-app"),
+    (FixedWidget::VramByApp, "perf-widget-fixed-vram-by-app"),
     (
         FixedWidget::MemoryCompressed,
         "perf-widget-fixed-memory-compressed",

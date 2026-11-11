@@ -397,6 +397,12 @@ impl WidgetContainer {
                 )) => {
                     demand.process_top = true;
                 }
+                // The GPU workers read per-process rows only with `gpu_process`; the groups need
+                // the process sweep's pid to group map.
+                Some(WidgetContent::Fixed(FixedWidget::GpuByApp | FixedWidget::VramByApp)) => {
+                    demand.process_top = true;
+                    demand.gpu_process = true;
+                }
                 Some(WidgetContent::Fixed(FixedWidget::Timeline)) => demand.device_timeline = true,
                 _ => {}
             }

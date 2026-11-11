@@ -86,9 +86,11 @@ pub const UNDO_LIMIT: usize = 100;
 
 /// The fixed widgets Add Widget offers, each in its own box, with their name keys
 /// (UI-PRF-061 phase 2).
-const FIXED_ADDS: [(FixedWidget, &str); 4] = [
+const FIXED_ADDS: [(FixedWidget, &str); 6] = [
     (FixedWidget::MemoryByApp, "perf-widget-fixed-by-app"),
     (FixedWidget::CpuByApp, "perf-widget-fixed-cpu-by-app"),
+    (FixedWidget::GpuByApp, "perf-widget-fixed-gpu-by-app"),
+    (FixedWidget::VramByApp, "perf-widget-fixed-vram-by-app"),
     (FixedWidget::Processes, "perf-widget-fixed-processes"),
     (FixedWidget::Timeline, "perf-widget-fixed-timeline"),
 ];
@@ -1119,7 +1121,7 @@ impl WidgetEditor {
     /// [`Self::fixed_add`].
     pub fn fixed_adds(&self, cx: &App) -> Vec<menu::FixedAdd> {
         if !self.is_page() {
-            return self.fixed_add(cx).into_iter().collect();
+            return self.box_fixed_adds(cx);
         }
         let Some(layout) = self.working_layout(cx) else {
             return Vec::new();
@@ -1140,22 +1142,33 @@ impl WidgetEditor {
             .collect()
     }
 
-    /// The fixed widget Add Widget offers: the one the box allows (Memory by app in the Memory
-    /// box, CPU by app in the CPU box, the table in Top processes, the bands in Timeline), while
-    /// the working layout has none.
+    /// The fixed widget Add Widget offers first: one the box allows (Memory by app in the
+    /// Memory box, CPU by app in the CPU box, GPU load by app and VRAM by app in the GPU box, the
+    /// table in Top processes, the bands in Timeline) that the working layout has none of.
     pub fn fixed_add(&self, cx: &App) -> Option<menu::FixedAdd> {
-        let (kind, key) = FIXED_ADDS
+        self.box_fixed_adds(cx).into_iter().next()
+    }
+
+    /// Every fixed widget the box allows that the working layout has none of, in
+    /// [`FIXED_ADDS`] order.
+    fn box_fixed_adds(&self, cx: &App) -> Vec<menu::FixedAdd> {
+        let Some(layout) = self.working_layout(cx) else {
+            return Vec::new();
+        };
+        FIXED_ADDS
             .iter()
-            .find(|(kind, _)| kind.container() == Some(&*self.id))?;
-        let layout = self.working_layout(cx)?;
-        let has = layout
-            .widgets
-            .iter()
-            .any(|w| matches!(&w.content, WidgetContent::Fixed(f) if f == kind));
-        (!has).then(|| menu::FixedAdd {
-            name: Arc::from(kind.name()),
-            label: tr(cx, key),
-        })
+            .filter(|(kind, _)| kind.container() == Some(&*self.id))
+            .filter(|(kind, _)| {
+                !layout
+                    .widgets
+                    .iter()
+                    .any(|w| matches!(&w.content, WidgetContent::Fixed(f) if f == kind))
+            })
+            .map(|(kind, key)| menu::FixedAdd {
+                name: Arc::from(kind.name()),
+                label: tr(cx, key),
+            })
+            .collect()
     }
 
     /// Add Widget's fixed item: the fixed widget `name` (`memory_by_app`), placed and selected
