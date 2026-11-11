@@ -44,6 +44,14 @@ The `draw` rate is not zero because the CPU chart and the Overview charts slide 
 (about 14 frames per second). The x12tr.4 change stops draws for windows with nothing changing,
 which was not the case on these two pages.
 
+## Extended run
+
+The GUI stayed on Overview until 04:52 (41 minutes after the F1 switch in total). All 41
+one-minute lines after the switch show 0 for `ioctl`, `nvos_alloc`, `mmap` and `allocpages`.
+`draw` stayed at 835 to 853 per minute (798 to 804 in the last three minutes) and the longest
+write-lock hold was 7.4 ms. No hold passed 10 ms. manager-office had not answered by 04:52, so
+its own 30 minute trace result is not recorded here.
+
 ## Acceptance
 
 - (a) Vulkan and RM allocations after warm-up: 0 in both phases. Met.
