@@ -1050,6 +1050,159 @@ The frame times of these runs (p99 3.99, 3.63 and 4.11 ms) are not part of this 
 |---|---|---|---|---|
 | App memory after table-2000 | <= 150 MB | 81.87 MB (median) | 3 runs | PASS |
 
+### table-2000 profile and inline BoundsTree nodes (tasklens-q8zcy, 2026-11-12)
+
+Result: after the change, `table-2000` had a median UI thread p99 of 3.99 ms (hidden nested KWin,
+60 Hz). That is FAIL against the original limit of 2.0 ms and PASS against the relaxed limit of
+4.9 ms, so it is not a regression. HEAD without the change had 4.10 ms in the same rounds. That
+difference is inside the run-to-run spread: a second set of 3 rounds gave 3.77 ms after and
+3.72 ms before. Instruction counts show the saving: the changed binary ran 4.6% fewer user-space
+instructions in the same 20 s of scrolling.
+
+The change is a gpui-pre patch (D-043): `BoundsTree` keeps each child's bounds and max ordering
+inline in its parent node (`1d55b2a59`, rustfmt fix-up `e3c52bbfc`). The orderings it returns
+are the same.
+
+Setup: hidden nested KWin, 1920 x 1200, 60 Hz, session `q8z`,
+`tasklens --bench table-2000 --duration 30 --warmup 5`, bench slot lock, quiet rule (1- and
+5-minute load at most 8 at the start of each run, 1-minute load at most 8 at its end). "Before" is
+`cargo build --locked --profile perf -p tl-app --features bench` at `c700c3836`, built at 01:36.
+"After" is the same command at `1d55b2a59`, built at 01:48; `git log c700c3836..1d55b2a59` holds
+only this change. The two binaries ran interleaved, one run of each per round, inside the jobd
+hold for tasklens benchmarks. All reports have `refresh_hz` 60, `pacing` off, `window_active`
+true and 0 stalls. Reports, profiles and scripts: `/var/tmp/claude/q8zcy/`.
+
+#### Profile before the change
+
+One run of the before binary at 01:37:54 (load 5.20, 6.40, 8.51), `sudo perf record -e cpu-clock
+-F 999 --call-graph dwarf,16384` for 15 s after warmup: 2,465 samples, p50 2.73 ms and p99
+4.13 ms with perf attached. As in i5sgo and 1ibm6 the shares are self time grouped by symbol name
+(`group.py`).
+
+| Area | Share |
+|---|---|
+| libc copy loop | 16.5% |
+| GPUI element tree and styles | 16.2% |
+| taffy layout | 13.1% |
+| Text (shaping, glyph paint, atlas) | 9.4% |
+| GPUI `BoundsTree::insert` | 9.2% |
+| GPUI scene and paint | 7.7% |
+| NVIDIA driver | 5.6% |
+| wgpu renderer | 5.1% |
+| Our UI code | 3.1% |
+| Rest (malloc, hashing, not matched) | 13.5% |
+
+Top cost named: `BoundsTree::insert`, the largest single function at 9.2% (next: taffy
+`compute_inner` 2.6%, the `SubpixelSprite` sort in `Scene::finish` 2.4%). The larger areas above
+it are spread over many functions in GPUI, taffy and libc.
+
+What the inserts are, bpftrace on the before binary for 10 s: 401,045 calls of
+`BoundsTree::insert` in 597 `Window::draw` calls, 672 inserts per drawn frame. At 9.2% of a
+2.73 ms frame that is about 370 ns per insert (inferred from the shares, not timed). Every primitive
+painted outside a layer is one insert, and every layer is one insert, nested or not. A text line
+paints inside its own layer (`paint_line` calls `paint_layer`), so each visible cell's text costs
+one insert. Column separators are off by default (`tables.column_separators`), so they add none.
+
+Why each insert was slow: a search or a descent read one node of about 128 bytes per child, up to 12 per
+level. In a synthetic table frame (1,075 inserts: window, 40 rows of a fill plus 10 cells with
+text, 6 minigraph cards) the tree was 8 levels deep and each search popped 42 nodes. Making the
+search skip non-intersecting children before it pushes them cut the pops to 6 but not the time,
+so the cost is in reading the nodes, not in the stack.
+
+#### The change
+
+`third_party/gpui-pre/src/bounds_tree.rs` stores only internal nodes. Each node holds its
+children's bounds, max ordering and child index (or a leaf mark) in three inline arrays of 12.
+A search reads one node and checks all its children there; a leaf child updates the result at
+once, without a push. A descent picks the child by the same rule as before (smallest half
+perimeter of the union) and updates that child's bounds and max ordering on the way down, so
+no second pass walks back up. The fast path keeps the bounds and ordering of the highest leaf.
+
+The tree shape follows nearly the same rules (the root is now always an internal node), and the ordering of every insert is the same: one more
+than the highest ordering among the bounds it intersects. Tests: the two upstream tests
+(`test_insert`, `test_random_iterations` with 1,000 random seeds against a brute-force scan) and
+a new `test_table_frames_match_brute_force` (the synthetic table frame above, cleared and reused
+for 3 scroll positions, each insert checked against a brute-force scan). gpui-pre is outside the
+workspace, so these ran in a small crate that compiles the same file against stub geometry types
+(`/var/tmp/claude/q8zcy/bttest`): 3 passed. A second check ran 2,000 random sequences of up to
+400 inserts through the old and new trees side by side: all orderings matched. In the synthetic
+frame an insert took 134 ns against 180 ns before (25% less).
+
+#### Gate runs
+
+Set 1, the gate:
+
+| Run | Start | Load at start (1, 5, 15 min) | Load at end (1 min) | Frame CPU p50 | p99 | max | Process CPU | Missed, long missed | RSS MB |
+|---|---|---|---|---|---|---|---|---|---|
+| before 1 | 01:49:15 | 6.51, 7.38, 7.56 | 4.89 | 2.72 ms | 3.87 ms | 5.42 ms | 16.85% | 0, 0 | 244.33 |
+| after 1 | 01:49:52 | 4.89, 6.86, 7.38 | 5.30 | 2.70 ms | 4.20 ms | 5.53 ms | 16.92% | 0, 0 | 311.59 |
+| before 2 | 01:50:29 | 5.30, 6.78, 7.33 | 5.04 | 2.76 ms | 4.20 ms | 5.54 ms | 17.22% | 0, 0 | 244.69 |
+| after 2 | 01:51:05 | 5.04, 6.55, 7.23 | 3.75 | 2.37 ms | 3.73 ms | 5.20 ms | 15.10% | 0, 0 | 245.94 |
+| before 3 | 01:51:41 | 3.75, 6.06, 7.04 | 3.45 | 2.74 ms | 4.10 ms | 5.33 ms | 16.87% | 0, 0 | 243.13 |
+| after 3 | 01:52:17 | 3.45, 5.71, 6.88 | 3.39 | 2.80 ms | 3.99 ms | 5.43 ms | 16.95% | 0, 0 | 245.49 |
+| Median before | | | | 2.74 ms | 4.10 ms | | 16.87% | 0, 0 | 244.33 |
+| Median after | | | | 2.70 ms | 3.99 ms | | 16.92% | 0, 0 | 245.94 |
+
+After 1 was the first launch of the after binary, so the NVIDIA shader cache was cold (RSS 311.59
+MB, as in the wlf.41 first-launch note). It still counts. Set 1's report files were overwritten
+by set 2; the values above were printed from them before that (`gate1-summary.txt`).
+
+Set 2, same binaries, warm, right after the after-profile below:
+
+| Run | Start | Load at start (1, 5, 15 min) | Load at end (1 min) | Frame CPU p50 | p99 | max | Process CPU | Missed, long missed | RSS MB |
+|---|---|---|---|---|---|---|---|---|---|
+| before 1 | 01:53:49 | 4.94, 5.41, 6.65 | 3.72 | 2.81 ms | 4.40 ms | 7.01 ms | 17.32% | 0, 0 | 243.78 |
+| after 1 | 01:54:25 | 3.72, 5.06, 6.49 | 3.81 | 2.47 ms | 3.77 ms | 4.85 ms | 15.76% | 0, 0 | 245.84 |
+| before 2 | 01:55:01 | 3.81, 4.93, 6.39 | 3.31 | 2.46 ms | 3.61 ms | 4.73 ms | 15.79% | 0, 0 | 242.71 |
+| after 2 | 01:55:38 | 3.31, 4.68, 6.25 | 3.44 | 2.42 ms | 3.84 ms | 5.66 ms | 15.65% | 0, 0 | 245.44 |
+| before 3 | 01:56:14 | 3.44, 4.52, 6.14 | 3.26 | 2.41 ms | 3.72 ms | 5.60 ms | 15.40% | 0, 0 | 244.62 |
+| after 3 | 01:56:50 | 3.26, 4.34, 6.01 | 3.67 | 2.44 ms | 3.50 ms | 4.47 ms | 15.49% | 0, 0 | 246.11 |
+| Median before | | | | 2.46 ms | 3.72 ms | | 15.79% | 0, 0 | 243.78 |
+| Median after | | | | 2.44 ms | 3.77 ms | | 15.65% | 0, 0 | 245.84 |
+
+Over all 6 runs of each binary the p99 median is 3.99 ms before and 3.81 ms after. The two sets
+disagree on the sign, so I do not count the p99 change as shown.
+
+Instruction counts: two more interleaved runs per binary, `sudo perf stat -e
+instructions:u,cycles:u,task-clock -p <pid>` for 20 s, 7 s after launch (`stat-*.txt`).
+
+| Run | Start | Load at start | Instructions (user) | Cycles (user) | Task clock | p99 of the run |
+|---|---|---|---|---|---|---|
+| before 1 | 01:57:26 | 3.67 | 20,302,702,152 | 13,066,334,789 | 3,416 ms | 3.73 ms |
+| after 1 | 01:58:02 | 2.93 | 19,352,858,273 | 12,129,384,534 | 3,183 ms | 3.96 ms |
+| before 2 | 01:58:38 | 2.54 | 20,293,201,496 | 12,417,371,644 | 3,257 ms | 3.61 ms |
+| after 2 | 01:59:14 | 3.07 | 19,361,095,755 | 12,788,249,116 | 3,344 ms | 3.95 ms |
+
+The after binary ran 19.36 G instructions on average against 20.30 G, 4.6% fewer. User cycles and
+task clock were 2.2% lower, with a spread as large as that between runs.
+
+| Gate (hidden nested KWin, 60 Hz) | Original limit | Relaxed limit | Median after | Original | Relaxed |
+|---|---|---|---|---|---|
+| UI thread CPU per frame, `table-2000`, p99 | 2.0 ms | 4.9 ms | 3.99 ms (set 2: 3.77 ms) | FAIL | PASS |
+| Missed frames, `table-2000` | median 0, every run <= 2, long 0 | none | 0, 0 in every run | PASS | PASS |
+
+#### Profile after the change
+
+One run of the after binary at 01:53:13 (load 3.75, 5.37, 6.70), same perf settings: 2,655
+samples, p50 2.90 ms and p99 4.21 ms with perf attached. `BoundsTree::insert` fell from 9.2% to
+7.8% of the samples. The other areas: GPUI element tree 19.2%, libc copy loop 16.5%, taffy 12.4%,
+text 9.5%, scene and paint 6.9%, NVIDIA 6.4%, wgpu renderer 5.5%, our UI code 4.0%. The
+`SubpixelSprite` sort in `Scene::finish` was 1.9% (2.4% before).
+
+Reading, for the next beads:
+- The tree change saved less in the app than in the synthetic frame (share 9.2% to 7.8%, against
+  25% less time per insert in the synthetic frame). With 672 inserts per frame, the count is
+  the next lever for this cost, not the speed of one insert. Most of the count is one layer per
+  text line. Giving a nested layer its parent's ordering would remove most of them, but that
+  changes the draw order of a primitive painted after a nested layer, so it is not an
+  output-neutral patch.
+- p99 is still 1.8 to 2.0 ms over the original limit. The work is spread: element tree and
+  styles, taffy for each row's `div` and its Name cell, the copies they make, then text and GPU
+  submit. Apart from `BoundsTree::insert`, no function in the after profile is above 2.3%.
+- Two cheaper candidates seen in the profile: the stable `SubpixelSprite` and `MonochromeSprite`
+  sorts in `Scene::finish` (3.0% together before the change), and `TextSystem::raster_bounds`
+  plus `Window::paint_glyph` (3.5%), which run for every glyph on every frame.
+
 ### Static scene idle CPU (tasklens-wlf.27, 2026-11-04)
 
 Result: FAIL. The rerun on 2026-11-05 at `e44eb654a`, after the wlf.39 fix, used a median
