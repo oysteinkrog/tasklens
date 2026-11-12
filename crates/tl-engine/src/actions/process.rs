@@ -1199,8 +1199,10 @@ mod tests {
         for (t, nice) in &after {
             if *t == tid {
                 assert_eq!(*nice, i64::from(target), "{after:?}");
-            } else {
-                assert_eq!(Some(nice), before.get(t), "{before:?} {after:?}");
+            } else if let Some(was) = before.get(t) {
+                // A thread the child starts after `before` was read is not ours to check
+                // (the 1.6.1 suite saw a fifth thread appear between the two reads).
+                assert_eq!(nice, was, "{before:?} {after:?}");
             }
         }
         // A TID that is not in this process is never touched.
