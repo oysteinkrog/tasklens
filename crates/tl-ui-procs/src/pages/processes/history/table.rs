@@ -190,6 +190,9 @@ struct PeakTips {
     scratch: String,
 }
 
+/// `pos` value of a row that is filtered out.
+const HIDDEN: u32 = u32::MAX;
+
 /// The History table delegate. The page installs each history view with [`Self::install`] and
 /// calls `TlTreeTable::on_new_version` when it returns true.
 pub struct HistoryTableDelegate {
@@ -198,8 +201,13 @@ pub struct HistoryTableDelegate {
     view: Arc<HistoryView>,
     /// Indices into `view.rows`, filtered and in display order.
     order: Vec<u32>,
-    /// Display index of each shown row.
+    /// Row in `view.rows` of each key. Keys are unique in a view. Built again only when the
+    /// view's keys differ from `index_keys`, since a scrub mostly keeps the same processes.
     index: FxHashMap<ProcessKey, u32>,
+    /// The keys of `view.rows`, in order, that `index` was built for.
+    index_keys: Vec<ProcessKey>,
+    /// Display index of each row of `view.rows`, or [`HIDDEN`] when the row is not shown.
+    pos: Vec<u32>,
     /// Scratch for a numeric sort: packed sort key and row index.
     keyed: Vec<(u128, u32)>,
     /// Bumps on every rebuild of `order`.
@@ -261,6 +269,8 @@ impl HistoryTableDelegate {
             view: Arc::new(HistoryView::default()),
             order: Vec::new(),
             index: FxHashMap::default(),
+            index_keys: Vec::new(),
+            pos: Vec::new(),
             keyed: Vec::new(),
             version: 0,
             sort,
@@ -380,8 +390,8 @@ impl HistoryTableDelegate {
     pub fn copy_cell_text(&self, keys: &[ProcessKey], col: ColumnId) -> String {
         let mut out = CellOut::default();
         keys.iter()
-            .filter_map(|k| self.index.get(k))
-            .map(|&ix| self.copy_value(ix as usize, col, &mut out))
+            .filter_map(|k| self.display_index(k))
+            .map(|ix| self.copy_value(ix, col, &mut out))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -393,8 +403,7 @@ impl HistoryTableDelegate {
         let mut out = CellOut::default();
         let ppid = text(cx, process_column(ColumnId::Ppid).label);
         let mut blocks = Vec::new();
-        for ix in keys.iter().filter_map(|k| self.index.get(k)) {
-            let ix = *ix as usize;
+        for ix in keys.iter().filter_map(|k| self.display_index(k)) {
             let r = self.row(ix);
             let mut block = String::new();
             for col in [ColumnId::Name, ColumnId::Pid] {
@@ -433,8 +442,7 @@ impl HistoryTableDelegate {
         let mut out = CellOut::default();
         let visible = self.layout.visible_columns().clone();
         let mut blocks = Vec::new();
-        for ix in keys.iter().filter_map(|k| self.index.get(k)) {
-            let ix = *ix as usize;
+        for ix in keys.iter().filter_map(|k| self.display_index(k)) {
             let mut lines = Vec::new();
             for &col in visible.iter() {
                 out.reset();
@@ -517,12 +525,34 @@ impl HistoryTableDelegate {
         } else {
             order.sort_unstable_by(|&a, &b| row_order(&rows[a as usize], &rows[b as usize], sort));
         }
-        self.index.clear();
-        self.index.reserve(order.len());
+        if !rows
+            .iter()
+            .map(|r| r.key)
+            .eq(self.index_keys.iter().copied())
+        {
+            self.index_keys.clear();
+            self.index_keys.extend(rows.iter().map(|r| r.key));
+            self.index.clear();
+            self.index.reserve(rows.len());
+            for (i, r) in rows.iter().enumerate() {
+                self.index.insert(r.key, i as u32);
+            }
+        }
+        self.pos.clear();
+        self.pos.resize(rows.len(), HIDDEN);
         for (ix, &i) in order.iter().enumerate() {
-            self.index.insert(rows[i as usize].key, ix as u32);
+            self.pos[i as usize] = ix as u32;
         }
         self.version += 1;
+    }
+
+    /// Display index of the row with `key`, or `None` when it is not shown.
+    fn display_index(&self, key: &ProcessKey) -> Option<usize> {
+        let &i = self.index.get(key)?;
+        match self.pos.get(i as usize) {
+            Some(&ix) if ix != HIDDEN => Some(ix as usize),
+            _ => None,
+        }
     }
 
     /// The "peak <value>" tooltip of cell (`ix`, `col`), from the hovered row's cache.
@@ -722,7 +752,7 @@ impl TreeTableDelegate for HistoryTableDelegate {
     }
 
     fn row_index(&self, id: ProcessKey) -> Option<usize> {
-        self.index.get(&id).map(|&ix| ix as usize)
+        self.display_index(&id)
     }
 
     fn row_kind(&self, _: usize) -> RowKind {
@@ -876,7 +906,7 @@ impl TreeTableDelegate for HistoryTableDelegate {
         let keys: SmallVec<[ProcessKey; 8]> = ids
             .iter()
             .copied()
-            .filter(|k| self.index.contains_key(k))
+            .filter(|k| self.display_index(k).is_some())
             .collect();
         if keys.is_empty() {
             return menu;

@@ -732,6 +732,62 @@ fn hide_system_filters_history(cx: &mut TestAppContext) {
     assert_eq!(shown(vcx), [1, 3, 2]);
 }
 
+/// `row_index` follows each new view: a re-sort with the same keys, a filtered-out row and a view
+/// with other keys (tasklens-mkadz keeps the key map while the keys stay the same).
+#[gpui_kit::test]
+fn history_row_index_follows_each_view(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
+    vcx.run_until_parked();
+    let index = |vcx: &mut VisualTestContext, pids: &[u32]| {
+        with_table(&page, vcx, |t| {
+            pids.iter()
+                .map(|&pid| t.delegate.row_index(key(pid)))
+                .collect::<Vec<_>>()
+        })
+    };
+    let rows = |cpu: [f32; 3]| {
+        vec![
+            prow(1, "systemd", cpu[0]),
+            prow(2, "firefox", cpu[1]),
+            prow(3, "bash", cpu[2]),
+        ]
+    };
+    publish_rows(
+        &engine,
+        vcx,
+        HistoryRange::At(600 * S),
+        rows([5.0, 1.0, 2.0]),
+    );
+    assert_eq!(index(vcx, &[1, 2, 3]), [Some(0), Some(2), Some(1)]);
+
+    // Same keys, new values: the order and the index change together.
+    publish_rows(
+        &engine,
+        vcx,
+        HistoryRange::At(601 * S),
+        rows([1.0, 5.0, 2.0]),
+    );
+    assert_eq!(index(vcx, &[1, 2, 3]), [Some(2), Some(0), Some(1)]);
+
+    // A row the filter hides has no index.
+    page.update(vcx, |p, cx| p.set_filter("bash", cx));
+    vcx.run_until_parked();
+    assert_eq!(index(vcx, &[1, 2, 3]), [None, None, Some(0)]);
+    page.update(vcx, |p, cx| p.set_filter("", cx));
+    vcx.run_until_parked();
+
+    // Other keys: pid 1 left, pid 4 came.
+    let other = vec![
+        prow(4, "zsh", 3.0),
+        prow(2, "firefox", 1.0),
+        prow(3, "bash", 2.0),
+    ];
+    publish_rows(&engine, vcx, HistoryRange::At(602 * S), other);
+    assert_eq!(index(vcx, &[1, 2, 3, 4]), [None, Some(2), Some(1), Some(0)]);
+}
+
 #[gpui_kit::test]
 fn history_sort_persisted(cx: &mut TestAppContext) {
     let engine = init(cx);
