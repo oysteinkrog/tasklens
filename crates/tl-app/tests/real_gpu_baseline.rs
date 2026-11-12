@@ -1,16 +1,17 @@
 //! GPU power baseline for the bench (E01-023, ADR-014 measurement tools, open question 7).
 //!
-//! `#[ignore]`, owner machine only. Run it with tasklens closed and a release probe:
+//! `#[ignore]`, owner machine only. Run it with tasklens closed and a `perf` probe (ADR-002):
 //!
 //! ```text
-//! cargo build --release -p tl-gpu-probe
-//! TASKLENS_GPU_PROBE=$PWD/target/release/tl-gpu-probe \
+//! cargo build --profile perf -p tl-gpu-probe
+//! TASKLENS_GPU_PROBE=$PWD/target/perf/tl-gpu-probe \
 //!     cargo test -p tl-app --test real_gpu_baseline -- --ignored --nocapture
 //! ```
 //!
-//! It samples NVML power and utilization at 1 Hz for 30 s through the same client the bench
-//! uses and prints the means, with the same rules as the bench report: power is the sum over the
-//! GPUs, utilization the highest GPU. Report only, no gate.
+//! It samples NVML power and utilization at 1 Hz for 30 s (samples at 0 s to 29 s, window end at
+//! 30 s) through the same client the bench uses and prints the means, with the same rules as the
+//! bench report: power is the sum over the GPUs, utilization the highest GPU. Report only, no
+//! gate.
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -32,7 +33,7 @@ fn ticks(pid: u32) -> Option<u64> {
 }
 
 #[test]
-#[ignore = "owner machine: an NVIDIA GPU, a release tl-gpu-probe and tasklens closed"]
+#[ignore = "owner machine: an NVIDIA GPU, a perf tl-gpu-probe and tasklens closed"]
 fn real_gpu_baseline() {
     let running = Command::new("pgrep")
         .args(["-x", "tasklens"])
@@ -45,7 +46,7 @@ fn real_gpu_baseline() {
     );
 
     let probe = tl_engine::gpu::locate().unwrap_or_else(|| {
-        panic!("set {PROBE_ENV} to a release build, for example target/release/{PROBE_NAME}")
+        panic!("set {PROBE_ENV} to a perf build, for example target/perf/{PROBE_NAME}")
     });
     let mut client = ProbeClient::start(&probe).expect("probe starts");
     assert!(
@@ -74,9 +75,9 @@ fn real_gpu_baseline() {
             util_sum += f64::from(util);
             util_n += 1;
         }
-        if n < SAMPLES {
-            std::thread::sleep((start + PERIOD * n).saturating_duration_since(Instant::now()));
-        }
+        // Sleep after the last sample too: each sample stands for one 1 s interval, so the
+        // window ends at 30 s, as a 30 s bench window does.
+        std::thread::sleep((start + PERIOD * n).saturating_duration_since(Instant::now()));
     }
     let wall = start.elapsed().as_secs_f64();
     let dticks = ticks(pid).expect("probe stat").saturating_sub(ticks_at);

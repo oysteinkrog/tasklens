@@ -223,27 +223,155 @@ const GPU_THREAD_NAME: &str = "tl-bench-gpu";
 /// gave no value.
 type GpuPoint = (Option<u32>, Option<u32>);
 
-/// The bench's own GPU probe. Its client sits in `idle` between windows and moves to the sampler
-/// thread during the measured window.
-struct GpuMeter {
-    pid: u32,
-    idle: Option<ProbeClient>,
-    running: Option<Sampler>,
+/// Commands to the sampler thread. Dropping the sender ends the thread and shuts the probe down.
+enum SamplerCmd {
+    /// Start sampling for the window with this id.
+    Start(u64),
+    /// Stop sampling and wait for the next window.
+    Stop,
 }
 
-/// The sampler of the window being measured.
-struct Sampler {
-    stop: mpsc::Sender<()>,
-    thread: JoinHandle<SamplerEnd>,
+/// What the UI thread and the sampler thread share. The sampler holds the lock only to push one
+/// sample or to set `failed`, never across a probe request, so [`side_stop`] never waits on the
+/// probe.
+#[derive(Default)]
+struct WindowSamples {
+    /// The window being sampled, 0 between windows. A reply for another window is dropped.
+    id: u64,
+    samples: Vec<Vec<GpuPoint>>,
+    /// Set after a sample error; the thread has then given the probe up and ended.
+    failed: bool,
+}
+
+/// The open measured window: the probe's CPU ticks and the time when it began.
+struct OpenWindow {
     ticks_at: Option<u64>,
     wall_at: Instant,
 }
 
-/// What the sampler thread hands back: the client (`None` after a probe error) and one entry per
-/// sample, one point per GPU.
-struct SamplerEnd {
-    client: Option<ProbeClient>,
-    samples: Vec<Vec<GpuPoint>>,
+/// The bench's own GPU probe. A `tl-bench-gpu` thread owns the client from start to shutdown and
+/// sends the 1 Hz sample requests while a window is open. [`GpuMeter::begin`] and
+/// [`GpuMeter::end`] only send a command and read shared state, so the UI thread never blocks on
+/// a probe request.
+struct GpuMeter {
+    pid: u32,
+    cmd: mpsc::Sender<SamplerCmd>,
+    shared: Arc<Mutex<WindowSamples>>,
+    thread: JoinHandle<()>,
+    last_id: u64,
+    open: Option<OpenWindow>,
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl GpuMeter {
+    /// Moves a ready client to a new sampler thread. `None` (with a warning) when the thread
+    /// cannot start; the client is then dropped with the closure.
+    fn new(client: ProbeClient) -> Option<GpuMeter> {
+        let pid = client.pid();
+        let shared = Arc::new(Mutex::new(WindowSamples::default()));
+        let (cmd, cmd_rx) = mpsc::channel();
+        let thread_shared = Arc::clone(&shared);
+        let spawned = thread::Builder::new()
+            .name(GPU_THREAD_NAME.to_owned())
+            .spawn(move || sampler_thread(client, &cmd_rx, &thread_shared));
+        match spawned {
+            Ok(thread) => Some(GpuMeter {
+                pid,
+                cmd,
+                shared,
+                thread,
+                last_id: 0,
+                open: None,
+            }),
+            Err(e) => {
+                warn!(target: "tasklens::perf", "cannot start the GPU sampler thread: {e}; gpu and probe_cpu_pct stay null");
+                None
+            }
+        }
+    }
+
+    /// Opens a window: reads the probe's CPU ticks, then tells the thread to sample. `false` when
+    /// the probe is gone and the meter must be dropped.
+    fn begin(&mut self) -> bool {
+        if self.open.is_some() {
+            warn!(target: "tasklens::perf", "GPU window already open; this window is not sampled");
+            return true;
+        }
+        self.last_id += 1;
+        let id = self.last_id;
+        {
+            let mut w = lock(&self.shared);
+            if w.failed {
+                return false;
+            }
+            w.id = id;
+            w.samples.clear();
+        }
+        let ticks_at = probe_ticks(self.pid);
+        let wall_at = Instant::now();
+        if self.cmd.send(SamplerCmd::Start(id)).is_err() {
+            warn!(target: "tasklens::perf", "GPU sampler thread is gone; gpu and probe_cpu_pct stay null");
+            return false;
+        }
+        self.open = Some(OpenWindow { ticks_at, wall_at });
+        true
+    }
+
+    /// Closes the window: reads the probe's CPU ticks and the wall time first, so the window
+    /// ends here, then takes the samples whose reply came in before this point. A request still
+    /// in flight is not waited for and does not count. The second field is `false` after a probe
+    /// error: the measure is then empty and the meter must be dropped.
+    fn end(&mut self) -> (SideMeasure, bool) {
+        let Some(open) = self.open.take() else {
+            return (SideMeasure::default(), true);
+        };
+        let ticks_end = probe_ticks(self.pid);
+        let wall = open.wall_at.elapsed();
+        let (samples, failed) = {
+            let mut w = lock(&self.shared);
+            w.id = 0;
+            (std::mem::take(&mut w.samples), w.failed)
+        };
+        let _ = self.cmd.send(SamplerCmd::Stop);
+        if failed {
+            return (SideMeasure::default(), false);
+        }
+        let cpu = match (open.ticks_at, ticks_end) {
+            (Some(at), Some(end)) => probe_cpu_pct(
+                end.saturating_sub(at),
+                rustix::param::clock_ticks_per_second(),
+                wall,
+            ),
+            _ => None,
+        };
+        let gpu = gpu_means(&samples);
+        match (gpu, cpu) {
+            (Some(gpu), Some(cpu)) => (
+                SideMeasure {
+                    gpu: Some(gpu),
+                    probe_cpu_pct: Some(cpu),
+                },
+                true,
+            ),
+            _ => {
+                warn!(target: "tasklens::perf", samples = samples.len(), cpu_read = cpu.is_some(),
+                    "GPU means not available; gpu and probe_cpu_pct stay null");
+                (SideMeasure::default(), true)
+            }
+        }
+    }
+
+    /// Ends the thread, which shuts the probe down, and waits for it. Called after the scene, so
+    /// the wait is outside any measured window.
+    fn shutdown(self) {
+        drop(self.cmd);
+        if self.thread.join().is_err() {
+            warn!(target: "tasklens::perf", "GPU sampler thread panicked");
+        }
+    }
 }
 
 /// `None` without a probe or after a probe error. The scene reaches it only through the
@@ -251,7 +379,7 @@ struct SamplerEnd {
 static METER: Mutex<Option<GpuMeter>> = Mutex::new(None);
 
 fn meter() -> MutexGuard<'static, Option<GpuMeter>> {
-    METER.lock().unwrap_or_else(PoisonError::into_inner)
+    lock(&METER)
 }
 
 /// Finds and starts the probe and runs its `Hello`. Any failure leaves the meter off.
@@ -262,13 +390,8 @@ fn meter_start() {
     };
     match ProbeClient::start(&path) {
         Ok(client) if client.info.is_some() => {
-            let pid = client.pid();
-            info!(target: "tasklens::perf", path = %path.display(), pid, "bench GPU probe started");
-            *meter() = Some(GpuMeter {
-                pid,
-                idle: Some(client),
-                running: None,
-            });
+            info!(target: "tasklens::perf", path = %path.display(), pid = client.pid(), "bench GPU probe started");
+            *meter() = GpuMeter::new(client);
         }
         Ok(client) => {
             warn!(target: "tasklens::perf", init_failed = ?client.init_failed,
@@ -282,139 +405,93 @@ fn meter_start() {
     }
 }
 
-/// Stops a sampler that is still running (a scene that ended inside its window) and shuts the
-/// probe down.
+/// Ends the sampler thread and shuts the probe down.
 fn meter_shutdown() {
-    let Some(mut m) = meter().take() else {
-        return;
-    };
-    if let Some(run) = m.running.take() {
-        let _ = run.stop.send(());
-        if let Ok(end) = run.thread.join() {
-            m.idle = end.client;
-        }
-    }
-    if let Some(client) = m.idle.take() {
-        client.shutdown();
+    let taken = meter().take();
+    if let Some(m) = taken {
+        m.shutdown();
     }
 }
 
-/// [`tl_ui::bench::BenchClocks::side_start`]: reads the probe's CPU ticks and moves the client
-/// to the sampler thread.
+/// [`tl_ui::bench::BenchClocks::side_start`]: opens the GPU window. Never blocks on the probe.
 fn side_start() {
     let mut guard = meter();
-    let Some(m) = guard.as_mut() else {
-        return;
-    };
-    let Some(client) = m.idle.take() else {
-        warn!(target: "tasklens::perf", "GPU sampler already running; this window is not sampled");
-        return;
-    };
-    let ticks_at = probe_ticks(m.pid);
-    let wall_at = Instant::now();
-    let (stop, stop_rx) = mpsc::channel();
-    let spawned = thread::Builder::new()
-        .name(GPU_THREAD_NAME.to_owned())
-        .spawn(move || sample_loop(client, &stop_rx));
-    match spawned {
-        Ok(thread) => {
-            m.running = Some(Sampler {
-                stop,
-                thread,
-                ticks_at,
-                wall_at,
-            });
-        }
-        Err(e) => {
-            // The client moved into the closure that failed to start and is gone with it.
-            warn!(target: "tasklens::perf", "cannot start the GPU sampler thread: {e}");
-            *guard = None;
-        }
+    if let Some(m) = guard.as_mut()
+        && !m.begin()
+    {
+        *guard = None;
     }
 }
 
-/// [`tl_ui::bench::BenchClocks::side_stop`]: stops the sampler and returns its means. Any error
-/// gives both fields `None`.
+/// [`tl_ui::bench::BenchClocks::side_stop`]: closes the GPU window and returns its means. Never
+/// blocks on the probe. Any error gives both fields `None`.
 fn side_stop() -> SideMeasure {
     let mut guard = meter();
     let Some(m) = guard.as_mut() else {
         return SideMeasure::default();
     };
-    let Some(run) = m.running.take() else {
-        return SideMeasure::default();
-    };
-    let _ = run.stop.send(());
-    let Ok(end) = run.thread.join() else {
-        warn!(target: "tasklens::perf", "GPU sampler thread panicked");
+    let (side, alive) = m.end();
+    if !alive {
+        // The thread warned, gave the probe up and ended.
         *guard = None;
-        return SideMeasure::default();
-    };
-    let wall = run.wall_at.elapsed();
-    let ticks_end = probe_ticks(m.pid);
-    let Some(client) = end.client else {
-        // The sampler warned and gave the probe up.
-        *guard = None;
-        return SideMeasure::default();
-    };
-    m.idle = Some(client);
-    let cpu = match (run.ticks_at, ticks_end) {
-        (Some(at), Some(end)) => probe_cpu_pct(
-            end.saturating_sub(at),
-            rustix::param::clock_ticks_per_second(),
-            wall,
-        ),
-        _ => None,
-    };
-    let gpu = gpu_means(&end.samples);
-    match (gpu, cpu) {
-        (Some(gpu), Some(cpu)) => SideMeasure {
-            gpu: Some(gpu),
-            probe_cpu_pct: Some(cpu),
-        },
-        _ => {
-            warn!(target: "tasklens::perf", samples = end.samples.len(), cpu_read = cpu.is_some(),
-                "GPU means not available; gpu and probe_cpu_pct stay null");
-            SideMeasure::default()
-        }
     }
+    side
 }
 
-/// Samples at once, then every [`GPU_SAMPLE_PERIOD`] until `stop` gets a message or closes. The
-/// first sample error ends it with a warning and gives the probe up.
-fn sample_loop(mut client: ProbeClient, stop: &mpsc::Receiver<()>) -> SamplerEnd {
-    let start = Instant::now();
-    let mut samples = Vec::new();
-    let mut n: u32 = 0;
-    loop {
-        match client.sample(false) {
-            Ok(reply) => samples.push(
-                reply
-                    .devices
-                    .iter()
-                    .map(|d| (d.power_mw.ok(), d.util_pct.ok()))
-                    .collect(),
-            ),
-            Err(e) => {
-                warn!(target: "tasklens::perf", "GPU probe sample failed: {e}; gpu and probe_cpu_pct stay null");
-                client.kill();
-                return SamplerEnd {
-                    client: None,
-                    samples,
-                };
+/// Owns the client. Idle until a [`SamplerCmd::Start`]; then samples at once and every
+/// [`GPU_SAMPLE_PERIOD`] until a [`SamplerCmd::Stop`]. A disconnected channel shuts the probe
+/// down and ends the thread. The first sample error kills the probe, sets `failed` and ends it.
+fn sampler_thread(
+    mut client: ProbeClient,
+    cmds: &mpsc::Receiver<SamplerCmd>,
+    shared: &Mutex<WindowSamples>,
+) {
+    let mut next_window = None;
+    'idle: loop {
+        let id = match next_window.take() {
+            Some(id) => id,
+            None => match cmds.recv() {
+                Ok(SamplerCmd::Start(id)) => id,
+                Ok(SamplerCmd::Stop) => continue,
+                Err(_) => break,
+            },
+        };
+        let start = Instant::now();
+        let mut n: u32 = 0;
+        loop {
+            match client.sample(false) {
+                Ok(reply) => {
+                    let point = reply
+                        .devices
+                        .iter()
+                        .map(|d| (d.power_mw.ok(), d.util_pct.ok()))
+                        .collect();
+                    let mut w = lock(shared);
+                    if w.id == id {
+                        w.samples.push(point);
+                    }
+                }
+                Err(e) => {
+                    warn!(target: "tasklens::perf", "GPU probe sample failed: {e}; gpu and probe_cpu_pct stay null");
+                    client.kill();
+                    lock(shared).failed = true;
+                    return;
+                }
             }
-        }
-        n += 1;
-        let next = start + GPU_SAMPLE_PERIOD * n;
-        match stop.recv_timeout(next.saturating_duration_since(Instant::now())) {
-            Err(RecvTimeoutError::Timeout) => {}
-            Ok(()) | Err(RecvTimeoutError::Disconnected) => {
-                return SamplerEnd {
-                    client: Some(client),
-                    samples,
-                };
+            n += 1;
+            let next = start + GPU_SAMPLE_PERIOD * n;
+            match cmds.recv_timeout(next.saturating_duration_since(Instant::now())) {
+                Err(RecvTimeoutError::Timeout) => {}
+                Ok(SamplerCmd::Stop) => continue 'idle,
+                Ok(SamplerCmd::Start(id)) => {
+                    next_window = Some(id);
+                    continue 'idle;
+                }
+                Err(RecvTimeoutError::Disconnected) => break 'idle,
             }
         }
     }
+    client.shutdown();
 }
 
 /// Power and utilization means over `samples`. Per sample, power is the sum over the GPUs and
@@ -524,6 +601,79 @@ mod tests {
         assert!((pct - 1.0).abs() < 1e-9, "{pct}");
         assert_eq!(probe_cpu_pct(30, 100, Duration::ZERO), None);
         assert_eq!(probe_cpu_pct(30, 0, Duration::from_secs(1)), None);
+    }
+
+    /// The workspace debug probe when it was built with `--features fake`
+    /// (`cargo build -p tl-gpu-probe --features fake`), else `None` with a note.
+    fn fake_meter(script: &str) -> Option<GpuMeter> {
+        let probe = std::env::var_os(tl_engine::gpu::PROBE_ENV)
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/debug/tl-gpu-probe")
+            });
+        let fake = std::process::Command::new(&probe)
+            .args(["--fake", "no-such-script"])
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .is_ok_and(|out| String::from_utf8_lossy(&out.stderr).contains("unknown fake script"));
+        if !fake {
+            eprintln!(
+                "skipped: no fake probe at {} (build it with `cargo build -p tl-gpu-probe --features fake`)",
+                probe.display()
+            );
+            return None;
+        }
+        let client =
+            ProbeClient::start_with_args(&probe, &[OsStr::new("--fake"), OsStr::new(script)])
+                .expect("the fake probe starts");
+        assert!(client.info.is_some(), "{:?}", client.init_failed);
+        GpuMeter::new(client)
+    }
+
+    #[test]
+    fn fake_probe_windows_have_means() {
+        let Some(mut m) = fake_meter("normal") else {
+            return;
+        };
+        // Two windows: the thread goes idle after the first and samples again for the second.
+        for window in 0..2 {
+            assert!(m.begin(), "window {window}");
+            thread::sleep(Duration::from_millis(1_200));
+            let (side, alive) = m.end();
+            assert!(alive, "window {window}");
+            let gpu = side.gpu.expect("gpu means");
+            assert!(
+                (gpu.power_w - 31.9).abs() < 1e-9,
+                "window {window}: {gpu:?}"
+            );
+            assert!(side.probe_cpu_pct.is_some(), "window {window}: {side:?}");
+        }
+        m.shutdown();
+    }
+
+    #[test]
+    fn end_does_not_wait_for_a_sample_in_flight() {
+        // The first sample hangs for 6 s, so the request is in flight until its 500 ms deadline.
+        let Some(mut m) = fake_meter("sleep-on-sample") else {
+            return;
+        };
+        assert!(m.begin());
+        thread::sleep(Duration::from_millis(50));
+        let at = Instant::now();
+        let (side, alive) = m.end();
+        let took = at.elapsed();
+        assert!(
+            took < Duration::from_millis(200),
+            "end waited {took:?} for the probe"
+        );
+        assert!(alive, "the deadline has not passed yet");
+        assert_eq!(side, SideMeasure::default(), "no reply came in the window");
+        // After the deadline the thread gives the probe up, and the next window refuses.
+        thread::sleep(tl_engine::gpu::SAMPLE_DEADLINE + Duration::from_millis(500));
+        assert!(!m.begin(), "a failed probe opens no window");
+        m.shutdown();
     }
 
     #[test]
