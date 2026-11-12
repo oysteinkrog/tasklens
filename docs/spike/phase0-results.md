@@ -2061,6 +2061,132 @@ Reading:
   installs each one (`tl-engine-0` and the main thread together: 26 to 28 ticks per minute).
   I did not look into how much of that work a hidden window needs.
 
+### First frame after the API versions probe change (tasklens-fwj1i, 2026-11-12)
+
+Result: the warm first frame was a median 470 ms after the change, against 560 ms before it in
+the same session. That is FAIL against the original limit of 200 ms and PASS against the
+relaxed limit of 830 ms. The change makes the engine run `tl-gpu-probe --api-versions` 3 s
+after the NVML probe's `GpuInfo` instead of at once (`3ea11e1af`). Before, that child started
+the NVIDIA driver (Vulkan and EGL) at the same time as gpui's own adapter probe, and the two
+slowed each other. The cold first frame was not measured (it needs the owner to drop caches)
+and stays at 1240 ms (wlf.19), pending.
+
+Setup: hidden nested KWin, 1920 x 1200, 60 Hz, session `fwj`, app on the nested Xwayland
+(X11), private XDG folders, normal mode (no `--bench`), default settings. Bench slot lock and
+quiet rule: 1- and 5-minute load at most 8 at the start of each run. One untimed launch of
+each binary ran first, so the binary was in the page cache. Each run waited for a new
+`first_frame_ms` line and then stopped the app. "Before" is `cargo build --locked --profile
+perf -p tl-app` at `0d47d45e2`; "after" is the same command at `3ea11e1af`. These are
+perf-profile binaries, not the release package that wlf.19 measured. Both used the installed
+probe `/usr/lib/tasklens/tl-gpu-probe` (package of 2026-11-11), because the bench folder has no
+probe next to the binary. Runs, logs, profiles and scripts: `/var/tmp/claude/fwj1i/`.
+
+#### Profile before the change
+
+Five warm runs of the before binary at 01:15 (load 3.76 to 4.47, 5-minute load 7.45 to
+7.76): `first_frame_ms` 580, 580, 560, 570, 560, median 570. `window_open` was 487 to 511 ms of
+it; every step before the window took 66 ms in total (`engine_start` 21 ms, `platform` 33 ms).
+The untimed launch took 1920 ms, with `platform` at 1112 ms; it is not counted.
+
+`window_open` split by gpui's `gpui_wgpu::wgpu_context` log lines, median of the 5 runs:
+
+| Part | Median ms |
+|---|---|
+| Window, wgpu instance (Vulkan and GL), surface, then listing 3 adapters | 220 |
+| Testing the RTX 5070 Ti: `vkCreateDevice` and a surface configure | 215 |
+| Renderer set-up after the adapter is chosen | 69 |
+
+One run under `sudo perf record -e cpu-clock -F 1999 --call-graph dwarf,16384` from exec to
+the first frame (`window_open` 533 ms under perf). Main thread, by what its stack shows over
+time: Vulkan instance about 125 ms, EGL for wgpu's GL backend about 65 ms, Vulkan device and
+surface test about 225 ms, then renderer set-up. Most samples sit in `ioctl` to the NVIDIA
+driver (509 of 998 main-thread samples).
+
+Top cost named: the NVIDIA driver start-up inside gpui's adapter probe (`window_open`), made
+slower by a second driver start-up in parallel. The `tl-gpu-probe --api-versions` child ran
+from about 50 ms to 490 ms after exec, at about 75% of one core (586 samples). Its stacks:
+`vkCreateInstance` (235), `vkDestroyInstance` (65), EGL set-up, and `ioctl` (430). It is the
+E13-010 run that reads the Vulkan and OpenGL versions for two rows of the GPU and
+Information pages. The engine started it right after the NVML probe's `Hello`, before the
+first sample.
+
+A/B check before any code change, 3 alternating pairs at 01:18 (load 3.23 to 3.96): the same
+binary with a probe wrapper next to it, which either ran the probe at once or slept 2 s before
+`--api-versions`.
+
+| Pair | At once: `first_frame_ms`, `window_open` | Delayed 2 s: `first_frame_ms`, `window_open` |
+|---|---|---|
+| 1 | 870, 728.8 ms | 510, 393.0 ms |
+| 2 | 570, 493.5 ms | 440, 372.3 ms |
+| 3 | 560, 494.1 ms | 460, 389.2 ms |
+
+Pair 1 was the first launch of each new copy of the binary, which likely paid for page cache
+misses (a guess). Pairs 2 and 3 show a saving of about 100 to 120 ms.
+
+#### The change
+
+`gpu_nvidia.rs` gets `API_VERSIONS_DELAY` (3 s). The worker runs `--api-versions` at the top
+of its loop, after the sample of the first tick that is at least 3 s after `GpuInfo`, and only
+then sets the once-per-process flag, so a generation that ends sooner leaves the run to the
+next one. It still runs when nothing demands GPU samples. Until the versions arrive, the two
+rows show the warming-up state, as they did for the first half second before. Tests:
+`worker_api_versions_once`, `worker_api_versions_error_is_quiet`,
+`worker_api_versions_run_without_demand` and
+`worker_api_versions_left_to_next_generation_when_cut_short` (unit tests in tl-engine), and the
+matching tests in `tests/probe_integration.rs`. In a 6 s run of the after binary with a logging
+probe wrapper, the engine started the NVML probe at +0.07 s and `--api-versions` at +3.16 s.
+
+#### Gate runs
+
+Interleaved, one round after the other, at 01:29.
+
+| Run | Load at start (1, 5, 15 min) | `first_frame_ms` | `window_open` ms |
+|---|---|---|---|
+| before 1 | 6.33, 6.26, 10.36 | 570 | 494.6 |
+| after 1 | 6.33, 6.26, 10.36 | 470 | 400.1 |
+| before 2 | 6.14, 6.22, 10.33 | 540 | 473.4 |
+| after 2 | 5.81, 6.15, 10.28 | 460 | 382.1 |
+| before 3 | 5.81, 6.15, 10.28 | 560 | 489.1 |
+| after 3 | 5.59, 6.10, 10.24 | 480 | 416.0 |
+| Median before | | 560 | 489.1 |
+| Median after | | 470 | 400.1 |
+
+`window_open` parts, median of the 3 gate runs each:
+
+| Part | Before ms | After ms |
+|---|---|---|
+| Window, instance, surface, listing adapters | 221 | 191 |
+| Testing the RTX 5070 Ti | 200 | 131 |
+| Renderer set-up | 68 | 66 |
+
+| Gate | Original limit | Relaxed limit | Median after | Original | Relaxed |
+|---|---|---|---|---|---|
+| First frame, warm cache | 200 ms | 830 ms | 470 ms | FAIL | PASS |
+| First frame, cold cache | 500 ms | 1600 ms | not measured (1240 ms, wlf.19) | pending | pending |
+
+`first_frame_ms` comes from `/proc/uptime` and has 10 ms resolution. The wlf.19 value of
+660 ms came from the release package and a different load, so compare this run's before and
+after, not wlf.19.
+
+#### Profile after the change
+
+One run of the after binary under the same perf settings (`window_open` 428.7 ms under perf,
+against 533.1 ms before). No `--api-versions` child runs before the first frame. The main
+thread is on CPU for nearly all of `window_open` (about 97 of 100 possible samples per 50 ms,
+against about 75 before), so less of it is waiting in the driver.
+
+Reading, for the next beads:
+- The rest of `window_open` is gpui and the NVIDIA driver: about 190 ms for the instance and
+  the adapter list, about 130 ms for the device test, about 66 ms for the renderer.
+- gpui always creates the GL backend too. EGL took about 65 to 90 ms of the main thread in
+  both profiles, only to list an adapter that is never chosen while Vulkan works. A gpui-pre-wgpu
+  patch (Vulkan-only instance, GL only when no Vulkan adapter passes) is the next lever. It
+  needs its own bead (D-043).
+- `engine_start` takes 21 ms, against 0.7 ms in cr0.23. I did not look into why.
+- A `journalctl` child starts about 500 ms after exec and uses a full core for 0.7 s or more
+  (1443 samples). Warm, it starts after the first frame. On a cold start it may overlap the
+  window; I did not measure that.
+
 ### Start-up timing (tasklens-cr0.23, 2026-10-07)
 
 Result: the warm median `first_frame_ms` is 365 ms after this bead, against 385 ms before it.
