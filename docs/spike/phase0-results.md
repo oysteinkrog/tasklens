@@ -2141,6 +2141,97 @@ Counted attempt 2: median bridge p99 is 27.16 ms (hidden nested KWin, 60 Hz). Re
 
 wlf.18 had median p99 30.20 ms and p50 13.46, 5.94 and 13.71 ms. Median p99 is now 3.04 ms lower, and p50 is now 8.40, 9.77 and 10.27 ms. Frame CPU p50 is still 11.9 to 14.9 ms, so frames still take most of a 16.7 ms interval and the bridge latency still includes waiting for the next frame callback.
 
+### Bridge wake-to-render profile and gate (tasklens-nqg75, 2026-11-12)
+
+Result: the `bridge` scene had a median wake-to-render p99 of 19.27 ms (hidden nested KWin,
+60 Hz). That is PASS against the original limit of 20 ms and PASS against the relaxed limit of
+44 ms. This bead made no code change. The top cost is the wait for GPUI's next 60 Hz frame
+tick, and a fix for it needs a GPUI frame-scheduling decision outside this bead (see "The
+change" below). The value fell from 27.16 ms in wlf.42 because frames now take about half of the
+frame interval and none are missed.
+
+Setup: hidden nested KWin, 1920 x 1200, 60 Hz, session `nqg`, the app on the nested Xwayland
+(X11), as in the q8zcy and mkadz runs. wlf.42 ran the app on the nested Wayland socket at scale
+1.1, so the two sessions differ. Command: `tasklens --bench bridge --duration 30 --warmup 5`
+with `TL_BENCH_NESTED=1`, `TL_BENCH_REFRESH_HZ=60` and `TL_PIXEL_PACING=off`, bench slot lock,
+quiet rule (1- and 5-minute load at most 8 at the start of each run, 1-minute load at most 8 at
+its end). The binary is the mkadz "after" binary, `cargo build --locked --profile perf -p tl-app
+--features bench` at `a2fc310b8`, built at 02:12 in the main checkout; `66fd80b58` (HEAD) adds
+only docs. All reports have `refresh_hz` 60, `pacing` off, `window_active` true and 0 stalls.
+Reports, traces and scripts: `/var/tmp/claude/nqg75/`.
+
+#### Profile
+
+Two runs, neither counted in the gate.
+
+CPU profile, one run at 02:30:36 (load 6.25, 5.16, 5.29), `sudo perf record -e cpu-clock -F 999
+--call-graph dwarf,16384` for 15 s after warmup: 7,302 samples, 95.5% on the UI main thread and
+about 4% on engine threads. With perf attached the run had bridge p50 10.04 ms and p99 19.07
+ms, frame CPU p50 7.56 ms. Self time grouped by symbol name (`group.py`, as in q8zcy): libc copy
+loop 24.9%, GPUI element tree and styles 13.8%, chart band split and vertex move 10.2%, taffy
+10.1%, `BoundsTree::insert` 6.4%, other chart code 5.6%, wgpu renderer 5.2%, scene and paint
+4.1%, NVIDIA 3.1%, text 2.3%, our UI code 1.9%. This is the `perf-cpu` page profile of i5sgo
+and 1ibm6; the bridge feed itself costs little.
+
+Latency chain, one run at 02:32:46 (load 3.70, 4.55, 5.05), bpftrace uprobes for 12 s
+(`chain.bt`, `chain.py`) on the bench `Publisher::copy_bridge` and `Shared::publish`,
+`SnapshotHub::install`, `Window::draw` entry and exit, the X11 `PlatformWindow::draw` (present)
+and the first `ChartElement` paint in each draw. The run's report had bridge p50 11.34 ms and
+p99 19.15 ms. Per publish (236 publishes, 712 draws):
+
+| Step | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| Bench publish to `SnapshotHub::install` | 0.50 ms | 6.79 ms | 8.74 ms | 9.30 ms |
+| `SnapshotHub::install` to the next `Window::draw` start | 7.73 ms | 9.06 ms | 9.50 ms | 9.76 ms |
+| Publish to the next `Window::draw` start (the frame tick wait) | 9.06 ms | 15.24 ms | 16.59 ms | 16.76 ms |
+| `Window::draw` start to the first chart paint | 2.45 ms | 2.85 ms | 3.38 ms | 3.78 ms |
+| Publish to the first chart paint | 11.40 ms | 17.85 ms | 19.04 ms | 19.46 ms |
+
+Per frame: draws start every 16.70 ms (p99 16.73 ms). `Window::draw` takes 5.35 ms at p50 and
+the X11 present 2.55 ms, so the main thread is idle for about 8.8 ms of each interval. No install
+ran inside a `Window::draw`, so no sample waited an extra frame. The install waits up to 9.3 ms
+only when the publish lands while the main thread is drawing, and the next tick is later than
+that anyway. The first chart paint is any chart, not only the one that shows the bridge series.
+It is a close stand-in: publish to the first chart paint had p99 19.04 ms against 19.15 ms in
+the report of the same run.
+
+Top cost named: the wait for the next frame tick. It is spread evenly from 0 to 16.7 ms (mean
+8.78 ms), so it is about 80% of p50 and 87% of p99. GPUI's X11 backend draws only on a timer
+that fires once per refresh interval (`start_refresh_loop` in `gpui-pre-linux` 0.3.7
+`src/linux/x11/client.rs`). A sample that arrives just after a tick waits a whole interval.
+The second cost is 2.45 ms from the start of a draw to the first chart paint: the rebuild,
+layout and prepaint of the page, the per-frame rebuild named in i5sgo. With these two costs the
+p99 floor at 60 Hz is about 16.6 + 2.4 = 19 ms, which is where the gate is now.
+
+#### The change
+
+None. The tick wait could be cut by drawing at once when an idle window gets new data,
+instead of on the next tick. That changes frame scheduling for every window, and
+`gpui-pre-linux` is not vendored in `third_party`, so it needs a new `[patch.crates-io]` entry
+as well. Both are decisions for the leader or the owner (D-043 covers patches to the vendored
+crates). The page rebuild cost is the open i5sgo item.
+
+#### Gate runs
+
+| Run | Start | Load at start (1, 5, 15 min) | Load at end (1 min) | Frames | Frame CPU p50 | p99 | Missed, long missed | Process CPU | Bridge p50 | Bridge p99 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 02:34:52 | 5.17, 4.74, 5.04 | 5.30 | 1796 | 7.63 ms | 10.09 ms | 0, 0 | 48.85% | 9.91 ms | 19.27 ms |
+| 2 | 02:35:28 | 5.30, 4.84, 5.07 | 5.34 | 1796 | 7.56 ms | 10.53 ms | 0, 0 | 48.62% | 10.70 ms | 19.66 ms |
+| 3 | 02:36:04 | 5.34, 4.90, 5.08 | 5.00 | 1796 | 7.36 ms | 9.35 ms | 0, 0 | 47.16% | 10.06 ms | 19.14 ms |
+| Median | | | | 1796 | 7.56 ms | 10.09 ms | 0, 0 | 48.62% | 10.06 ms | 19.27 ms |
+
+| Gate (hidden nested KWin, 60 Hz) | Original limit | Relaxed limit | Median | Original | Relaxed |
+|---|---|---|---|---|---|
+| Bridge: wake-to-render latency p99 | 20 ms | 44 ms | 19.27 ms (19.27, 19.66, 19.14) | PASS | PASS |
+| Bridge: 10 Hz samples arrive | every run | none | 3 of 3 | PASS | PASS |
+
+Comparison: wlf.42 had a median p99 of 27.16 ms, the Decision table lists 35 ms (the upper end of
+25 to 35 ms). In wlf.42 frame CPU p50 was 11.9 to 14.9 ms and each run missed 299 to 577
+frames. A missed frame adds a whole interval to the wait. Now frame CPU p50 is 7.4 to 7.6 ms and
+no run missed a frame. I did not separate how much of the drop comes from the frame cost beads
+since wlf.42 and how much from the X11 session. The margin to the 20 ms limit is 0.73 ms, and the
+three runs spread over 0.52 ms.
+
 ## First frame, minimized CPU and RSS
 
 ### Gate runs (tasklens-wlf.19, 2026-11-04)
