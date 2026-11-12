@@ -2739,7 +2739,69 @@ Pending tasklens-wlf.24.
 
 ## GPU power baseline
 
-Pending tasklens-wlf.25.
+Report only, no gate (ADR-014, open question 7). Measured 2026-11-12 by tasklens-wlf.25. The
+baseline with no bench or test tasklens running is 13.57 W and 1.6 % GPU utilization. The
+scenes draw 14.6 to 22.7 W and 2.0 to 8.7 %. Every scene value comes from a hidden nested KWin
+session at 60 Hz, so it is close to, but not equal to, the same scene on the 144 Hz screen.
+
+### Setup
+
+- Office PC (`oystein-office-primary`), AMD Ryzen 9 5950X, NVIDIA GeForce RTX 5070 Ti, driver
+  615.78.08, kernel 7.3.0-4-cachyos.
+- HEAD `575d11bbb`. Binaries from
+  `cargo build --locked --profile perf -p tl-app -p tl-gpu-probe --features tl-app/bench`,
+  copied to `/var/tmp/claude/wlf25/` (`tasklens-bin`, `tl-gpu-probe`).
+  `TASKLENS_GPU_PROBE` points at that perf probe for the baseline and for every scene.
+- The bench and the baseline test sample the probe once per second. Power is the sum over the
+  GPUs, utilization is the highest GPU, and each value is the mean over the window.
+  `probe_cpu_pct` is the probe child's utime plus stime over the window.
+- Left running, as the leader rule of 2026-11-12 allows: the owner's installed tasklens GUI
+  (`/usr/bin/tasklens`, pid 86535), its `tasklens bridge` (pid 1884532, also
+  `/usr/bin/tasklens`) and `tasklens-engine.service` (pid 4141962). The baseline and all
+  scene values include whatever these draw.
+- Quiet rule: 1- and 5-minute load at most 8 at the start of each run, 1-minute load at most 8
+  at the end. Every run passed on its first try. Each run holds the bench slot lock.
+- Logs, reports and scripts: `/var/tmp/claude/wlf25/`.
+
+### Baseline
+
+Command: `real_gpu_baseline --ignored --nocapture --exact real_gpu_baseline` (the test binary
+built by `cargo test --locked -p tl-app --test real_gpu_baseline --no-run`), with
+`TASKLENS_GPU_PROBE` set to the perf probe. Started 03:13:28 at load 7.39, 7.84, 6.96, ended
+03:13:58 at load 5.70, 7.38, 6.83. It opens no window, so the nested-KWin caveat does not
+apply to it.
+
+| Samples | Window | GPU power | GPU utilization | Probe CPU |
+|---|---|---|---|---|
+| 30 at 1 Hz | 30.0 s | 13.57 W | 1.6 % | 1.50 % |
+
+### Scenes
+
+Command per run: `tasklens --bench <scene> --duration 30 --warmup 5 --json <file>` in the
+hidden nested KWin session `harness.sh start wlf25` (1920 x 1200), with `TL_BENCH_NESTED=1`
+and `TL_BENCH_REFRESH_HZ=60`. One run per scene. Every report has `refresh_hz` 60 and
+`window_active` true. `soak` (600 s) was not run. Each GPU number is from the nested KWin
+session, so it is close to, but not equal to, the 144 Hz screen. The last column is the scene
+power minus the 13.57 W baseline.
+
+| Scene | Start | Load at start (1, 5, 15 min) | GPU power | GPU utilization | Probe CPU | Process CPU | Power over baseline |
+|---|---|---|---|---|---|---|---|
+| perf-cpu | 03:13:59 | 5.70, 7.38, 6.83 | 22.6 W (nested KWin) | 8.7 % (nested KWin) | 3.77 % | 48.04 % | 9.0 W |
+| perf-overview | 03:14:37 | 4.92, 6.97, 6.71 | 20.6 W (nested KWin) | 6.8 % (nested KWin) | 2.20 % | 24.82 % | 7.0 W |
+| perf-overview-static | 03:15:14 | 3.79, 6.48, 6.56 | 14.6 W (nested KWin) | 2.0 % (nested KWin) | 2.00 % | 5.85 % | 1.0 W |
+| perf-overview-procs | 03:15:50 | 2.85, 5.95, 6.38 | 19.9 W (nested KWin) | 5.6 % (nested KWin) | 1.77 % | 24.93 % | 6.4 W |
+| table-2000 | 03:16:26 | 2.61, 5.51, 6.21 | 18.5 W (nested KWin) | 5.1 % (nested KWin) | 2.80 % | 15.75 % | 5.0 W |
+| bridge | 03:17:02 | 2.64, 5.18, 6.07 | 22.7 W (nested KWin) | 8.6 % (nested KWin) | 2.63 % | 48.85 % | 9.2 W |
+| static | 03:17:38 | 2.84, 4.94, 5.96 | 15.2 W (nested KWin) | 2.4 % (nested KWin) | 1.70 % | 8.91 % | 1.6 W |
+| history-scrub | 03:18:14 | 2.82, 4.69, 5.84 | 22.1 W (nested KWin) | 4.5 % (nested KWin) | 1.60 % | 16.99 % | 8.5 W |
+
+### Notes
+
+- The power over baseline includes the nested KWin session and its Xwayland, not only
+  tasklens. This run does not split the two.
+- `probe_cpu_pct` counts only the bench's own probe. In `bridge` the real engine may start a
+  second probe, which this column does not count (tasklens-wlf.26 owns the engine-wide cost).
+- No gate is set. Open question 7 stays open until the owner picks one from these numbers.
 
 ## Collection cost
 
