@@ -144,6 +144,11 @@ impl ProbeClient {
         })
     }
 
+    /// The probe child's pid, for reading its `/proc/<pid>/stat` (E01-023 bench meter).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Sends `Hello { proto: GPU_PROTO_VERSION }` and reads the reply.
     pub fn hello(&mut self) -> Result<HelloOutcome, ProbeError> {
         self.hello_or_cancel(&never)

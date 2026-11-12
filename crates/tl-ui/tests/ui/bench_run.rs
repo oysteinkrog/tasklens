@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gpui_kit::{TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
-use tl_ui::bench::stats::{BenchReport, FrameBudget};
+use tl_ui::bench::stats::{BenchReport, FrameBudget, no_side_start, no_side_stop};
 use tl_ui::bench::{BenchClocks, BenchError, BenchOptions, BenchScene, run};
 
 static FAKE_CPU: AtomicU64 = AtomicU64::new(0);
@@ -23,6 +23,8 @@ fn clocks() -> BenchClocks {
     BenchClocks {
         thread_cpu_ns: fake_cpu,
         process_cpu_ns: fake_cpu,
+        side_start: no_side_start,
+        side_stop: no_side_stop,
     }
 }
 

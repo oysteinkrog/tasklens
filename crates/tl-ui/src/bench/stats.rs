@@ -24,6 +24,27 @@ pub struct BenchClocks {
     pub thread_cpu_ns: fn() -> u64,
     /// `ClockId::ProcessCPUTime` (utime + stime of the process).
     pub process_cpu_ns: fn() -> u64,
+    /// Called at the start of the measured window: starts the 1 Hz GPU sampler (E01-023).
+    pub side_start: fn(),
+    /// Called at the end of the measured window: stops the sampler and returns its means.
+    pub side_stop: fn() -> SideMeasure,
+}
+
+/// What tl-app measures beside the scene over the measured window (E01-023, ADR-014): the GPU
+/// probe's NVML means and the probe child's CPU. Both are `None` without a probe or after a probe
+/// error.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SideMeasure {
+    pub gpu: Option<GpuReport>,
+    pub probe_cpu_pct: Option<f64>,
+}
+
+/// A [`BenchClocks::side_start`] that does nothing, for runs without a probe.
+pub fn no_side_start() {}
+
+/// A [`BenchClocks::side_stop`] that measures nothing.
+pub fn no_side_stop() -> SideMeasure {
+    SideMeasure::default()
 }
 
 /// Environment variable that sets the output refresh rate the bench is judged against.
@@ -257,9 +278,13 @@ pub struct LatencyPct {
     pub p99: f64,
 }
 
+/// GPU means over the measured window, sampled through the probe at 1 Hz (E01-023). Report only,
+/// no gate (ADR-014).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct GpuReport {
+    /// Mean NVML board power, summed over the GPUs, in W.
     pub power_w: f64,
+    /// Mean NVML GPU utilization, the highest GPU per sample, in percent.
     pub util_pct: f64,
 }
 
@@ -297,7 +322,7 @@ pub struct BenchReport {
     /// The bench window was active at the start and the end of the measured window.
     pub window_active: bool,
     pub bridge_latency_ms: Option<LatencyPct>,
-    /// `None` in phase 0; E01-023 fills it (R-160 OI-14).
+    /// The probe's GPU means (E01-023); `None` without a probe or after a probe error.
     pub gpu: Option<GpuReport>,
 }
 
@@ -377,6 +402,8 @@ mod tests {
         BenchClocks {
             thread_cpu_ns: fake_cpu,
             process_cpu_ns: fake_cpu,
+            side_start: no_side_start,
+            side_stop: no_side_stop,
         }
     }
 
@@ -510,6 +537,25 @@ mod tests {
     fn memory_from_missing_lines() {
         let m = memory_from("", "");
         assert_eq!((m.rss, m.pss, m.uss, m.app), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn gpu_field_serializes() {
+        let mut with = report();
+        with.gpu = Some(GpuReport {
+            power_w: 31.5,
+            util_pct: 12.0,
+        });
+        with.probe_cpu_pct = Some(0.4);
+        let text = serde_json::to_string_pretty(&with).unwrap();
+        assert!(text.contains("\"power_w\": 31.5"), "{text}");
+        assert!(text.contains("\"util_pct\": 12.0"), "{text}");
+        assert!(text.contains("\"probe_cpu_pct\": 0.4"), "{text}");
+
+        let text = serde_json::to_string_pretty(&report()).unwrap();
+        assert!(text.contains("\"gpu\": null"), "{text}");
+        assert!(text.contains("\"probe_cpu_pct\": null"), "{text}");
+        assert_eq!(no_side_stop(), SideMeasure::default());
     }
 
     #[test]

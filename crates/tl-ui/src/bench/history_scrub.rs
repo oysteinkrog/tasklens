@@ -936,6 +936,7 @@ async fn measure(
     let active_at = is_active(cx);
     let cpu_at = (clocks.process_cpu_ns)();
     let wall_at = Instant::now();
+    (clocks.side_start)();
 
     executor
         .timer(Duration::from_secs(u64::from(opts.duration_s)))
@@ -943,6 +944,7 @@ async fn measure(
 
     let cpu_ns = (clocks.process_cpu_ns)().saturating_sub(cpu_at);
     let wall_ns = u64::try_from(wall_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let side = (clocks.side_stop)();
     probe.borrow_mut().stop();
     driver.borrow_mut().stop();
     let at_end = stalls(cx);
@@ -976,7 +978,7 @@ async fn measure(
         missed_frames: missed,
         long_missed_frames: long_missed,
         process_cpu_pct: process_cpu_pct(cpu_ns, wall_ns),
-        probe_cpu_pct: None,
+        probe_cpu_pct: side.probe_cpu_pct,
         rss_mb: mem.rss,
         pss_mb: mem.pss,
         uss_mb: mem.uss,
@@ -985,7 +987,7 @@ async fn measure(
         warmup_stalls: u32::try_from(at_measure.saturating_sub(at_start)).unwrap_or(u32::MAX),
         window_active,
         bridge_latency_ms: None,
-        gpu: None,
+        gpu: side.gpu,
     };
     Ok((report, scrub_ns))
 }
