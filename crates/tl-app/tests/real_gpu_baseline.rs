@@ -85,7 +85,7 @@ fn real_gpu_baseline() {
     assert_eq!(power_n, SAMPLES, "every sample has a power reading");
     assert_eq!(util_n, SAMPLES, "every sample has a utilization reading");
     let probe_cpu = 100.0 * dticks as f64 / rustix::param::clock_ticks_per_second() as f64 / wall;
-    println!(
+    eprintln!(
         "GPU baseline over {SAMPLES} samples at 1 Hz ({wall:.1} s): power {:.2} W, utilization {:.1} %, probe CPU {probe_cpu:.3} %",
         power_sum / f64::from(power_n),
         util_sum / f64::from(util_n),
