@@ -13,8 +13,10 @@
 //! parks and never retries. Deadlines, crashes, `NoPermission` and `Other` are `Err`.
 //!
 //! Once per process, the first generation that reaches `GpuInfo` runs `tl-gpu-probe
-//! --api-versions` (E13-010) and sends `GpuApiVersions` before the first sample. A failure is
-//! logged at info and not retried; the UI shows `Unknown`.
+//! --api-versions` (E13-010) and sends `GpuApiVersions`. It runs after the sample of the first
+//! tick that is at least [`API_VERSIONS_DELAY`] after `GpuInfo`, so it does not start the NVIDIA
+//! driver while the window opens (tasklens-fwj1i). A failure is logged at info and not retried;
+//! the UI shows `Unknown`.
 //!
 //! Every probe call runs as a blocking job that checks for cancel at least every 20 ms. A
 //! cancelled worker kills the probe at once instead of asking it to exit, so engine shutdown
@@ -64,6 +66,14 @@ pub const PERIOD: Duration = Duration::from_secs(1);
 
 /// A parked worker wakes this often to check for cancellation. It does nothing else.
 pub const PARK_RECHECK: Duration = Duration::from_secs(60);
+
+/// How long after `GpuInfo` the worker waits before it runs `--api-versions`. The window opens
+/// in the same second, and gpui starts the NVIDIA driver too (Vulkan, EGL). With both at once
+/// the window took about 110 ms longer to open (tasklens-fwj1i, RTX 5070 Ti). The first frame
+/// came 0.4 to 0.6 s after start when warm and 1.24 s when cold, so 3 s leaves a margin. The
+/// job runs between two ticks; one that takes long delays the next sample, and missed ticks
+/// are skipped.
+pub const API_VERSIONS_DELAY: Duration = Duration::from_secs(3);
 
 /// E03 has no "not yet assigned" device index. The reducer overwrites `GpuTotals.device` from
 /// the identity (R-155 item 8).
@@ -260,29 +270,9 @@ pub async fn run_with<L: ProbeLink>(
         }
     }
 
-    if !api_once.swap(true, Ordering::SeqCst) {
-        // On cancel the closure stops the child and returns; the link is then dropped, which
-        // kills the probe.
-        let (back, result) = match blocking(&cx, "gpu_nvidia.api_versions", move |cancel| {
-            let result = link.api_versions(&probe, cancel);
-            (link, result)
-        })
-        .await
-        {
-            Ok(done) => done,
-            Err(stop) => return stop,
-        };
-        link = back;
-        match result {
-            Ok(versions) => {
-                if let Some(stop) = send(&cx, &io, SourceUpdate::GpuApiVersions(versions)).await {
-                    stop_link(link, cx.is_cancel_requested());
-                    return stop;
-                }
-            }
-            Err(e) => tracing::info!(target: "tasklens::probe", %e, "api versions unavailable"),
-        }
-    }
+    // The flag is set only when the run starts, so a generation that ends before the delay
+    // leaves it to the next one.
+    let mut api_at = (!api_once.load(Ordering::SeqCst)).then(|| cx.now() + API_VERSIONS_DELAY);
 
     let mut history_rows = HistoryRows::default();
     let mut iv = interval(cx.now(), PERIOD);
@@ -296,6 +286,38 @@ pub async fn run_with<L: ProbeLink>(
     }
 
     loop {
+        // After the previous tick's sample, before the wait for the next one.
+        if api_at.is_some_and(|at| cx.now() >= at) {
+            api_at = None;
+            if !api_once.swap(true, Ordering::SeqCst) {
+                // On cancel the closure stops the child and returns; the link is then dropped,
+                // which kills the probe.
+                let api_probe = probe.clone();
+                let (back, result) = match blocking(&cx, "gpu_nvidia.api_versions", move |cancel| {
+                    let result = link.api_versions(&api_probe, cancel);
+                    (link, result)
+                })
+                .await
+                {
+                    Ok(done) => done,
+                    Err(stop) => return stop,
+                };
+                link = back;
+                match result {
+                    Ok(versions) => {
+                        let update = SourceUpdate::GpuApiVersions(versions);
+                        if let Some(stop) = send(&cx, &io, update).await {
+                            stop_link(link, cx.is_cancel_requested());
+                            return stop;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::info!(target: "tasklens::probe", %e, "api versions unavailable");
+                    }
+                }
+            }
+        }
+
         sleep_until(iv.deadline()).await;
         if cx.checkpoint().is_err() {
             link.kill();
@@ -1823,23 +1845,35 @@ mod tests {
             once,
             WorkerControl::default(),
         );
-        let got = rig.drain();
-        let api: Vec<usize> = got
-            .iter()
-            .enumerate()
-            .filter(|(_, u)| matches!(u, SourceUpdate::GpuApiVersions(v) if *v == api_fixture()))
-            .map(|(i, _)| i)
-            .collect();
-        let first_gpu = got
-            .iter()
-            .position(|u| matches!(u, SourceUpdate::Gpu(_)))
-            .expect("a first sample");
-        assert_eq!(api.len(), 1, "{got:?}");
-        assert!(api[0] < first_gpu, "{got:?}");
+        // tasklens-fwj1i: not while the window opens. Samples come first, from the first tick.
+        let mut got = rig.drain();
+        assert!(matches!(&got[0], SourceUpdate::GpuInfo(_)), "{got:?}");
+        for _ in 1..API_VERSIONS_DELAY.as_secs() {
+            rig.advance(PERIOD);
+            got.extend(rig.drain());
+        }
         assert!(
-            matches!(&got[0], SourceUpdate::GpuInfo(_)),
-            "after GpuInfo: {got:?}"
+            !got.iter()
+                .any(|u| matches!(u, SourceUpdate::GpuApiVersions(_))),
+            "{got:?}"
         );
+        assert_eq!(rig.calls.api_versions.load(Ordering::SeqCst), 0);
+        assert_eq!(gpu_samples(&got).len(), 3, "{got:?}");
+
+        // The tick at the delay sends its sample, then the versions.
+        rig.advance(PERIOD);
+        let got = rig.drain();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(matches!(&got[0], SourceUpdate::Gpu(_)), "{got:?}");
+        assert!(
+            matches!(&got[1], SourceUpdate::GpuApiVersions(v) if *v == api_fixture()),
+            "{got:?}"
+        );
+        assert_eq!(rig.calls.api_versions.load(Ordering::SeqCst), 1);
+        for _ in 0..5 {
+            rig.advance(PERIOD);
+        }
+        assert_eq!(gpu_samples(&rig.drain()).len(), 5);
         assert_eq!(rig.calls.api_versions.load(Ordering::SeqCst), 1);
 
         // A second generation in the same process does not run it again.
@@ -1853,22 +1887,90 @@ mod tests {
             once,
             WorkerControl::default(),
         );
-        again.advance(PERIOD);
+        for _ in 0..API_VERSIONS_DELAY.as_secs() + 1 {
+            again.advance(PERIOD);
+        }
         let got = again.drain();
         assert!(
             !got.iter()
                 .any(|u| matches!(u, SourceUpdate::GpuApiVersions(_))),
             "{got:?}"
         );
-        assert_eq!(gpu_samples(&got).len(), 2, "{got:?}");
+        assert_eq!(gpu_samples(&got).len(), 5, "{got:?}");
         assert_eq!(again.calls.api_versions.load(Ordering::SeqCst), 0);
+    }
+
+    /// tasklens-fwj1i: a generation that ends before the delay does not use up the run.
+    #[test]
+    fn worker_api_versions_left_to_next_generation_when_cut_short() {
+        let once = fresh_once();
+        let rig = Rig::start_with(
+            true,
+            Hello::Ready,
+            Rows::Supported,
+            true,
+            visible_gpus(),
+            Some(api_fixture()),
+            once,
+            WorkerControl::default(),
+        );
+        assert!(rig.ended(), "the first sample failed");
+        assert_eq!(rig.calls.api_versions.load(Ordering::SeqCst), 0);
+        assert!(!once.load(Ordering::SeqCst));
+
+        let mut next = Rig::start_with(
+            true,
+            Hello::Ready,
+            Rows::Supported,
+            false,
+            visible_gpus(),
+            Some(api_fixture()),
+            once,
+            WorkerControl::default(),
+        );
+        for _ in 0..API_VERSIONS_DELAY.as_secs() {
+            next.advance(PERIOD);
+        }
+        let got = next.drain();
+        assert_eq!(next.calls.api_versions.load(Ordering::SeqCst), 1);
+        assert!(
+            got.iter()
+                .any(|u| matches!(u, SourceUpdate::GpuApiVersions(v) if *v == api_fixture())),
+            "{got:?}"
+        );
+    }
+
+    /// tasklens-fwj1i: the versions come even while nothing asks for GPU samples.
+    #[test]
+    fn worker_api_versions_run_without_demand() {
+        let mut rig = Rig::start_with(
+            true,
+            Hello::Ready,
+            Rows::Supported,
+            false,
+            Demand::default(),
+            Some(api_fixture()),
+            fresh_once(),
+            WorkerControl::default(),
+        );
+        assert_eq!(rig.drain().len(), 2, "GpuInfo and Running");
+        for _ in 0..API_VERSIONS_DELAY.as_secs() {
+            rig.advance(PERIOD);
+        }
+        let got = rig.drain();
+        assert_eq!(rig.calls.api_versions.load(Ordering::SeqCst), 1);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            matches!(&got[0], SourceUpdate::GpuApiVersions(v) if *v == api_fixture()),
+            "{got:?}"
+        );
+        assert!(rig.calls.samples().is_empty());
     }
 
     #[test]
     fn worker_api_versions_error_is_quiet() {
         let mut rig = Rig::start(true, Hello::Ready, Rows::Supported, false, visible_gpus());
         let got = rig.drain();
-        assert_eq!(rig.calls.api_versions.load(Ordering::SeqCst), 1);
         assert_eq!(
             got.len(),
             3,
@@ -1877,8 +1979,11 @@ mod tests {
         assert!(matches!(&got[0], SourceUpdate::GpuInfo(_)), "{got:?}");
         assert!(is_health(&got[1], SourceState::Running, None), "{got:?}");
         assert!(matches!(&got[2], SourceUpdate::Gpu(_)), "{got:?}");
-        rig.advance(PERIOD);
-        assert_eq!(gpu_samples(&rig.drain()).len(), 1);
+        for _ in 0..API_VERSIONS_DELAY.as_secs() {
+            rig.advance(PERIOD);
+        }
+        assert_eq!(rig.calls.api_versions.load(Ordering::SeqCst), 1);
+        assert_eq!(gpu_samples(&rig.drain()).len(), 3);
         assert!(!rig.ended());
     }
 }

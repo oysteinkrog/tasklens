@@ -45,7 +45,9 @@ use tl_engine::source::{WorkerControl, WorkerIo};
 use tl_engine::supervise::WorkerFactory;
 use tl_engine::update::{EngineMsg, GpuSample, SourceUpdate, WorkerError};
 use tl_engine::workers::WorkerSpec;
-use tl_engine::workers::gpu_nvidia::{self, PARK_RECHECK, PERIOD, ProbeLink, run_with};
+use tl_engine::workers::gpu_nvidia::{
+    self, API_VERSIONS_DELAY, PARK_RECHECK, PERIOD, ProbeLink, run_with,
+};
 use tl_model::demand::Demand;
 use tl_model::devices::DeviceIdentity;
 use tl_model::gpu_proto::{
@@ -1052,12 +1054,12 @@ fn worker_sample_error_restarts() {
         matches!(&out, Outcome::Err(WorkerError::Probe(text)) if text.contains("deadline")),
         "{out:?}"
     );
-    // The client already gave the child up, so no `shutdown`.
+    // The client already gave the child up, so no `shutdown`. `--api-versions` waits for
+    // `API_VERSIONS_DELAY`, so it never ran (tasklens-fwj1i).
     assert_eq!(
         link.calls(),
         vec![
             LinkCall::Start(1),
-            LinkCall::ApiVersions(1),
             LinkCall::Sample {
                 conn: 1,
                 processes: false
@@ -1112,33 +1114,42 @@ fn worker_cancel_shuts_down_once() {
 fn worker_api_versions_once() {
     let once = fresh_once();
     let link = FakeLink::new([LinkStep::Api(Ok(api_fixture()))]);
-    let (_lab, mut rx, _demand, _handle) =
+    let (mut lab, mut rx, _demand, _handle) =
         lab_worker_with(Arc::clone(&link), visible_gpus(), true, once);
-    let got = drain(&mut rx);
-    let api = got
-        .iter()
-        .position(|u| matches!(u, SourceUpdate::GpuApiVersions(v) if *v == api_fixture()))
-        .expect("GpuApiVersions sent");
-    let first_gpu = got
-        .iter()
-        .position(|u| matches!(u, SourceUpdate::Gpu(_)))
-        .expect("a first sample");
+    // tasklens-fwj1i: not while the window opens. The first samples come before it.
+    let mut got = drain(&mut rx);
+    for _ in 1..API_VERSIONS_DELAY.as_secs() {
+        advance(&mut lab, PERIOD);
+        got.extend(drain(&mut rx));
+    }
     assert!(matches!(&got[0], SourceUpdate::GpuInfo(_)), "{got:?}");
-    assert!(api < first_gpu, "{got:?}");
+    assert_eq!(gpu_samples(&got).len(), 3, "{got:?}");
+    assert_eq!(link.count(|c| matches!(c, LinkCall::ApiVersions(_))), 0);
+    // The tick at the delay sends its sample, then the versions.
+    advance(&mut lab, PERIOD);
+    let got = drain(&mut rx);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(matches!(&got[0], SourceUpdate::Gpu(_)), "{got:?}");
+    assert!(
+        matches!(&got[1], SourceUpdate::GpuApiVersions(v) if *v == api_fixture()),
+        "{got:?}"
+    );
     assert_eq!(link.count(|c| matches!(c, LinkCall::ApiVersions(_))), 1);
 
     // A later generation in the same process does not run it again.
     let again = FakeLink::new([LinkStep::Api(Ok(api_fixture()))]);
     let (mut lab, mut rx, _demand, _handle) =
         lab_worker_with(Arc::clone(&again), visible_gpus(), true, once);
-    advance(&mut lab, PERIOD);
+    for _ in 0..API_VERSIONS_DELAY.as_secs() + 1 {
+        advance(&mut lab, PERIOD);
+    }
     let got = drain(&mut rx);
     assert!(
         !got.iter()
             .any(|u| matches!(u, SourceUpdate::GpuApiVersions(_))),
         "{got:?}"
     );
-    assert_eq!(gpu_samples(&got).len(), 2, "{got:?}");
+    assert_eq!(gpu_samples(&got).len(), 5, "{got:?}");
     assert_eq!(again.count(|c| matches!(c, LinkCall::ApiVersions(_))), 0);
 }
 
@@ -1149,7 +1160,6 @@ fn worker_api_versions_error_is_quiet() {
     )))]);
     let (mut lab, mut rx, _demand, mut handle) = lab_worker(Arc::clone(&link), visible_gpus());
     let got = drain(&mut rx);
-    assert_eq!(link.count(|c| matches!(c, LinkCall::ApiVersions(_))), 1);
     assert_eq!(
         got.len(),
         3,
@@ -1158,8 +1168,11 @@ fn worker_api_versions_error_is_quiet() {
     assert!(matches!(&got[0], SourceUpdate::GpuInfo(_)), "{got:?}");
     assert!(is_health(&got[1], SourceState::Running, None), "{got:?}");
     assert!(matches!(&got[2], SourceUpdate::Gpu(_)), "{got:?}");
-    advance(&mut lab, PERIOD);
-    assert_eq!(gpu_samples(&drain(&mut rx)).len(), 1);
+    for _ in 0..API_VERSIONS_DELAY.as_secs() {
+        advance(&mut lab, PERIOD);
+    }
+    assert_eq!(link.count(|c| matches!(c, LinkCall::ApiVersions(_))), 1);
+    assert_eq!(gpu_samples(&drain(&mut rx)).len(), 3);
     assert!(outcome(&mut handle).is_none());
 }
 
@@ -1310,7 +1323,8 @@ fn supervised_worker_backoff_half_then_one_second() {
     assert_eq!(offsets, vec![0, 500, 1_500], "{gens:?}");
     let ends: Vec<Option<End>> = gens.iter().map(|g| g.end).collect();
     assert_eq!(ends, vec![Some(End::Err), Some(End::Err), None]);
-    // `--api-versions` ran in the first generation only.
+    // `--api-versions` ran once, in the third generation: the first two ended before
+    // `API_VERSIONS_DELAY` (tasklens-fwj1i). It starts at 4.5 s, after that tick's sample.
     assert_eq!(
         link.count(|c| matches!(c, LinkCall::ApiVersions(_))),
         1,
