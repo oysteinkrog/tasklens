@@ -1982,6 +1982,139 @@ Under leader rule 1 (2026-11-05) it is recorded FAIL and goes to the owner in ta
 The next lever named in the plan is GPU submit (the path vertex upload in `gpui-pre-wgpu`).
 It is not part of this bead.
 
+### History scrub profile and the reused table key map (tasklens-mkadz, 2026-11-12)
+
+Result: after the change, `history-scrub` had a median `scrub_frame_ms.p99` of 4.15 ms (hidden
+nested KWin, 60 Hz). That is FAIL against the original limit of 4.0 ms and PASS against the
+relaxed limit of 5.4 ms, so it is not a regression. HEAD without the change had 4.28 ms in the
+same rounds. That difference is inside the run-to-run spread: a second set of 3 rounds gave
+4.24 ms after and 4.09 ms before. Instruction counts show the saving: the changed binary ran 1.1%
+fewer user-space instructions in the same 20 s of scrubbing.
+
+The change is in `crates/tl-ui-procs/src/pages/processes/history/table.rs` (`a2fc310b8`). Each
+scrub installs a new view of 2,000 rows, and `HistoryTableDelegate::rebuild` filled a new
+`FxHashMap` from process key to display index for every view. It now keeps a map from key to row
+of the view. It builds that map again only when the view's keys differ from the keys it was built
+for, and fills a plain array from view row to display index per view. `row_index` reads the map,
+then the array. The rows, order and index the table shows are the same. New test:
+`history::history_row_index_follows_each_view` in the `procs` binary (same keys with a new
+order, a filtered-out row, and a view with other keys).
+
+In the real engine the rows of a view follow the frame's process order (`answer_frame` in
+`tl-engine/src/history_query.rs`), so the map is reused while the process set does not change.
+I did not measure how often that holds on a real machine.
+
+Setup: hidden nested KWin, 1920 x 1200, 60 Hz, session `mkz`,
+`tasklens --bench history-scrub --duration 30 --warmup 5`, bench slot lock, quiet rule (1- and
+5-minute load at most 8 at the start of each run, 1-minute load at most 8 at its end). This is
+the X11-on-nested-Xwayland session of the q8zcy and wlf.46 runs, so compare with the wlf.46 rerun,
+not with 8fx.47. "Before" is the q8zcy "after" binary,
+`cargo build --locked --profile perf -p tl-app --features bench` at `1d55b2a59`; the commits up
+to `b715a6e0c` change only a gpui-pre test and docs. "After" is the same command at `a2fc310b8`,
+built at 02:12 in the main checkout. Each binary had one warm-up run first, which does not
+count. The two binaries ran interleaved, one run of each per round, inside the jobd hold for
+tasklens benchmarks. All 12 gate runs counted. All 20 reports (warm-up, profile, gate and
+instruction count runs) have `refresh_hz` 60, `pacing` off, `window_active` true, 0 stalls,
+0 missed frames and 1,795 to 1,796 scrub frames. Reports,
+profiles and scripts: `/var/tmp/claude/mkadz/`.
+
+#### Profile before the change
+
+One run of the before binary at 02:06:38 (load 6.61, 6.80, 6.38), `sudo perf record -e
+cpu-clock -F 999 --call-graph dwarf,16384` for 15 s after warmup: 2,406 samples, 96.8% on the
+main thread, scrub p50 2.39 ms and p99 4.00 ms with perf attached. Stacks do not unwind far, so
+the shares are main-thread self time grouped by symbol name (`group.py` from q8zcy).
+
+| Area | Share |
+|---|---|
+| GPUI element tree and styles | 15.7% |
+| libc copy loop | 14.2% |
+| Our UI code | 9.7% |
+| taffy layout | 8.6% |
+| NVIDIA driver | 8.2% |
+| Text (shaping, glyph paint, atlas) | 7.9% |
+| GPUI `BoundsTree::insert` | 6.2% |
+| wgpu renderer | 5.4% |
+| GPUI scene and paint | 4.7% |
+| Rest (hashing, malloc, not matched) | 14.9% |
+
+Top cost named: the history table install on every scrub frame, 7.6% of main-thread self time
+in the install and the table host functions for it. The main parts: `rebuild` 1.58%, the `ProcessKey` to index map insert 1.58%, the
+sort of the packed `(u128, u32)` keys 2.2%, building those keys 0.87%, and dropping the old
+view's rows 1.04%. The largest single function is GPUI `BoundsTree::insert` at 6.2%. tasklens-q8zcy
+just reworked it, and its next lever (fewer layers per frame) changes draw order, so it is not a
+focused change. The larger areas above are spread over many functions in GPUI, libc and taffy.
+The one change here removes the map insert, the largest single part of the install.
+
+#### Gate runs
+
+Set 1, the gate:
+
+| Run | Start | Load at start (1, 5, 15 min) | Load at end (1 min) | scrub p50 | p95 | p99 | max | Process CPU | RSS MB |
+|---|---|---|---|---|---|---|---|---|---|
+| before 1 | 02:14:09 | 4.34, 6.38, 6.36 | 4.21 | 2.82 ms | 3.48 ms | 4.53 ms | 7.95 ms | 17.81% | 244.24 |
+| after 1 | 02:14:45 | 4.21, 6.11, 6.28 | 3.60 | 2.49 ms | 3.09 ms | 3.79 ms | 6.90 ms | 15.87% | 244.76 |
+| before 2 | 02:15:22 | 3.60, 5.74, 6.14 | 3.89 | 2.64 ms | 3.31 ms | 4.28 ms | 7.18 ms | 16.73% | 244.43 |
+| after 2 | 02:15:58 | 3.89, 5.58, 6.07 | 4.06 | 2.54 ms | 3.32 ms | 4.15 ms | 7.28 ms | 16.38% | 244.92 |
+| before 3 | 02:16:34 | 4.06, 5.43, 6.00 | 5.14 | 2.54 ms | 3.52 ms | 4.15 ms | 7.31 ms | 16.73% | 239.74 |
+| after 3 | 02:17:10 | 5.14, 5.53, 6.01 | 5.80 | 2.56 ms | 3.27 ms | 4.57 ms | 7.08 ms | 16.36% | 244.29 |
+| Median before | | | | 2.64 ms | | 4.28 ms | | 16.73% | |
+| Median after | | | | 2.54 ms | | 4.15 ms | | 16.36% | |
+
+Set 2, same binaries, right after set 1:
+
+| Run | Start | Load at start (1, 5, 15 min) | Load at end (1 min) | scrub p50 | p95 | p99 | max | Process CPU | RSS MB |
+|---|---|---|---|---|---|---|---|---|---|
+| before 1 | 02:17:46 | 5.80, 5.66, 6.04 | 5.13 | 2.73 ms | 3.38 ms | 4.21 ms | 7.50 ms | 17.23% | 242.02 |
+| after 1 | 02:18:22 | 5.13, 5.51, 5.97 | 6.07 | 2.46 ms | 3.59 ms | 4.74 ms | 7.93 ms | 16.35% | 243.79 |
+| before 2 | 02:18:58 | 6.07, 5.69, 6.02 | 4.70 | 2.21 ms | 3.06 ms | 3.55 ms | 7.27 ms | 14.93% | 241.00 |
+| after 2 | 02:19:34 | 4.70, 5.41, 5.91 | 3.91 | 2.45 ms | 3.07 ms | 3.69 ms | 7.34 ms | 15.70% | 244.49 |
+| before 3 | 02:20:10 | 3.91, 5.12, 5.79 | 4.13 | 2.72 ms | 3.26 ms | 4.09 ms | 7.43 ms | 17.14% | 239.85 |
+| after 3 | 02:20:46 | 4.13, 5.03, 5.73 | 3.37 | 2.36 ms | 3.11 ms | 4.24 ms | 6.96 ms | 15.56% | 244.74 |
+| Median before | | | | 2.72 ms | | 4.09 ms | | 17.14% | |
+| Median after | | | | 2.45 ms | | 4.24 ms | | 15.70% | |
+
+Over all 6 runs of each binary the p99 median is 4.18 ms before and 4.20 ms after. The two sets
+disagree on the sign, so I do not count the p99 change as shown. Process CPU is lower after in 5 of
+6 pairs, p50 in 4 of 6.
+
+Instruction counts: two more interleaved runs per binary, `sudo perf stat -e
+instructions:u,cycles:u,task-clock -p <pid>` for 20 s, 7 s after launch (`stat-*.txt`).
+
+| Run | Start | Load at start | Instructions (user) | Cycles (user) | Task clock | scrub p99 of the run |
+|---|---|---|---|---|---|---|
+| before 1 | 02:21:22 | 3.37 | 16,014,938,017 | 13,206,451,163 | 3,544 ms | 4.88 ms |
+| after 1 | 02:21:58 | 3.04 | 15,839,757,268 | 12,117,390,361 | 3,291 ms | 3.53 ms |
+| before 2 | 02:22:34 | 3.20 | 16,025,888,236 | 13,406,216,153 | 3,599 ms | 4.40 ms |
+| after 2 | 02:23:10 | 3.05 | 15,842,072,017 | 12,443,422,813 | 3,367 ms | 4.38 ms |
+
+The after binary ran 15.84 G instructions on average against 16.02 G, 1.1% fewer. User cycles and
+task clock were 7 to 8% lower, more than the instruction count explains, so most of that is noise or
+fewer cache misses (not measured).
+
+| Gate (hidden nested KWin, 60 Hz) | Original limit | Relaxed limit | Median after | Original | Relaxed |
+|---|---|---|---|---|---|
+| `scrub_frame_ms.p99` (UI-PRC-032) | 4.0 ms | 5.4 ms | 4.15 ms (set 2: 4.24 ms) | FAIL | PASS |
+
+#### Profile after the change
+
+One run of the after binary at 02:13:33 (load 5.71, 6.89, 6.52), same perf settings: 2,144
+samples against 2,406 before, scrub p50 2.33 ms and p99 3.79 ms with perf attached. The table
+install fell from 7.6% to 4.8% of main-thread self time: the map insert is gone and `rebuild`
+fell from 1.58% to 0.33%. The sort (2.3%) and dropping the old rows (1.03%) are unchanged. Our UI
+code as a whole fell from 9.7% to 6.7%. The other areas: GPUI element tree 16.6%, libc copy loop
+16.3%, taffy 9.1%, `BoundsTree::insert` 8.2%, text 8.0%, NVIDIA 6.8%, wgpu renderer 5.7%, scene
+and paint 4.9%.
+
+Reading, for the next beads:
+- The scrub p99 is now 0.1 to 0.3 ms over the original limit. The run-to-run spread is about
+  1 ms (3.55 to 4.74 ms), so a change of a few percent of the frame cannot be shown by 3 runs.
+- What is left of the install: the sort of 2,000 packed keys on every view (2.3%) and dropping
+  the old view's 2,000 rows on the UI thread (1.0%). Dropping the old view on another thread
+  would remove the second, but changes where memory is freed.
+- The rest of the frame is GPUI, as for `table-2000`: element tree and styles, the copies they
+  make, taffy, `BoundsTree::insert`, text and GPU submit.
+
 ### Bridge wake-to-render latency, nested rerun (tasklens-wlf.42, 2026-11-05)
 
 Information only (leader 2026-11-05, option C), not a gate result. The 20 ms bridge gate is judged on the 144 Hz screen in wlf.2.
