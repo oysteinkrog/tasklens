@@ -317,7 +317,10 @@ mod tests {
             }
         }
         for card in 0..6 {
-            let (x, y) = (1600. + (card % 2) as f32 * 160., 300. + (card / 2) as f32 * 120.);
+            let (x, y) = (
+                1600. + (card % 2) as f32 * 160.,
+                300. + (card / 2) as f32 * 120.,
+            );
             frame.push(rect(x, y, 150., 110.));
             for line in 0..8 {
                 frame.push(rect(x + 4., y + 4. + line as f32 * 12., 140., 12.));
