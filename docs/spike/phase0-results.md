@@ -2741,7 +2741,7 @@ Pending tasklens-wlf.24.
 
 Report only, no gate (ADR-014, open question 7). Measured 2026-11-12 by tasklens-wlf.25. The
 baseline with no bench or test tasklens running is 13.57 W and 1.6 % GPU utilization. The
-scenes draw 14.6 to 22.7 W and 2.0 to 8.7 %. Every scene value comes from a hidden nested KWin
+scenes draw 14.6 to 25.4 W and 2.0 to 12.0 %. Every scene value comes from a hidden nested KWin
 session at 60 Hz, so it is close to, but not equal to, the same scene on the 144 Hz screen.
 
 ### Setup
@@ -2779,8 +2779,10 @@ apply to it.
 
 Command per run: `tasklens --bench <scene> --duration 30 --warmup 5 --json <file>` in the
 hidden nested KWin session `harness.sh start wlf25` (1920 x 1200), with `TL_BENCH_NESTED=1`
-and `TL_BENCH_REFRESH_HZ=60`. One run per scene. Every report has `refresh_hz` 60 and
-`window_active` true. `soak` (600 s) was not run. Each GPU number is from the nested KWin
+and `TL_BENCH_REFRESH_HZ=60`. `soak` runs as `--duration 600 --warmup 0`, as in wlf.17, so
+its window is 600 s and about 600 samples. One run per scene. Every report has `refresh_hz`
+60. Every report except `soak` has `window_active` true. The soak opens three windows with no
+input, and its report has `window_active` false. Each GPU number is from the nested KWin
 session, so it is close to, but not equal to, the 144 Hz screen. The last column is the scene
 power minus the 13.57 W baseline.
 
@@ -2794,6 +2796,7 @@ power minus the 13.57 W baseline.
 | bridge | 03:17:02 | 2.64, 5.18, 6.07 | 22.7 W (nested KWin) | 8.6 % (nested KWin) | 2.63 % | 48.85 % | 9.2 W |
 | static | 03:17:38 | 2.84, 4.94, 5.96 | 15.2 W (nested KWin) | 2.4 % (nested KWin) | 1.70 % | 8.91 % | 1.6 W |
 | history-scrub | 03:18:14 | 2.82, 4.69, 5.84 | 22.1 W (nested KWin) | 4.5 % (nested KWin) | 1.60 % | 16.99 % | 8.5 W |
+| soak (600 s) | 03:24:30 | 3.35, 3.65, 4.95 | 25.4 W (nested KWin) | 12.0 % (nested KWin) | 2.51 % | 43.09 % | 11.8 W |
 
 ### Notes
 
