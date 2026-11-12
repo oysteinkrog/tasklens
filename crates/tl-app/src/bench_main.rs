@@ -661,14 +661,11 @@ mod tests {
         };
         assert!(m.begin());
         thread::sleep(Duration::from_millis(50));
-        let at = Instant::now();
+        // No wall-clock bound here (check_timing bans limits under 2 s). `alive` is the proof:
+        // had `end` waited for the in-flight sample, the 500 ms deadline would have passed and
+        // the thread would have given the probe up, so `alive` would be false.
         let (side, alive) = m.end();
-        let took = at.elapsed();
-        assert!(
-            took < Duration::from_millis(200),
-            "end waited {took:?} for the probe"
-        );
-        assert!(alive, "the deadline has not passed yet");
+        assert!(alive, "end waited past the sample deadline for the probe");
         assert_eq!(side, SideMeasure::default(), "no reply came in the window");
         // After the deadline the thread gives the probe up, and the next window refuses.
         thread::sleep(tl_engine::gpu::SAMPLE_DEADLINE + Duration::from_millis(500));
