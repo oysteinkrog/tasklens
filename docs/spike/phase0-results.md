@@ -2777,7 +2777,40 @@ Not needed: the soak passed (U-9); wlf.21 and wlf.22 closed as not needed.
 
 ## Manual checklist
 
-Pending tasklens-wlf.23.
+Run record: tasklens-wlf.23, 2026-11-13, by an agent. Not on the owner's desktop: every row ran
+in a hidden nested KWin 6.8.2 (`kwin_wayland --virtual --xwayland`, 3 virtual outputs of
+1920x1200 side by side, global shortcuts on). The app was the installed release package
+tasklens 1.6.2-1 (`/usr/bin/tasklens`), started as a native Wayland client with scratch `XDG_*`
+folders. Input came from xdotool through Xwayland EIS, which KWin handles as real pointer and
+key input. Window geometry came from a KWin script. Screenshots are in
+`/var/tmp/claude/tl-smoke/wlf23/shots/` and stay local: they show the owner's process list.
+
+Rows 1 to 9 and 14 to 15 ran with `appearance.decorations = "client"` in `settings.toml`, so
+they test the client-drawn title bar. The default has been `"server"` since D-035.
+
+| # | Check | How | Result (PASS or FAIL) | Notes |
+|---|---|---|---|---|
+| 1 | Drag by the title bar | Nested KWin 6.8.2: drag the empty title bar area 200 px right, 100 px down | PASS | Window moved with the pointer (frame x 340 to 530, y 220 to 315). |
+| 2 | Double-click maximizes, again restores | Nested KWin 6.8.2: double-click the title bar twice | PASS | Maximized to 1920x1200 on Virtual-0, then back to 1240x760 at the old place. `c-02-max.png`. |
+| 3 | Restore from maximized with the caption button | Nested KWin 6.8.2: maximize, click the restore button | PASS | Back to 1240x760 at the old place. `c-03-restored-s.png`. |
+| 4 | Resize from 4 edges and 4 corners | Nested KWin 6.8.2: grab 4 px outside the visible edge, drag 40 px out, drag back | PASS | Each of the 8 handles grew the window by 40 px on its sides, and the drag back shrank it again. The grab zone is the 20 px shadow outside the edge; 2 px inside the edge, left, right and two corners do not resize. |
+| 5 | Right-click the title bar opens the KWin window menu | Nested KWin 6.8.2: right-click the title bar | PASS | KWin menu (Maximize, Move to Screen, Minimize, Keep Above Others, More Actions, Close). `c-05-menu-crop.png`. |
+| 6 | Tiling: Meta+Left, Meta+Right, drag to an edge | Nested KWin 6.8.2: the keys, then a title bar drag to the left screen edge | PASS | Meta+Left: left half. Meta+Right: right half, then left half of the next output. Edge drag: left half tile. Content redraws at each size. `c-06-left-s.png`, `c-06-edgetile-s.png`. A fast drag (20 steps in 0.6 s) did not untile a tiled window; a slower drag (40 steps in 2 s) did. Not checked whether a person's hand hits this. |
+| 7 | Move across all three monitors | Nested KWin 6.8.2: title bar drags from Virtual-0 to Virtual-1 to Virtual-2 and back | PASS | KWin reports the window on each output in turn. `c-07-v1.png`, `c-07-v2.png`. |
+| 8 | Straddle two monitors, content renders on both | Nested KWin 6.8.2: window at x 1262 to 2542, across the 1920 boundary; two shots 2 s apart | PASS | No seam at the boundary, and the pixels of both parts change between the shots (the charts move). `c-08-straddle-crop.png`. |
+| 9 | Maximize on each monitor | Nested KWin 6.8.2: on each output, double-click the title bar, then again | PASS | 1920x1200 at x 0, 1920 and 3840, restored each time. `c-09-max-v0.png` to `c-09-max-v2.png`. |
+| 10 | Unplug a monitor and plug it back | Not done. Closest real step in the nested KWin: `kscreen-doctor output.Virtual-2.disable`, then `.enable`, with the window on Virtual-2 | NOT RUN (needs the owner's real session) | A nested KWin has no cable to pull. The virtual output disabled and re-enabled: KWin moved the window to Virtual-1 and back, the app kept running and drew both times (`c-10-disabled-s.png`, `c-10-reenabled-s.png`). |
+| 11 | Lock and unlock | Not done | NOT RUN (needs the owner's real session) | The nested KWin runs with `--no-lockscreen`, and the real session must not be locked by an agent. |
+| 12 | One suspend and resume (zed#58382) | Not done | NOT RUN (needs the owner's real session) | Suspend is a whole-machine action; an agent must not suspend the real machine. |
+| 13 | 10-minute zed#64499 soak | Owner desktop, tasklens-wlf.20 | PASS | See [zed#64499 soak](#zed64499-soak): 0 stalls over 250 ms in 600 s. Not run again here. |
+| 14 | Minimize and restore re-renders (U-3) | Nested KWin 6.8.2: Performance tab, caption minimize button, pointer on another output, 30 s, restore through KWin (`minimized = false`, as a taskbar click does). A KWin script logged the window's `damaged` signal (each buffer the app commits) | PASS | 0 commits in the 29 s while minimized. After the restore, commits at 0, 18 and 31 ms, then steady. The first shot after the restore (taken by +1.6 s) shows new data: CPU 40.9 % against 55.9 % before, charts moved on by 30 s. `c-14-pre-vs-a.png`. |
+| 15 | Text sharpness at 110% | Nested KWin 6.8.2: `kscreen-doctor output.Virtual-0.scale.1.1`, the other two outputs off so the shot is not resampled; crop viewed at 2x nearest-neighbour | PASS | Glyph edges and 1 px lines are crisp, no smear or doubled strokes. A second look by Codex (GPT) agreed. Shot `/var/tmp/claude/tl-smoke/wlf23/shots/c-15-scale110.png`, zoom `c-15-scale110-zoom2x.png`. |
+| 16 | `Application::run` returns (U-2) | Nested KWin 6.8.2: started with `TASKLENS_LOG=info RUST_LOG=info`, clicked the close button | PASS | Process exited 0.3 s after the click. Log: `INFO tasklens::engine: shutdown after run returned exit=Quit`. The nested session has no tray, so close quits. |
+
+Rows 10 to 12 still need the owner's real session.
+
+With the default server decorations, rows 1 and 2 also passed in the same nested KWin (KWin's
+own title bar: drag, double-click maximize and restore).
 
 ## polkit error names (U-39)
 
@@ -2808,13 +2841,13 @@ pam_faillock counted the wrong-password run and an earlier `pkttyagent` run that
 
 ## Unverified items settled in phase 0
 
-- U-2: pending tasklens-wlf.23.
-- U-3: pending tasklens-wlf.23.
+- U-2: confirmed (check 16, nested KWin 6.8.2): the log shows `INFO tasklens::engine: shutdown after run returned exit=Quit` after the close button, so `Application::run` returned.
+- U-3: confirmed in a nested KWin 6.8.2 (check 14): the restored window committed new frames at once and showed current data; no hidden-state refresh timer is needed. The owner's desktop run is still open.
 - U-4: confirmed by tasklens-fut.8 and tasklens-ug9.3 (RECONCILIATION.md, U-4).
 - U-7: confirmed by tasklens-ug9.4 (RECONCILIATION.md, U-7).
 - U-9 not needed: the soak passed without the patch.
 - U-10: failed: both live gates (Performance 2%, Processes 3.5%). The fixture part is settled by R-286 (18.68 ms against 20 ms). Live collection cost is in "Live collection cost (tasklens-wlf.26, 2026-11-13)". This is engine work (ADR-014 decision rule step 4): no UI fallback, E01-A2 is not blocked.
-- U-36: pending tasklens-wlf.23.
+- U-36: confirmed in a nested KWin 6.8.2: checks 1 to 6 pass with client-side decorations. The default has been `"server"` since D-035, so no default change follows. The owner's desktop run is still open.
 - U-39: confirmed: both cases return `org.freedesktop.DBus.Error.AccessDenied` ("Permission denied"). systemd D-Bus paths keep "<failure text>: not authorized" for dismissed and denied (R-117). See "polkit error names (U-39)".
 - U-39: pending tasklens-wlf.24.
 - U-47 not settled: `perf-cpu` p99 is 15.71 ms (hidden nested KWin, 60 Hz, wlf.45 rerun), against
