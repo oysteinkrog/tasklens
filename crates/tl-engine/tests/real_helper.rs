@@ -139,7 +139,8 @@ impl Drop for Rig {
         if engine.latest().health.helper != HelperState::Locked {
             let _ = engine.send(Command::EndHelperSession);
             let begin = Instant::now();
-            while engine.latest().health.helper != HelperState::Locked && begin.elapsed() < END_LIMIT
+            while engine.latest().health.helper != HelperState::Locked
+                && begin.elapsed() < END_LIMIT
             {
                 std::thread::sleep(POLL);
             }
@@ -262,7 +263,10 @@ fn unlock_and_signal_other_user() {
             .map(|rec| rec.key);
         key.is_some()
     });
-    assert!(found, "{NOBODY_UNIT} not in the snapshot within {UNIT_WAIT:?}");
+    assert!(
+        found,
+        "{NOBODY_UNIT} not in the snapshot within {UNIT_WAIT:?}"
+    );
     let key = key.expect("found");
 
     rig.unlock();
@@ -362,6 +366,9 @@ fn skip_reason_names_missing_install() {
     let missing = Path::new("/nonexistent/tasklens/tl-helper");
     let reason = skip_reason(&[missing, Path::new("/nonexistent/pkexec")]).expect("skips");
     assert!(reason.starts_with(SKIPPED), "{reason}");
-    assert!(reason.contains("/nonexistent/tasklens/tl-helper"), "{reason}");
+    assert!(
+        reason.contains("/nonexistent/tasklens/tl-helper"),
+        "{reason}"
+    );
     assert_eq!(skip_reason(&[Path::new("/")]), None);
 }
