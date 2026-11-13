@@ -2728,7 +2728,7 @@ Pending tasklens-wlf.24.
 - U-4: confirmed by tasklens-fut.8 and tasklens-ug9.3 (RECONCILIATION.md, U-4).
 - U-7: confirmed by tasklens-ug9.4 (RECONCILIATION.md, U-7).
 - U-9 not needed: the soak passed without the patch.
-- U-10: pending tasklens-wlf.26. The fixture part is settled by R-286 (18.68 ms against 20 ms).
+- U-10: failed: both live gates (Performance 2%, Processes 3.5%). The fixture part is settled by R-286 (18.68 ms against 20 ms). Live collection cost is in "Live collection cost (tasklens-wlf.26, 2026-11-13)". This is engine work (ADR-014 decision rule step 4): no UI fallback, E01-A2 is not blocked.
 - U-36: pending tasklens-wlf.23.
 - U-39: pending tasklens-wlf.24.
 - U-47 not settled: `perf-cpu` p99 is 15.71 ms (hidden nested KWin, 60 Hz, wlf.45 rerun), against
@@ -2808,7 +2808,54 @@ power minus the 13.57 W baseline.
 
 ## Collection cost
 
-Live gates: pending tasklens-wlf.26. The fixture sweep gate is below.
+Live gates (tasklens-wlf.26, 2026-11-13): FAIL on both, median of 3 runs each (R-160 literal sum: `tl-engine*` threads plus the `tl-gpu-probe` child): Performance tab 3.32% against 2%, Processes tab 4.45% against 3.5% (hidden nested KWin, not the 144 Hz screen). Details in the next subsection. The fixture sweep gate is below.
+
+### Live collection cost (tasklens-wlf.26, 2026-11-13)
+
+Setup. Release build of HEAD b7c1dac86 (`cargo build --release --locked -p tl-app -p tl-gpu-probe`), run in a hidden nested KWin session (not the 144 Hz screen: all numbers carry that caveat). In-process engine (window fallback): the harness has a private XDG_RUNTIME_DIR, so the window starts its own engine (`tl-engine-0` present in every run). Default settings, a fresh private config, CPU page on the Performance tab. Each run: 20 s settle, then 60 one-second reads of `/proc/<pid>/task/*/stat` (utime + stime), last value per tid. Process counts and load are in the tables; counts only, no process names. The process rate is not lowered (ADR-014).
+
+Window length. Each read pass takes about 1.15 s, so the 60 reads span 69.4 to 69.6 s, not 60 s. Percent is computed over the measured span: 100 x ticks / CLK_TCK / span. CLK_TCK = 100 on this machine.
+
+Thread sets. "R-160 literal" is the bead's method: threads whose comm starts with `tl-engine` (the blocking pool shows as `tl-engine-block`, comm is cut to 15 chars) plus the `tl-gpu-probe` child. "Full engine" adds the per-source threads `tl-src-*` (each source samples on its own thread since wlf.30) and the other engine helper threads (`tl-gpu-spawn` and similar: 0 ticks in all runs). `tl-engine-switc` is a tl-app thread and is excluded. The "No probe" column is `tl-engine*` plus `tl-src-*` only.
+
+Performance tab visible (CPU page; tab confirmed by one screenshot, deleted)
+
+| Run | Start | Load 1/5/15 | Processes | Span (s) | tl-engine* ticks | tl-src-* ticks | Probe ticks | R-160 literal | Full engine | No probe | Whole process |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 01:48:55 | 5.43 / 6.42 / 7.38 | 1374 | 69.4 | 55 | 71 | 200 | 255 = 3.67% FAIL | 326 = 4.70% FAIL | 126 = 1.82% | 864 = 12.45% |
+| 2 | 01:50:45 | 4.60 / 5.80 / 7.04 | 1377 | 69.5 | 51 | 75 | 174 | 225 = 3.24% FAIL | 300 = 4.32% FAIL | 126 = 1.81% | 827 = 11.90% |
+| 3 | 01:52:36 | 4.44 / 5.39 / 6.75 | 1376 | 69.5 | 56 | 75 | 175 | 231 = 3.32% FAIL | 306 = 4.40% FAIL | 131 = 1.88% | 849 = 12.22% |
+| Median | | | | | | | | 3.32% FAIL (gate 2%) | 4.40% FAIL | 1.82% | 12.22% |
+
+Processes tab visible
+
+| Run | Start | Load 1/5/15 | Processes | Span (s) | tl-engine* ticks | tl-src-* ticks | Probe ticks | R-160 literal | Full engine | No probe | Whole process |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 01:54:45 | 5.04 / 5.18 / 6.49 | 1349 | 69.4 | 63 | 541 | 246 | 309 = 4.45% FAIL | 850 = 12.25% FAIL | 604 = 8.70% | 743 = 10.71% |
+| 2 | 01:56:22 | 6.25 / 5.41 / 6.43 | 1350 | 69.6 | 67 | 562 | 255 | 322 = 4.63% FAIL | 884 = 12.70% FAIL | 629 = 9.04% | 780 = 11.21% |
+| 3 | 01:57:58 | 5.65 / 5.45 / 6.34 | 1358 | 69.5 | 62 | 548 | 221 | 283 = 4.07% FAIL | 831 = 11.96% FAIL | 610 = 8.78% | 744 = 10.71% |
+| Median | | | | | | | | 4.45% FAIL (gate 3.5%) | 12.25% FAIL | 8.78% | 10.71% |
+
+Per-thread ticks, run 2 of each tab (hidden nested KWin, not the 144 Hz screen)
+
+| Thread | Performance | Processes |
+|---|---|---|
+| tl-engine* (pool) | 51 | 67 |
+| tl-src-Processes | 30 | 320 |
+| tl-src-Connections | 0 | 212 |
+| tl-src-Cpu | 27 | 13 |
+| tl-src-Sensors | 11 | 8 |
+| tl-src-Net | 5 | 6 |
+| tl-src-Disk | 2 | 3 |
+| tl-src-Memory, tl-src-GpuDrm, helper threads | 0 | 0 |
+| tl-gpu-probe (child) | 174 | 255 |
+
+Verdicts.
+- Performance gate 2%: FAIL on the R-160 literal sum (median 3.32%) and on the full engine (median 4.40%). The `tl-gpu-probe` child alone costs 174 to 200 ticks (2.5% to 2.9% of one core). Without the probe the engine threads are at 1.82%, which would pass.
+- Processes gate 3.5%: FAIL on the R-160 literal sum (median 4.45%) and on the full engine (median 12.25%). The Processes and Connections source threads are the large part (about 320 and 212 ticks in run 2). The probe adds 221 to 255 ticks.
+- The two sums give the same verdict. Only the sum without the probe differs on the Performance tab.
+- Not checked: whether the probe cost is specific to the nested session and whether it also runs against the real GPU outside it. The Processes tab screenshot was not taken, so that tab is inferred from the Processes source ticks and the start argument `--tab processes`.
+- This is engine work (ADR-014 decision rule step 4): no UI fallback, E01-A2 is not blocked. The leader is asked for fix beads with a profile.
 
 ### Sweep of 2,000 processes on the fixture root (tasklens-yms.26, 2026-11-04)
 
