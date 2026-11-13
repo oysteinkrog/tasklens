@@ -3775,7 +3775,7 @@ Both use the same `-p` list. The feature-less app variant (`cargo build -p tl-ap
 
 ## ADR-021: tl-netmon, the privileged eBPF collector for per-process network and storage operations
 
-Status: proposed (draft 2026-11-13, owner asked for the draft; implementation stays P4). Phase P4. Two owner decisions bind it. First, one ADR covers both collectors, and process rows keep the `n/a` disk-operations cell until P4 ships (bead `tasklens-pdu.90`, option A, 2026-11-07). Second, the draft is written now and the work stays P4 (2026-11-13). The owner adds the D entry when he approves it.
+Status: proposed (draft 2026-11-13, owner asked for the draft; implementation stays P4). Phase P4. Two owner decisions bind it. First, one ADR covers both collectors, and process rows keep the `n/a` disk-operations cell until P4 ships (bead `tasklens-pdu.90`, option A, 2026-11-07). Second, the draft is written now and the work stays P4 (2026-11-13). Astra reviewed the first draft on 2026-11-13; this version answers its eleven findings. The owner adds the D entry when he approves it.
 
 ### Context
 
@@ -3790,50 +3790,79 @@ Fixed constraints:
 - ADR-001 reserves the crate (bin, P4, depends on `tl-model`) and puts `tl-netmon` under the "No Tokio" check. ADR-002 pins stable rustc 1.98.1.
 - ADR-018 makes the engine a per-user service (`tasklens-engine.service`) and runs every action on the host that owns it. Its remote-admin rule already covers `.netmon`.
 
+Owner machine facts used below **[verified 2026-11-13]**: kernel 7.3.0, BTF at `/sys/kernel/btf/vmlinux`, `kernel.unprivileged_bpf_disabled = 2`, lockdown `none`, 32 possible CPUs, about 1,300 processes, no `hidepid` on `/proc`, `null_blk` module available.
+
 ### Decision
+
+**Prerequisite bead: coverage and kernel prototype.** Before any collector bead, one P4 bead builds a throwaway prototype and records its results in `docs/spike/netmon-prototype.md`. The prototype settles the points this ADR marks "prototype". This ADR is amended with the answers before the crate is created. The prototype must:
+1. **Network coverage.** Pick the hook points and show, for TCP and UDP over IPv4 and IPv6, which of these paths each hook sees: `write`, `send`, `sendmsg`, `sendmmsg`, `sendfile`, `splice`, io_uring send and receive (inline and from io-wq workers), `read`, `recv`, `recvmsg`, `recvmmsg`, `MSG_PEEK`, `MSG_TRUNC`, `MSG_ZEROCOPY`. For each path it states counted, excluded or wrong, and how flags are handled (a `MSG_PEEK` receive counts nothing; a `MSG_TRUNC` receive counts the bytes copied, not the datagram length). It also shows that no byte is counted twice when one hook calls through another. A candidate is per-protocol hooks on the TCP and UDP send and receive functions, as bcc `tcptop` does with `tcp_sendmsg` and `tcp_cleanup_rbuf` **[inferred]**.
+2. **Attach method per hook.** Whether each function can be attached on the owner kernel and the oldest tested kernel, with fexit or with kprobe plus kretprobe. BTF presence alone does not prove a target is attachable.
+3. **Capabilities after the drop.** On each tested kernel, with `unprivileged_bpf_disabled` set to 1 and 2: do `BPF_MAP_LOOKUP_ELEM`, `BPF_MAP_LOOKUP_BATCH`, `BPF_MAP_UPDATE_ELEM` and `BPF_MAP_DELETE_ELEM` on a held map file descriptor work with no capabilities, and with CAP_BPF only.
+4. **Kernel range.** Run items 1 to 3 on the owner kernel (7.3), on the current Arch LTS kernel and on the oldest kernel the owner wants supported (open question 4). The supported range is what passed, not a version number assumed in advance.
+5. **Exit flag and identity.** Confirm the exit hook below sets the flag once per thread group, and that the identity self-check passes.
+6. **Overhead.** Measure hook time and kernel memory with the method under Overhead, with parts enabled and disabled, and propose the gate value.
 
 **Crate and build** (amends ADR-001 when accepted).
 - Crate `crates/tl-netmon`, binary `/usr/lib/tasklens/tl-netmon`. It is created when P4 starts, not before (ADR-001).
-- One process holds both collectors: network bytes and storage operations. The engine turns each part on and off separately.
-- ADR-001 row: workspace deps `tl-model`; external deps `aya` (exact pin per ADR-002, default features off, no async features), `rustix` (features `process`, `thread`, `fs`), `postcard`, `serde`. `tl-netmon` writes plain stderr lines and has no `tracing`, like `tasklens-watch`. The row goes into `xtask/src/check_deps.rs` in the commit that creates the crate.
+- One process holds both collectors: network bytes and storage operations. Each part starts, fails and is turned on or off on its own; one unsupported part never disables the other.
+- ADR-001 row: workspace deps `tl-model`; external deps `aya` (exact pin per ADR-002, default features off, no async features), `rustix` (features `process`, `thread`, `fs`, `net`), `postcard`, `serde`. `tl-netmon` writes plain stderr lines and has no `tracing`, like `tasklens-watch`. The row goes into `xtask/src/check_deps.rs` in the commit that creates the crate.
+- Capability sets, the bounding and ambient sets, `setgroups`, `setresgid`, `setresuid`, keep-caps, no-new-privs, the parent death signal and `SO_PEERCRED` come from rustix's `thread`, `process` and `net` modules **[inferred; the crate bead checks each call exists in the pinned rustix]**. If one is missing, the bead stops and asks: adding `libc` and an `unsafe` file is an ADR change. The invoking user's primary group comes from the `Gid:` line of `/proc/<parent pid>/status` (below), so no user database lookup and no NSS are needed.
+- Seccomp, when needed (Privilege), needs a crate or raw `prctl` code that ADR-001 does not allow yet. The choice is open question 5.
 - Loader: aya. It is pure Rust, needs no libbpf, libelf or zlib, and builds on stable Rust.
 - Kernel programs are C, in `crates/tl-netmon/bpf/netmon.bpf.c`, compiled by the crate's `build.rs` with `clang -O2 -g -target bpf`. The object is built, never committed. `clang` is already in the PKGBUILD `makedepends` **[verified]**.
-- CO-RE: the programs read two kernel struct fields (`start_boottime` of the thread group leader and the socket family). They use small hand-written struct definitions with `preserve_access_index`, not a full `vmlinux.h`. aya relocates them against `/sys/kernel/btf/vmlinux` at load time.
-- Kernel minimum: 5.11 with BTF at `/sys/kernel/btf/vmlinux`. 5.8 added CAP_BPF and CAP_PERFMON; from 5.11 BPF memory is charged to the memory cgroup, so `tl-netmon` needs neither an `RLIMIT_MEMLOCK` raise nor CAP_SYS_RESOURCE **[inferred]**. On an older kernel or without BTF, `tl-netmon` answers `InitFailed` and exits. The owner machine runs 7.3.0 with BTF present **[verified]**.
-- `unsafe`: aya map keys and values need `unsafe impl aya::Pod`. Those impls live in `crates/tl-netmon/src/maps.rs`, which joins the ADR-001 rule 4 list when this ADR is accepted. The privilege drop uses rustix and needs no `unsafe`.
+- CO-RE: the programs read a few kernel struct fields (the thread group leader's `start_boottime`, the socket family and type, the group-exit state). They use small hand-written struct definitions with `preserve_access_index`, not a full `vmlinux.h`. aya relocates them against `/sys/kernel/btf/vmlinux` at load time.
+- `unsafe`: aya map keys and values need `unsafe impl aya::Pod`. Those impls live in `crates/tl-netmon/src/maps.rs`, which joins the ADR-001 rule 4 list when this ADR is accepted.
 
-**What it collects.** One per-CPU hash map in the kernel, keyed by `{ tgid: u32, start_boottime_ns: u64 }` of the thread group leader. The value is `{ tx_bytes, rx_bytes, read_ops, write_ops }`, each a `u64` counted from the moment `tl-netmon` attached. Nothing else is stored: no addresses, ports, packet contents, file names, devices or sectors.
-- **Network bytes.** Bytes a process sends and receives on AF_INET and AF_INET6 sockets, counted in process context on the socket send and receive calls from their return values. fexit is used where the kernel function has BTF and is not inlined, kprobe and kretprobe otherwise. This counts TCP, UDP and every other IP protocol at the socket layer. It counts payload bytes, not wire bytes, so headers and TCP retransmits are left out and the totals differ from interface counters. Loopback traffic counts for both ends. AF_UNIX and netlink traffic is not counted. The exact kernel functions are fixed by the first P4 bead (open question 2).
-- **Storage operations.** Tracepoint `block:block_rq_issue`. Each request counts for the task that is running when the request is issued (`bpf_get_current_pid_tgid()`). A request whose `rwbs` field contains `R` is one read, `W` one write. Flush-only and discard requests are not counted. Known attribution limits, which the column header tooltip states:
-  - Buffered writes reach the disk through writeback, so they count for the flusher kernel thread (`kworker/u*:*+flush-*`), not for the process that dirtied the pages.
-  - Page cache hits never reach the block layer. A process's Disk reads is therefore at most its I/O read ops.
-  - A request that the block layer dispatches later from a work queue counts for that kworker **[inferred]**.
+**Kernel features: probed, not assumed.** `tl-netmon` needs BTF at `/sys/kernel/btf/vmlinux`, CAP_BPF and CAP_PERFMON (Linux 5.8 or newer), and the host namespaces (below). Beyond that it promises no kernel version. As root, before loading anything, it sets `RLIMIT_MEMLOCK` to the map budget plus 8 MiB, which covers kernels that do not charge BPF memory to the memory cgroup **[inferred]**. Then for each part on its own it creates the maps, loads the programs and attaches them. A part whose step fails is `Unsupported(reason)` with the failing step and errno, for example kernel lockdown, an LSM denial or a missing attach target. If both parts fail, `tl-netmon` sends `InitFailed` and exits.
+
+**What it collects.**
+- **Map.** One shared `BPF_MAP_TYPE_HASH`, 32,768 entries, keyed by `{ tgid: u32, pad: u32, start_boottime_ns: u64 }` of the thread group leader. The value is `{ tx_bytes, rx_bytes, read_events, write_events: u64, exited: u32, pad: u32 }`, updated with atomic adds. Kernel memory is about 32,768 × (16 + 40 + hash overhead), a few MiB **[inferred; the prototype measures it]**. A per-CPU map is rejected below. A program inserts a missing key with `BPF_NOEXIST`, looks the key up again, then adds, so two CPUs inserting the same key at once lose nothing.
+- **Transient state.** A kretprobe needs the arguments seen at function entry. Where the prototype picks kprobe plus kretprobe, a second hash keyed by thread id holds the entry arguments until the return probe runs. It holds flags and the socket pointer only. The prototype sets its size and cleanup. No other state exists.
+- **Stored never:** addresses, ports, packet or payload contents, file names, devices, sectors, `comm`, command lines.
+- **Network bytes.** Bytes copied between a process and an AF_INET or AF_INET6 socket of type stream or datagram, counted in the calling task at the hooks the prototype picks. These are payload bytes, not wire bytes: headers and TCP retransmits are left out, and totals differ from interface counters. Loopback traffic counts for both ends. Raw and packet sockets, AF_UNIX and netlink are not counted. Any path the prototype finds uncounted is listed in the header tooltip. Until the prototype proves coverage, the column promises only "TCP and UDP bytes at the socket layer, with the listed exceptions", not exact all-protocol counting.
+- **Storage events: issued-request events.** Tracepoint `block:block_rq_issue`. Each event counts for the task that is running when the request is issued (`bpf_get_current_pid_tgid()`), which is the dispatch context, not always the origin of the I/O. A request whose `rwbs` field contains `R` is one read event, `W` one write event; flush-only and discard requests are not counted. Limits, stated in the header tooltip:
+  - Dispatch can run in a kworker or another task, not the process that caused the I/O. Buffered writes usually reach the disk through writeback, which runs in kernel threads and sometimes in other tasks; they rarely count for the process that dirtied the pages.
+  - A requeued request is issued again and counts again.
+  - On stacked devices (dm, md, loop, dm-crypt) each layer that issues a request counts, often in a kernel thread.
+  - One read call can produce no event (page cache hit) or many (a large or split request). There is no fixed relation to I/O read ops.
   - The unit is a request after merging. `io.stat` on app rows counts bios before merging **[inferred]**, so an app row can differ from its only member's process row (open question 3).
-- **Identity.** `start_boottime` is the value that `/proc/<pid>/stat` field 22 is computed from, so `start_ticks = start_boottime_ns / (1_000_000_000 / CLK_TCK)` **[inferred; a test checks it]**. `tl-netmon` sends `(pid, start_ticks)`. The engine joins on its own process table as ADR-007 does for NVML: a key that is not in the table is dropped.
-- **Map size.** 65,536 entries. When the map is full, a new process is not counted and the counter `full` rises. The engine shows that row's cells as `Unsupported` for the interval and logs once. After each sample, `tl-netmon` deletes the entries whose process is gone (the world-readable `/proc/<pid>/stat` is missing or has another start time), after it has sent their last values once.
+- **Process exit.** A third program on `sched:sched_process_exit` sets `exited = 1` on the entry when the last thread of the group exits **[inferred; prototype item 5]**. `tl-netmon` deletes an entry only after it has sent the entry with `exited = 1` in an acknowledged sample. It never reads `/proc/<pid>` to decide that a process is gone, so `hidepid` and permission errors cannot delete live entries.
+- **Saturation.** When the map is full, a new key cannot be inserted and the per-CPU counter `full` rises. Existing entries keep counting correctly. For any interval in which `full` rose, every process row with no entry is `Unsupported` for that interval, not zero, because "no entry" can then mean "not counted". `tl-netmon` logs the first saturation only.
+- **Reading.** One `BPF_MAP_LOOKUP_BATCH` walk with an in and out cursor, repeated until the kernel reports the end. The walk is not an atomic snapshot: values are read over the walk's duration. `t_ns` (CLOCK_BOOTTIME, ADR-008) is read just before the walk. Only `tl-netmon` deletes entries, and it is single-threaded, so no delete runs during a walk. A key inserted during the walk is picked up by the next one; counts are cumulative, so nothing is lost.
 - Each part has an enable flag in a one-entry array map. A disabled program returns after that one lookup. Programs are loaded and attached once at start, so turning a part on later needs no privilege.
 
-**Lifecycle.**
-- The engine starts `tl-netmon` the same way it starts `tl-helper` (ADR-006): `pkexec /usr/lib/tasklens/tl-netmon --session`, from `tasklens-engine.service` or from the window's fallback engine (ADR-018). It is not a systemd system unit and has no file capabilities (both rejected below).
-- The engine starts it only when both hold:
-  1. Exact counting is turned on for the host. This is a host setting in `engine.toml` (ADR-018), default off. Where the switch lives and what it says is open question 1.
-  2. The merged demand of all sessions needs it. Network is needed when `process_columns` or `graph_targets` include Network, Network send or Network receive. Storage is needed when they include Disk reads, Disk writes, Disk reads delta or Disk writes delta. No new `Demand` field is added.
-- A column appearing never starts it on its own, so a polkit prompt never appears unasked. With the setting on, the prompt appears at most once per `auth_admin_keep` period, and never with the optional rule `49-tasklens.rules` (APP-049) or remote admin (ADR-018).
-- A demand change sends `Configure { net, block }`, which sets the enable flags.
-- 300 s after the demand for both parts ends, the engine sends `Shutdown`. `tl-netmon` also exits on stdin EOF and sets `PR_SET_PDEATHSIG = SIGKILL`. Its links are file descriptors it owns, so every program detaches when it exits. Nothing is pinned in bpffs.
-- After an unexpected exit the engine does not restart it. The state shows the failure until the user turns the setting off and on again.
+**Namespaces and identity.**
+- `bpf_get_current_pid_tgid()` returns pids of the initial pid namespace. As root, before the privilege drop, `tl-netmon` compares the inodes of `/proc/self/ns/pid` and `/proc/self/ns/time` with those of `/proc/1/ns/pid` and `/proc/1/ns/time`. Any difference is `InitFailed(NotHostNamespace)`. `Hello` carries its pid namespace inode, and the engine refuses the collector unless it equals its own. An engine in a container gets no collector; pid translation is not built.
+- `start_ticks = start_boottime_ns / (1_000_000_000 / CLK_TCK)`, matching the kernel's `nsec_to_clock_t` for field 22 of `/proc/<pid>/stat` **[inferred]**. At start `tl-netmon` checks this against itself. It triggers one event of its own on a loaded part: a loopback send for network, else a 4 KiB `O_DIRECT` read of `/proc/self/exe` for storage. It then compares its own entry with field 22 of `/proc/self/stat`. A mismatch is `InitFailed(IdentityCheck)`. A time namespace with a boottime offset would break the match, which is why the host time namespace is required.
+- `tl-netmon` sends `(pid, start_ticks)`. The engine joins on its own process table as ADR-007 does for NVML: a key not in the table is dropped.
 
-**Privilege.**
-- pkexec runs it as root. First it checks that the arguments are exactly `--session` and that stdin and stdout are sockets, and reads `PKEXEC_UID`.
-- It loads and attaches both programs as root. Then it drops privilege in this order:
-  1. `PR_SET_KEEPCAPS`, then clear supplementary groups.
-  2. `setresgid` and `setresuid` to the invoking user and that user's primary group.
-  3. Keep only CAP_BPF in the permitted and effective sets. Clear the inheritable, ambient and bounding sets.
-  4. `PR_SET_NO_NEW_PRIVS`.
-- `tl-netmon` is single-threaded, so these per-thread calls cover the whole process.
-- CAP_BPF stays because `kernel.unprivileged_bpf_disabled` is 2 on the owner machine **[verified]**, and some kernels refuse every `bpf()` command, map reads included, from a task without CAP_BPF in that case **[inferred]**. Open question 4 asks whether it can go too.
-- CAP_PERFMON is needed only to load and attach, so it is dropped. CAP_NET_ADMIN is never needed, because no `cgroup_skb` or tc program is used.
+**Starting and authorisation.**
+- The engine starts `tl-netmon` the same way it starts `tl-helper` (ADR-006): `pkexec /usr/lib/tasklens/tl-netmon --session`, from `tasklens-engine.service` or from the window's fallback engine (ADR-018). It is not a systemd system unit and has no file capabilities (both rejected below).
+- A host setting in `engine.toml` (ADR-018), default off, turns exact counting on. Where the switch lives and what it says is open question 1.
+- Demand: network is needed when `process_columns` or `graph_targets` include Network, Network send or Network receive. Storage is needed when they include Disk reads, Disk writes, Disk reads delta or Disk writes delta. No new `Demand` field is added.
+- **Two kinds of start.**
+  - *Interactive start*: only a user action in a window on the same host (turning the setting on, or the start link in the column tooltip). This is the only path that may show a polkit prompt.
+  - *Automatic start*: when the setting is on and demand appears, also after an engine restart. Before it spawns anything, the engine asks polkit `CheckAuthorization` for `.netmon` with its own process as the subject and no user interaction, as ADR-018 does for remote admin. It spawns only when polkit answers authorized. That happens with the optional rule `49-tasklens.rules` (APP-049), with remote admin, or with a still valid `auth_admin_keep` grant **[inferred: whether polkit reports a kept grant for the engine as subject is checked by the first bead]**. Otherwise the state becomes `NeedsAuth` and the cells fall back. So an expired grant never produces an unasked prompt.
+- **After a cancel or denial** (pkexec 126 or 127 before `Hello`), no automatic start is tried again until the user starts it interactively or turns the setting off and on.
+- **Remote sessions** (ADR-018). A remote session's demand counts toward the merged demand but can only cause an automatic start. A remote window never causes an interactive start, because nobody may be at that screen. A remote session can change the setting through `SetHostSettings` like any host key.
+- A demand change sends `Configure { net, block }`, which sets the enable flags. Turning a part off and on resets its baselines (Sampling).
+- 300 s after the demand for both parts ends, the engine sends `Shutdown`. After an unexpected exit the engine does not restart it; the state shows the failure until the user starts it interactively again.
+
+**Privilege.** pkexec runs `tl-netmon` as root, and pkexec execs it in place, so its parent is the engine **[inferred]**. Every call below is checked; any failure exits at once with the matching reserved exit code (below). Nothing continues on a partial drop.
+1. Check the arguments are exactly `--session`. Refuse when `PKEXEC_UID` is unset or invalid, which also refuses direct runs by root or through `sudo`. There is no root mode without pkexec.
+2. Check stdin and stdout are the same AF_UNIX stream socket, and that `SO_PEERCRED` of the peer has uid `PKEXEC_UID` and pid `getppid()`. Read `Uid:` and `Gid:` of `/proc/<getppid()>/status`; the real uid must be `PKEXEC_UID`, and its real gid becomes the target group. Remember the parent pid.
+3. Check the namespaces, set `RLIMIT_MEMLOCK`, probe, load and attach each part, and run the identity self-check.
+4. Clear the ambient set. Drop every capability except CAP_BPF from the bounding set, while CAP_SETPCAP is still effective.
+5. Set `PR_SET_KEEPCAPS`. `setgroups` to the empty list, then `setresgid` to the target group, then `setresuid` to `PKEXEC_UID`.
+6. Install the final sets with `capset`: inheritable empty, permitted and effective CAP_BPF only, or empty when prototype item 3 shows no capability is needed. Clear `PR_SET_KEEPCAPS`.
+7. Set `PR_SET_NO_NEW_PRIVS`. It blocks gaining privilege through exec; it does not remove capabilities, which steps 4 to 6 do.
+8. Read `/proc/self/status` back and exit unless `Uid`, `Gid` and `Groups` match and `CapInh`, `CapPrm`, `CapEff`, `CapBnd` and `CapAmb` are exactly the intended sets.
+9. Set `PR_SET_PDEATHSIG = SIGKILL` now, because a credential change clears it. Then check `getppid()` still equals the remembered parent pid; if the parent already died, exit.
+
+- **Residual authority.** If CAP_BPF has to stay, it still lets the process create maps and load some program types, though not attach tracing programs (CAP_PERFMON) or network programs (CAP_NET_ADMIN) **[inferred]**. In that case a seccomp filter is installed after step 9. It limits the process to: `read`, `write`, `poll` and `close` on its socket and stderr, `bpf` with only the map lookup, batch lookup, update and delete commands, `clock_gettime`, `exit_group` and what the Rust runtime needs at exit. Open question 5 picks how the filter is built. If prototype item 3 shows no capability is needed, the filter is still recommended but not required.
+- CAP_NET_ADMIN is never needed, because no `cgroup_skb` or tc program is used.
 - `tl-netmon` never runs another program, has no shell, writes no files, and takes no path or free-form argument in any request.
+- **Exit codes.** `tl-netmon` uses 0 for a clean exit and 64 to 79 for its own failures. The codes: 64 usage or missing `PKEXEC_UID`, 65 endpoint or peer check, 66 namespace check, 67 both parts unsupported, 68 identity check, 69 privilege drop or read-back, 70 parent died, 71 protocol error, 79 internal error. It never exits with 126 or 127. The engine maps 126 and 127 to `Cancelled` and `NotAuthorized` only when no `Hello` arrived; after `Hello`, any non-zero exit is `Failed`.
 
 **Protocol** (`tl-model/src/netmon_proto.rs`). The same `tl-model::wire` framing as the probe and the helper, on the pkexec child's stdin and stdout socketpair as for `tl-helper` (ADR-006). No file descriptors are passed.
 
@@ -3844,65 +3873,72 @@ pub enum NetmonRequest {
     Hello { proto: u16 },
     Configure { net: bool, block: bool },
     Sample { seq: u32 },
+    Ack { seq: u32 },
     Shutdown,
 }
 
 pub enum NetmonResponse {
-    Hello { proto: u16, kernel: String, net: Availability, block: Availability },
+    Hello { proto: u16, kernel: String, pid_ns: u64, net: Availability, block: Availability },
     InitFailed { kind: NetmonInitFailure, message: String },
-    Sample { seq: u32, t_ns: u64, last: bool, full: u32, entries: Vec<NetmonEntry> },
+    Sample { seq: u32, part: u16, parts: u16, t_ns: u64, full: u32, entries: Vec<NetmonEntry> },
 }
 
 pub enum Availability { Ok, Unsupported(String) }
-pub enum NetmonInitFailure { KernelTooOld, NoBtf, LoadFailed, AttachFailed, Other }
+pub enum NetmonInitFailure { NotHostNamespace, NoBtf, IdentityCheck, BothPartsUnsupported, Other }
 
 pub struct NetmonEntry {
     pub pid: u32,
     pub start_ticks: u64,
-    pub net: Option<NetCounts>,     // None while network is off; never zero for missing
-    pub block: Option<BlockCounts>, // None while storage is off
+    pub exited: bool,
+    pub net: Option<NetCounts>,     // None while network is off or unsupported; never zero for missing
+    pub block: Option<BlockCounts>, // None while storage is off or unsupported
 }
 pub struct NetCounts { pub tx_bytes: u64, pub rx_bytes: u64 }
-pub struct BlockCounts { pub read_ops: u64, pub write_ops: u64 }
+pub struct BlockCounts { pub read_events: u64, pub write_events: u64 }
 ```
 
 - `Hello` goes both ways first. Versions must be equal; a mismatch stops the collector with state `Failed`. Any change on the wire bumps the version.
-- Max frame 1 MiB, as for the probe. A sample carries only entries that are new or changed since the previous sample. A sample larger than one frame is split, and `last` marks its final frame.
-- `t_ns` is CLOCK_BOOTTIME, read just before the map read (ADR-008). The map is read with one `BPF_MAP_LOOKUP_BATCH` walk per sample.
-- Inside the engine the collector is reached through `trait NetmonOps` in `tl-engine/src/netmon/mod.rs`, shaped like `PrivilegedOps` (ADR-006). The real implementation spawns and talks to the child inside `spawn_blocking`. Tests use a fake. The engine itself contains no eBPF code.
+- **Acknowledged baseline.** `tl-netmon` keeps the values of the newest sample the engine acknowledged. Each sample carries every entry whose values differ from that baseline, plus entries not in it. The engine applies a sample only when all `parts` have arrived, installs it in one step, then sends `Ack { seq }`. An unacknowledged sample never becomes the baseline, so a sample the engine dropped is covered by the next one. A frame with a wrong `seq`, a `part` out of order or a sample incomplete within the reply deadline is a protocol error: the engine stops the collector with state `Failed`.
+- **Bounds.** Max frame 1 MiB, as for the probe; at most 8 parts per sample; at most one outstanding `Sample`. The engine buffers at most one incomplete sample.
+- **Deadlines** (ADR-006 and ADR-018 style). Spawn to `Hello`: 120 s, because a polkit prompt may show. `Sample` to its last part: 2 s. `Shutdown` to exit: 2 s; then the engine closes the socket, and once `Hello` has arrived (so the child runs as the user) it sends SIGKILL. `tl-netmon` exits within 1 s of EOF on stdin.
+- **Generations.** Every spawn gets a new generation. Anything from an older generation is dropped. A new generation starts every series at `WarmingUp`.
+- **Engine side.** `trait NetmonOps` in `tl-engine/src/netmon/mod.rs`, shaped like `PrivilegedOps` (ADR-006). The real implementation owns one dedicated thread for the collector's whole life. That thread spawns the child, so the parent death signal tracks a thread that lives as long as the engine, and it does all I/O with `poll` timeouts, never a blocking read that needs cancelling. It hands complete samples to the engine through a slot of one. A second short loop on the same thread drains stderr into a 64-line, 16 KiB ring (as ADR-018 does for ssh) and logs at most one line per second. Tests use a fake `NetmonOps`. The engine itself contains no eBPF code.
 
 **Sampling** (adds a row to the ADR-008 schedule).
 
 | Source | Visible rate | Not visible, recording off | Not visible, recording on | Not visible, device history on |
 |---|---|---|---|---|
-| tl-netmon sample (network bytes, storage operations) | `processes.interval_ms`, in the same tick as the process sweep, only while demanded | off, unless `graph_targets` needs it (PROC-093) | open question 5 | off |
+| tl-netmon sample (network bytes, storage events) | `processes.interval_ms`, in the same tick as the process sweep, only while demanded | off, unless `graph_targets` needs it (PROC-093) | open question 6 | off |
 
-Counters are cumulative inside `tl-netmon`, so a lost frame loses no data. The engine applies the ADR-008 counter rules per key: `cur < prev` is a reset, it never subtracts across an identity change, and the first sample after a start gives `WarmingUp`.
+The engine applies the ADR-008 counter rules per key: `cur < prev` is a reset, and it never subtracts across an identity change. It also sets a new baseline, with `WarmingUp` for one interval, in four more cases: a new collector generation, a `Configure` change of that part, any interval in which the part was off, and a switch of a Network cell between `tl-netmon` and `sock_diag`. A rate is never computed across an unsampled gap or across two sources.
 
 **What the cells show.**
 - Network, Network send and Network receive on process rows use `tl-netmon` rates while it runs with network available. Otherwise they use the P1 `sock_diag` attribution, unchanged.
-- Disk reads, Disk writes and their deltas on process rows use `tl-netmon` counts while it runs with storage available. Otherwise they stay `Unsupported` with today's tooltip. When `tl-netmon` is installed but off, the tooltip also says how to turn it on.
+- Disk reads, Disk writes and their deltas on process rows use `tl-netmon` events while it runs with storage available. Otherwise they stay `Unsupported` with today's tooltip. When `tl-netmon` is installed but not running, the tooltip also offers the interactive start.
 - App and group rows keep their PROC-031 and PROC-032 rules (`io.stat` for disk operations). The Network header total keeps the rule that it includes unattributed traffic.
 - New header and tooltip strings come with the P4 UI bead (open question 1). Nothing shows zero for missing data.
 
-**State and failure.** `HealthSnapshot.netmon: NetmonState` with `NotInstalled`, `Off`, `Starting`, `Running { net: Availability, block: Availability }`, `Cancelled` (pkexec 126), `NotAuthorized` (pkexec 127) and `Failed(Arc<str>)` (start failure, `InitFailed`, protocol error, unexpected exit). In every state except `Running` the cells fall back as above. The failure is logged once on the new target `tasklens::netmon` (amends the ADR-015 target list). `tl-netmon`'s stderr lines go into the engine log on that target.
+**State and failure.** `HealthSnapshot.netmon: NetmonState` with `NotInstalled`, `Off`, `NeedsAuth`, `Starting`, `Running { net: Availability, block: Availability }`, `Cancelled`, `NotAuthorized` and `Failed(Arc<str>)` (exit code and reason). In every state except `Running` the cells fall back as above. The failure is logged once on the new target `tasklens::netmon` (amends the ADR-015 target list).
 
-**Privacy** (ADR-015). Only counts per `(pid, start_ticks)` cross the pipe. No packet contents, addresses, ports, file names, devices, sectors, `comm` or command lines are read by the programs, sent or logged. `tl-netmon` logs only failure kinds and the `full` counter. Turning the setting on shows the authenticated user the byte and operation counts of other users' processes, the same reach `tl-helper` gives for `/proc/<pid>/io`.
+**Privacy** (ADR-015). Only counts per `(pid, start_ticks)` cross the pipe. No packet contents, addresses, ports, file names, devices, sectors, `comm` or command lines are read by the programs, sent or logged. `tl-netmon` logs only failure kinds, errnos and the first saturation. Turning the setting on shows the authenticated user the byte and event counts of other users' processes, the same reach `tl-helper` gives for `/proc/<pid>/io`.
 
 **Overhead** (ADR-014).
 - `tl-netmon`'s user CPU is measured like `tl-gpu-probe` (`/proc/<pid>/stat`, reported separately). Engine plus `tl-netmon` together must stay inside the collection gates: at most 3.5% of one core with the Processes tab visible, at most 2% with the Performance tab visible.
-- Hook time in the kernel shows up in no process's CPU time. A bench run measures it with `kernel.bpf_stats_enabled` (`run_time_ns` divided by `run_cnt` per program) and reports it. It has no gate until the first measurement (open question 6). The per-CPU map keeps atomics off the hot path.
+- Hook time runs in the context of the task that triggered the hook, so it shows up as that task's system CPU, not `tl-netmon`'s **[inferred]**. It is measured with `kernel.bpf_stats_enabled`: the change in `run_time_ns` summed over all programs, divided by wall time, gives the share of one core. An average per call is not used as the total.
+- The bench runs the `table-2000` scene with a fixed load: a loopback TCP transfer and a direct-I/O read loop, sizes set by the prototype. It runs three cases: no collector, collector with parts disabled, collector with both parts on. It reports hook time, the extra system CPU of the load processes, and kernel memory of the maps (`memlock` in `/proc/<tl-netmon pid>/fdinfo/<map fd>`).
+- Gate: the prototype proposes a limit for total hook time, and the shipping bead cannot close until the owner sets it (open question 7).
 
-**Remote hosts** (ADR-018). The collector runs on the host whose engine needs it, and the setting is that host's setting. Counts reach remote windows in snapshot rows like any other column. A prompt on a remote host needs someone at that screen, or remote admin there, which already covers `.netmon`. A window never starts a collector for another host.
+**Remote hosts** (ADR-018). The collector runs on the host whose engine needs it, and the setting is that host's setting. Counts reach remote windows in snapshot rows like any other column. Remote starts are automatic only (Starting and authorisation). A window never starts a collector for another host.
 
 ### Consequences
 
-- Process rows get real Disk reads and Disk writes, and Network counts every IP protocol and every user's processes while the collector runs.
-- One more privileged binary. After attach it runs as the invoking user with CAP_BPF only, takes no paths and runs no programs.
-- No fourth polkit action. The prompt text of D-019 now also covers storage operations.
+- Process rows get Disk reads and Disk writes as issued-request events, and Network counts TCP and UDP for every user's processes while the collector runs, with the exceptions the prototype lists.
+- One more privileged binary. After start it runs as the invoking user with CAP_BPF at most, behind a seccomp filter if CAP_BPF stays, takes no paths and runs no programs.
+- No fourth polkit action. The prompt text of D-019 still says "network monitor" (open question 8).
 - Building the workspace with `tl-netmon` needs `clang`.
-- Attribution limits are permanent and shown in tooltips: writeback counts for the flusher, page cache hits are invisible, network counts payload bytes.
+- Attribution limits are permanent and shown in tooltips: storage events follow the dispatching task, writeback rarely counts for the writer, stacked devices count per layer, network counts payload bytes.
 - The engine stays free of eBPF code and of `bpf()` calls.
+- No collector work starts before the prototype bead and its ADR amendment.
 
 ### Rejected alternatives
 
@@ -3911,36 +3947,42 @@ Counters are cumulative inside `tl-netmon`, so a lost frame loses no data. The e
 - **libbpf-rs.** Rejected: it links the libbpf C library with libelf and zlib, and its skeleton generator adds a second build step. aya needs none of these.
 - **Kernel programs in Rust (aya-ebpf).** Rejected: they need nightly Rust and `bpf-linker`, outside ADR-002.
 - **`cgroup_skb` for network.** Rejected: it runs per packet, ingress runs in softirq where the current task is not the receiver, it attributes to a cgroup, not a process, and it needs CAP_NET_ADMIN **[inferred]**.
+- **A per-CPU hash.** Rejected: 65,536 entries × 32 B × possible CPUs is 64 MiB on the owner machine (32 CPUs) and 256 MiB at 128 CPUs. The shared hash with atomic adds costs a few MiB; contention is measured by the prototype.
+- **Cleanup by reading `/proc/<pid>`.** Rejected: `hidepid` and permission errors look like exits. The exit hook gives the kernel's own answer.
+- **Changed-only samples without acknowledgement.** Rejected: a lost sample followed by no activity would never be resent.
 - **A systemd system unit with `AmbientCapabilities`.** Rejected: a root-started service would run for a feature that is off by default. It would need its own check of which user may read the counts. It would also bypass the reserved polkit action and the D-019 prompt.
 - **File capabilities on `tl-netmon`.** Rejected: any local user could run it and read every process's counts without authenticating. PERF-107 rejects capabilities on a tool for the same reason.
-- **Passing the map file descriptor to the engine.** Rejected: the engine would need eBPF code and, with `unprivileged_bpf_disabled` set, CAP_BPF.
+- **Passing the map file descriptor to the engine.** Rejected: the engine would need eBPF code and possibly CAP_BPF.
 - **Load a program only when its part is turned on.** Rejected: loading needs CAP_BPF and CAP_PERFMON, so the process would keep both for its whole life.
 
 ### Verification
 
 - tl-model: `netmon_proto` round trips; proptest that arbitrary bytes never make the decoder panic; a version mismatch is refused.
-- tl-netmon unit tests with a fake map reader: `start_ticks` conversion, changed-only entries, splitting at 1 MiB with `last`, deletion of gone processes only after one report, the `full` counter.
+- tl-netmon unit tests with a fake map reader:
+  - `start_ticks` conversion; samples carry only entries that differ from the acknowledged baseline; an unacknowledged sample is resent in the next; splitting into parts;
+  - deletion only after an acknowledged `exited` entry; saturation marks rows with no entry; the exit-code table.
+- tl-netmon unit tests of the drop sequence against a fake syscall layer: the step order, and exit with the right code when any single step fails.
 - tl-engine LabRuntime tests with a fake `NetmonOps`:
-  - no start without the setting or without demand; `Configure` on demand changes; `Shutdown` 300 s after demand ends;
-  - pkexec 126 and 127 map to `Cancelled` and `NotAuthorized`; no restart after an unexpected exit;
-  - a counter reset gives `WarmingUp`; the same pid with a new `start_ticks` is never subtracted; a key not in the table is dropped.
-- tl-ui-procs: FakeEngine rows for every `NetmonState`: disk-operation cells stay `Unsupported` with the tooltip unless `Running`, and Network falls back to TCP attribution.
+  - automatic start only with the setting on, demand present and polkit answering authorized; otherwise `NeedsAuth`; no automatic start after a cancel; a remote session never causes an interactive start;
+  - `Configure` on demand changes; `Shutdown` 300 s after demand ends; every deadline; an incomplete or out-of-order sample gives `Failed`; an older generation is dropped;
+  - 126 and 127 before `Hello` map to `Cancelled` and `NotAuthorized`, after `Hello` to `Failed`;
+  - `WarmingUp` after a reset, a new generation, a part toggle and a source switch; the same pid with a new `start_ticks` is never subtracted; a key not in the table is dropped.
+- tl-ui-procs: FakeEngine rows for every `NetmonState`: disk-event cells stay `Unsupported` with the tooltip unless `Running`, and Network falls back to TCP attribution.
 - Real-system tests, `#[ignore]`, owner machine, in `crates/tl-netmon/tests/real_netmon.rs` and `crates/tl-engine/tests/real_netmon.rs`. Like `tasklens-qfx.14`, each skips with a printed reason unless the installed binary, `/usr/bin/pkexec` and the installed policy exist:
-  - Two child processes send 10 MiB over loopback TCP and 1 MiB over loopback UDP. Each child's counts are at least the payload it sent and received.
-  - `dd` with `oflag=direct bs=1M count=16` to a file on a real disk: at least 16 write operations for `dd`; the same with `iflag=direct` for reads.
-  - A buffered `dd` write followed by `sync`: the writes count for a flush kworker, not `dd`. This documents the writeback limit.
-  - `start_ticks` from `tl-netmon` equals field 22 of `/proc/<pid>/stat` for a spawned child.
-  - After attach, `/proc/<tl-netmon pid>/status` shows the invoking user's uid, `CapEff` with CAP_BPF only, and `NoNewPrivs: 1`.
-  - After the engine is killed, `tl-netmon` exits and `bpftool prog list` shows none of its programs.
-- Bench: the ADR-014 collection gates with Network and Disk reads columns shown and `tl-netmon` running, plus the `bpf_stats` report.
+  - The network coverage matrix from prototype item 1, each path with its expected result.
+  - Storage on a controlled device: a `null_blk` device with known queue limits (the test loads the module and removes it after). 16 direct reads of 1 MiB give the event count that the device's `max_sectors_kb` predicts; the same for direct writes. No assertion on page-cache or writeback attribution, which depends on the system; the test only records where buffered writes were counted.
+  - The identity self-check passes, and `start_ticks` equals field 22 of `/proc/<pid>/stat` for a spawned child.
+  - After start, `/proc/<tl-netmon pid>/status` shows the invoking user's uid, gid and empty groups, `CapPrm` and `CapEff` with CAP_BPF only (or empty), `CapBnd` CAP_BPF only, empty `CapInh` and `CapAmb`, and `NoNewPrivs: 1`.
+  - After the engine is killed, `tl-netmon` exits within 2 s and `bpftool prog list` shows none of its programs.
+- Bench: the three cases under Overhead, against the ADR-014 gates and the hook-time gate.
 
 ### Open questions for the owner
 
-1. **The switch.** Where exact counting is turned on, and its wording. Candidates: the "Per-process network" row of Additional setup (PERF-107, text only today) or Settings > Privileges. The new header and tooltip strings belong here too. These are spec changes.
-2. **Network attach points.** Which kernel send and receive functions to hook, and fexit or kprobe for each. Default: the first P4 bead picks them on kernel 7.3 and checks byte counts against a known transfer.
-3. **Unit for Disk reads and Disk writes.** PROC-031 names `block:block_rq_issue`, which counts requests after merging in the issuing task. A bio-level tracepoint (`block:block_bio_queue`) would count the same unit as `io.stat` on app rows and fire in the submitting task, which attributes better **[inferred]**. Default: `block_rq_issue` as the spec says; changing it needs a PROC-031 amendment.
-4. **CAP_BPF after attach.** Whether the target kernels allow map reads on a held file descriptor without CAP_BPF when `unprivileged_bpf_disabled` is set. Default: keep CAP_BPF; drop it if a real-system test shows it is not needed.
-5. **Process history recording** (ADR-012). Whether recording keeps `tl-netmon` running while no window shows these columns. Default: no.
-6. **Kernel overhead gate.** A limit for hook time in the kernel. Default: report only until the first measurement.
-7. **Prompt text and name.** D-019's prompt says "network monitor", and the binary is named `tl-netmon`, but it now also counts storage operations. Default: keep both; a rewording is a D change.
-8. **Polkit action count.** ADR-006, R-002 and `docs/spec/merged/sys-app.md` say tasklens has exactly three actions. ADR-018 and the shipped policy file have a fourth, `io.github.oysteinkrog.tasklens.smart` **[verified]**. This ADR adds none, but the documents disagree and need one answer.
+1. **The switch.** Where exact counting is turned on, and its wording. Candidates: the "Per-process network" row of Additional setup (PERF-107, text only today) or Settings > Privileges. The new header and tooltip strings and the interactive start link belong here too. These are spec changes.
+2. **Network coverage.** Which kernel hooks, and whether the column may be called exact. Default: the prototype bead decides the hooks and lists uncounted paths; the column says "TCP and UDP at the socket layer" until coverage is shown.
+3. **Unit for Disk reads and Disk writes.** PROC-031 names `block:block_rq_issue`, which counts issued requests in the dispatching task. A bio-level tracepoint (`block:block_bio_queue`) would count the same unit as `io.stat` on app rows and fire in the submitting task, which attributes better **[inferred]**. Default: `block_rq_issue` as the spec says; changing it needs a PROC-031 amendment. A related choice: count every stacked layer (default) or only whole physical disks.
+4. **Oldest supported kernel.** Which kernel the prototype must test besides 7.3 and the Arch LTS kernel. Default: those two only.
+5. **Seccomp.** If CAP_BPF must stay: a seccomp crate (for example `seccompiler`) or raw `prctl` code in an `unsafe` file. Either is an ADR-001 change. Default: `seccompiler`, if its dependency closure passes check-deps.
+6. **Process history recording** (ADR-012). Whether recording keeps `tl-netmon` running while no window shows these columns. Default: no.
+7. **Hook-time gate.** The limit for total hook time per core. Default: the prototype proposes a value; the shipping bead cannot close without the owner's number.
+8. **Prompt text and polkit action count.** D-019's prompt says "network monitor", and the binary is named `tl-netmon`, but it now also counts storage events. Separately, ADR-006, R-002 and `docs/spec/merged/sys-app.md` say tasklens has exactly three actions, while ADR-018 and the shipped policy file have a fourth, `io.github.oysteinkrog.tasklens.smart` **[verified]**. This ADR adds no action. Both must be settled before storage collection ships.
