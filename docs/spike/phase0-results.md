@@ -2781,7 +2781,7 @@ Pending tasklens-wlf.23.
 
 ## polkit error names (U-39)
 
-Partly recorded. The dismissed and denied cases still need the owner at the desk (tasklens-wlf.24).
+Recorded 2026-11-13 on the office desktop. All three cases are below. Settled: U-39 confirmed (both prompt outcomes give the same error).
 
 No-agent case (step 4), recorded 2026-11-13 on the office desktop (systemd 262.2-1-arch, polkit 128).
 Before the call, `pkcheck --action-id org.freedesktop.systemd1.manage-units` gave `auth_admin_keep`
@@ -2793,10 +2793,18 @@ for the normal user, so a call that may not prompt cannot restart the unit. Test
 - The same call through `gdbus call --system` (no interactive flag) shows the error name:
   `org.freedesktop.DBus.Error.InteractiveAuthorizationRequired`, with the same message.
 
-Dismissed case (step 2): pending. The owner names the unit and presses Cancel on the KDE prompt.
+Dismissed and denied cases (steps 2 and 3), recorded 2026-11-13 12:43 to 12:46 by the leader session, same unit. The unit was not restarted in any run (`ExecMainStartTimestamp` stayed empty). No prompt reached the KDE agent on the desktop: each run registered its own agent for the calling process only (`RegisterAuthenticationAgent` with a `unix-process` subject), and the call `exec`s in that same process.
 
-Denied case (step 3): pending. Do not script wrong passwords on the owner's account:
-pam_faillock can lock it after 3 failures. Use the owner at the desk or a non-admin test user.
+Call: `gdbus call --system -i --dest org.freedesktop.systemd1 --object-path /org/freedesktop/systemd1 --method org.freedesktop.systemd1.Manager.RestartUnit systemd-tmpfiles-clean.service replace`.
+
+| Case | Agent behaviour | Error name | Message |
+|---|---|---|---|
+| Dismissed | A small agent answers `BeginAuthentication` with `org.freedesktop.PolicyKit1.Error.Cancelled`, which is what a desktop agent returns when the user presses Cancel. | `org.freedesktop.DBus.Error.AccessDenied` | `Permission denied` |
+| Denied | `pkttyagent --process` with one wrong password. | `org.freedesktop.DBus.Error.AccessDenied` | `Permission denied` |
+
+polkitd logged both runs the same way ("FAILED to authenticate"). Not tested: pressing Cancel in the real KDE dialog. The dismissed row assumes the KDE agent returns the same `Cancelled` error as the test agent.
+
+pam_faillock counted the wrong-password run and an earlier `pkttyagent` run that ended on EOF as two `polkit-1` failures. Both records were cleared at once with `sudo faillock --user oystein --reset`. Do not script wrong passwords on the owner's account again: three failures lock it.
 
 ## Unverified items settled in phase 0
 
@@ -2807,6 +2815,7 @@ pam_faillock can lock it after 3 failures. Use the owner at the desk or a non-ad
 - U-9 not needed: the soak passed without the patch.
 - U-10: failed: both live gates (Performance 2%, Processes 3.5%). The fixture part is settled by R-286 (18.68 ms against 20 ms). Live collection cost is in "Live collection cost (tasklens-wlf.26, 2026-11-13)". This is engine work (ADR-014 decision rule step 4): no UI fallback, E01-A2 is not blocked.
 - U-36: pending tasklens-wlf.23.
+- U-39: confirmed: both cases return `org.freedesktop.DBus.Error.AccessDenied` ("Permission denied"). systemd D-Bus paths keep "<failure text>: not authorized" for dismissed and denied (R-117). See "polkit error names (U-39)".
 - U-39: pending tasklens-wlf.24.
 - U-47 not settled: `perf-cpu` p99 is 15.71 ms (hidden nested KWin, 60 Hz, wlf.45 rerun), against
   a gate of 2.0 ms. FAIL, not isolated: the CPU page has no switch that holds the per-core labels
