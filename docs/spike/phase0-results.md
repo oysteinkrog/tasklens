@@ -2849,7 +2849,6 @@ pam_faillock counted the wrong-password run and an earlier `pkttyagent` run that
 - U-10: failed: both live gates (Performance 2%, Processes 3.5%). The fixture part is settled by R-286 (18.68 ms against 20 ms). Live collection cost is in "Live collection cost (tasklens-wlf.26, 2026-11-13)". This is engine work (ADR-014 decision rule step 4): no UI fallback, E01-A2 is not blocked.
 - U-36: confirmed in a nested KWin 6.8.2: checks 1 to 6 pass with client-side decorations. The default has been `"server"` since D-035, so no default change follows. The owner's desktop run is still open.
 - U-39: confirmed: both cases return `org.freedesktop.DBus.Error.AccessDenied` ("Permission denied"). systemd D-Bus paths keep "<failure text>: not authorized" for dismissed and denied (R-117). See "polkit error names (U-39)".
-- U-39: pending tasklens-wlf.24.
 - U-47 not settled: `perf-cpu` p99 is 15.71 ms (hidden nested KWin, 60 Hz, wlf.45 rerun), against
   a gate of 2.0 ms. FAIL, not isolated: the CPU page has no switch that holds the per-core labels
   static. The wlf.28 profile puts the cost in chart paths and GPUI copies (wlf.45). The labels
@@ -3594,7 +3593,7 @@ significant figures (counts round up to whole frames).
 | zed#64499 soak | 0 stalls over 250 ms in 10 min | 0 (wlf.20) | PASS | none |
 | Bridge: 10 Hz samples arrive | every run | 3 of 3 counted runs (wlf.42) | PASS | none |
 | Bridge: wake-to-render latency p99 | 20 ms | 35 ms (wlf.42, upper end of 25 to 35 ms) | FAIL | 44 ms |
-| Manual checklist (Wayland behaviour) | not set | pending tasklens-wlf.23 | pending | none |
+| Manual checklist (Wayland behaviour) | not set | 13 of 16 rows PASS in a nested KWin 6.8.2, rows 10 to 12 not run (wlf.23) | PASS (rows 10 to 12 open) | none |
 
 Decision: pass with relaxed gates (owner, 2026-11-06). GPUI is confirmed; production beads proceed.
 
