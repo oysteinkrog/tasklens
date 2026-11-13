@@ -2438,6 +2438,68 @@ Reading:
   installs each one (`tl-engine-0` and the main thread together: 26 to 28 ticks per minute).
   I did not look into how much of that work a hidden window needs.
 
+### Minimized CPU after the kernel thread status stagger (tasklens-f3p5m, 2026-11-13)
+
+Result: minimized CPU was a median 1.17% of one core after the change, against 1.20% before
+it in the same session. That is FAIL against the original limit of 0.3% and PASS against the
+relaxed limit of 1.5%. The change saves about 2 ticks per minute (0.03% of one core), all of
+it in `tl-src-Processes`.
+
+The change is `8c63740fe`, a re-apply of `7c7949f03`. In memory-only mode the memory group
+sweep (D-036) read `status` for every pid every 10 s. A kernel thread's `status` has no
+memory lines and its uid is 0, so the sweep now reads it as R-286 sets for a full sweep: on
+first sight, when a status-only field is demanded, or for the pid's tenth. A pid that was a
+kernel thread in the last sweep opens no anchor before `stat`. When its `status` is due after
+all, a second read of the kept `stat` fd checks that the pid still names the same process.
+
+Within D-036: the memory groups use RssAnon and the executable path. A kernel thread has
+neither, so the groups and their series get the same values. Each sweep still reads `stat`
+for every pid, so the CPU baseline of D-042 is unchanged. Tests:
+`sweep_mem_only_reads_kernel_thread_status_staggered` (new), and the rest of
+`tl-collect --test fixture_process`, 177 passed. The owner-machine budget tests also pass:
+`mem_only_sweep_within_budget` (median 17.0 ms) and `mem_only_cgroup_cpu_within_budget`
+(median 21.4 ms).
+
+Setup: as in the tasklens-dlyfu section above, with session `f3p`. "Before" is
+`cargo build --locked --profile perf -p tl-app --features bench` at `2f7a298a9`. "After" is
+the same command at `8c63740fe`. The machine had 1,356 pids, 533 of them kernel threads.
+Runs and scripts: `/var/tmp/claude/f3p5m/`. The `WM_STATE` that `mini.sh` prints read
+`Normal` in these runs, because it reads the state right after `windowminimize`. A read
+during the count showed `Iconic` and `_NET_WM_STATE_HIDDEN`.
+
+The before value is new. The bead asked to re-measure it at HEAD without the change, because
+the 1.28% of tasklens-dlyfu was taken during another session's large file copy. Before is now
+1.20%. I did not check whether the copy or the commits merged since 2026-11-10 cause the
+difference.
+
+#### Gate runs
+
+| Run | Start | Load at start (1, 5, 15 min) | Ticks in 60 s | CPU | `tl-src-Processes` ticks |
+|---|---|---|---|---|---|
+| before 1 | 02:10:04 | 4.45, 7.67, 7.20 | 71 | 1.18% | 27 |
+| after 1 | 02:11:24 | 2.40, 6.28, 6.75 | 69 | 1.15% | 24 |
+| before 2 | 02:12:44 | 2.18, 5.35, 6.38 | 78 | 1.30% | 25 |
+| after 2 | 02:14:05 | 1.79, 4.51, 6.00 | 75 | 1.25% | 24 |
+| before 3 | 02:15:25 | 2.10, 3.92, 5.67 | 72 | 1.20% | 26 |
+| after 3 | 02:16:45 | 3.03, 3.85, 5.50 | 70 | 1.17% | 24 |
+| Median before | | | 72 | 1.20% | 26 |
+| Median after | | | 70 | 1.17% | 24 |
+
+All 6 runs counted (1- and 5-minute load at most 8 at the start, 1-minute load at most 8 at
+the end). The other threads were steady: `tl-engine-0` 16 to 18 ticks, the main thread 10 to
+12, `tl-src-Net` 5, `tl-src-Disk` 2 to 3, `tl-src-Cpu` 1 to 2. `tl-src-Sensors` varied from
+2 to 8 ticks in both binaries, as in tasklens-dlyfu.
+
+| Gate | Original limit | Relaxed limit | Median after | Original | Relaxed |
+|---|---|---|---|---|---|
+| Process CPU, minimized, recording off | 0.3% | 1.5% | 1.17% | FAIL | PASS |
+
+Reading:
+- The saving is small. A kernel thread's `status` is short, and the sweep still opens and
+  reads `stat` for all 533 kernel threads every 10 s. The sweep thread at 24 ticks per
+  minute is still above the 18 ticks that the whole process may use under 0.3%.
+- I did not profile the after binary.
+
 ### First frame after the API versions probe change (tasklens-fwj1i, 2026-11-12)
 
 Result: the warm first frame was a median 470 ms after the change, against 560 ms before it in
