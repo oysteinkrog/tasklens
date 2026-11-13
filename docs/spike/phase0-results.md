@@ -2781,7 +2781,22 @@ Pending tasklens-wlf.23.
 
 ## polkit error names (U-39)
 
-Pending tasklens-wlf.24.
+Partly recorded. The dismissed and denied cases still need the owner at the desk (tasklens-wlf.24).
+
+No-agent case (step 4), recorded 2026-11-13 on the office desktop (systemd 262.2-1-arch, polkit 128).
+Before the call, `pkcheck --action-id org.freedesktop.systemd1.manage-units` gave `auth_admin_keep`
+for the normal user, so a call that may not prompt cannot restart the unit. Test unit:
+`systemd-tmpfiles-clean.service`, a oneshot that is harmless to run. It stayed inactive.
+
+- Command: `busctl --system call --allow-interactive-authorization=no org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager RestartUnit ss systemd-tmpfiles-clean.service replace`
+- busctl prints only the message: `Call failed: Access denied as the requested operation requires interactive authentication. However, interactive authentication has not been enabled by the calling program.` (exit 1).
+- The same call through `gdbus call --system` (no interactive flag) shows the error name:
+  `org.freedesktop.DBus.Error.InteractiveAuthorizationRequired`, with the same message.
+
+Dismissed case (step 2): pending. The owner names the unit and presses Cancel on the KDE prompt.
+
+Denied case (step 3): pending. Do not script wrong passwords on the owner's account:
+pam_faillock can lock it after 3 failures. Use the owner at the desk or a non-admin test user.
 
 ## Unverified items settled in phase 0
 
