@@ -1519,6 +1519,71 @@ fn sweep_mem_only_reads_stat_and_status() {
     assert_eq!(io_reads(), io0 + 1);
 }
 
+/// tasklens-dlyfu: in memory-only mode a kernel thread's `status` (no memory lines, uid 0) is
+/// read as R-286 sets for a full sweep: on first sight and for its tenth, not every sweep. A pid
+/// that was a kernel thread and now names a user process gets its `status` read at once.
+#[test]
+fn sweep_mem_only_reads_kernel_thread_status_staggered() {
+    let (_tmp, root) = sweep_root();
+    let kdir = root.proc_path("2");
+    fs::create_dir_all(&kdir).expect("create proc dir");
+    for name in ["stat", "status"] {
+        let rel = format!("proc/2/{name}");
+        fs::write(kdir.join(name), fixture_bytes("minimal-vm", &rel)).expect("copy file");
+    }
+    let mut core = SweepCore::new(root.clone());
+    core.set_mem_only(true);
+    let ctx = SweepCtx {
+        want_status_fields: false,
+        ..sweep_ctx(false)
+    };
+    let mut out = Vec::new();
+    let pid2 = |out: &[SweptProc]| out.iter().find(|p| p.key.pid == 2).cloned().expect("pid 2");
+
+    // Sweep 1: first sight of both. Sweep 2 and 12 are pid 2's tenth (2 % 10). The user process
+    // 4201 reads status every sweep.
+    let mut kernel_key = None;
+    for sweep in 1..=12u64 {
+        let before = status_reads();
+        core.sweep_core(&ctx, &mut out);
+        assert_eq!(out.len(), 2);
+        let k = pid2(&out);
+        let fresh = sweep == 1 || sweep % 10 == 2;
+        assert_eq!(k.status_fresh, fresh, "sweep {sweep}");
+        assert_eq!(
+            status_reads(),
+            before + 1 + u32::from(fresh),
+            "sweep {sweep}"
+        );
+        assert_eq!(*kernel_key.get_or_insert(k.key), k.key);
+        assert_eq!(k.status.uid[0], 0);
+        assert_eq!(k.validity.get(ProcessField::RssAnon), Validity::Unsupported);
+        let user = out.iter().find(|p| p.key.pid == 4201).expect("pid 4201");
+        assert!(user.status_fresh);
+        assert_eq!(user.rss_anon_bytes, 1234 * 1024);
+    }
+
+    // Pid 2 now names a user process: a new key, its status read in this sweep.
+    for name in ["stat", "status"] {
+        let rel = format!("proc/4201/{name}");
+        fs::write(kdir.join(name), fixture_bytes("process-edge", &rel)).expect("copy file");
+    }
+    let before = status_reads();
+    core.sweep_core(&ctx, &mut out);
+    let p = pid2(&out);
+    assert_ne!(Some(p.key), kernel_key);
+    assert!(p.status_fresh);
+    assert_eq!(status_reads(), before + 2);
+    assert_eq!(p.rss_anon_bytes, 1234 * 1024);
+    assert_eq!(p.status.uid[0], 1000);
+    assert_eq!(p.validity.get(ProcessField::RssAnon), Validity::Valid);
+
+    // Off again: every pid reads statm, and status only for its tenth as before.
+    core.set_mem_only(false);
+    core.sweep_core(&ctx, &mut out);
+    assert_eq!(out.len(), 2);
+}
+
 sweep_clock!(mem_only_cpu_clock);
 
 /// D-042, UI-PRF-062 "Sweep rate": memory-only mode keeps each pid's utime and stime baseline
