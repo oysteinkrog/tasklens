@@ -47,6 +47,8 @@ const IDLE_WAIT: Duration = Duration::from_secs(305);
 const IDLE_SLACK: Duration = Duration::from_secs(10);
 /// The bead's limit for `EndHelperSession`.
 const END_LIMIT: Duration = Duration::from_secs(1);
+/// How long the engine may take to probe the helper install after start (`Missing` until then).
+const PROBE_WAIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(10);
 
 /// One line to stderr, past libtest's capture.
@@ -118,6 +120,8 @@ impl Rig {
 
     /// Asks for the helper and waits for the owner to authenticate.
     fn unlock(&self) {
+        // Right after start the install probe has not run yet and the state is `Missing`.
+        self.wait_for(PROBE_WAIT, |r| r.helper() != HelperState::Missing);
         let before = self.helper();
         assert_eq!(before, HelperState::Locked, "helper before the start");
         say("a polkit prompt opens now: authenticate as an administrator");
@@ -292,6 +296,7 @@ fn dismissed_prompt_locks_again() {
         return;
     }
     let rig = Rig::start("dismiss", Demand::default());
+    rig.wait_for(PROBE_WAIT, |r| r.helper() != HelperState::Missing);
     assert_eq!(rig.helper(), HelperState::Locked, "helper before the start");
     say("a polkit prompt opens now: press Cancel");
     rig.send(Command::StartHelperSession);
