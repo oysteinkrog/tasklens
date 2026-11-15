@@ -631,14 +631,14 @@ pub fn bind_keys_performance(cx: &mut App) {
     let mut bindings = Vec::new();
     for i in 0..8u8 {
         bindings.push(KeyBinding::new(
-            &format!("f{}", i + 1),
+            format!("f{}", i + 1).leak(),
             PerfSelectVisibleDevice { index: i },
             perf,
         ));
     }
     for i in 1..=6 {
-        bindings.push(KeyBinding::new(&format!("ctrl-{i}"), NoOp, summary));
-        bindings.push(KeyBinding::new(&format!("alt-{i}"), NoOp, summary));
+        bindings.push(KeyBinding::new(format!("ctrl-{i}").leak(), NoOp, summary));
+        bindings.push(KeyBinding::new(format!("alt-{i}").leak(), NoOp, summary));
     }
     cx.bind_keys(bindings);
 

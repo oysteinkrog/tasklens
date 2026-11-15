@@ -785,7 +785,7 @@ pub fn build_rows(cx: &App, debug: bool) -> Vec<ShortcutRow> {
         let Some(stroke) = binding.keystrokes().first() else {
             continue;
         };
-        let stroke = stroke.inner().unparse();
+        let stroke = stroke.inner().unparse(gpui_kit::gpui::OperatingSystem::Linux);
         let hit = SHORTCUT_DOCS.iter().position(|d| {
             d.context == predicate
                 && d.actions.contains(&name)

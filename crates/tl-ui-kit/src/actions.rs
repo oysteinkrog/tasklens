@@ -205,15 +205,18 @@ pub fn bind_keys_global(cx: &mut App) {
     window_frame::bind_keys(cx);
 
     let global = Some(GLOBAL_CONTEXT);
+    // KeyBinding::new takes &'static str in GPUI Kit 0.9.
+    const CTRL: [&str; 9] = ["ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8", "ctrl-9"];
+    const ALT: [&str; 6] = ["alt-1", "alt-2", "alt-3", "alt-4", "alt-5", "alt-6"];
     let mut bindings = Vec::new();
     for i in 0..6 {
         bindings.push(KeyBinding::new(
-            &format!("ctrl-{}", i + 1),
+            CTRL[i],
             SelectTab(i),
             global,
         ));
         bindings.push(KeyBinding::new(
-            &format!("alt-{}", i + 1),
+            ALT[i],
             SelectTab(i),
             global,
         ));
@@ -222,7 +225,7 @@ pub fn bind_keys_global(cx: &mut App) {
     let hosts = Some(HOSTS_CONTEXT);
     for i in 0..9 {
         bindings.push(KeyBinding::new(
-            &format!("ctrl-{}", i + 1),
+            CTRL[i],
             SelectHost(i),
             hosts,
         ));

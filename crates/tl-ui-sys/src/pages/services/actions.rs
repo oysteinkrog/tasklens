@@ -165,7 +165,7 @@ pub fn bind_keys_services(cx: &mut App) {
     let tabs: Vec<KeyBinding> = (1..=5u8)
         .map(|number| {
             KeyBinding::new(
-                &format!("ctrl-{number}"),
+                format!("ctrl-{number}").leak(),
                 ServicePropsSelectTab { index: number - 1 },
                 props,
             )

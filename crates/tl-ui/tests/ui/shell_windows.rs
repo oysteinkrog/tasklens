@@ -933,7 +933,7 @@ fn shortcuts_cover_all_bindings(cx: &mut TestAppContext) {
                 .iter()
                 .filter(|r| r.binding_indices().contains(&ix))
                 .count();
-            let stroke = b.keystrokes()[0].inner().unparse();
+            let stroke = b.keystrokes()[0].inner().unparse(gpui_kit::gpui::OperatingSystem::Linux);
             if NOT_IN_TABLE_B.contains(&(predicate.as_str(), name)) {
                 assert_eq!(shown, 0, "{predicate} {stroke} {name}");
                 continue;

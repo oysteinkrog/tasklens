@@ -38,7 +38,7 @@ publish = false
 [workspace.dependencies]
 # Runtime and UI (exact pins; upgrades only through an ADR change)
 asupersync = { version = "=0.6.2", default-features = false, features = ["proc-macros"] }
-gpui-kit   = { version = "=0.7.0" }                       # default features: component, assets
+gpui-kit   = { version = "=0.9.0", features = ["gpui-fast"] }   # spike tasklens-yivhe
 nvml-wrapper = { version = "=0.13.0", default-features = false }
 ash        = { version = "=0.38.0", default-features = false }   # tl-gpu-probe --api-versions (ADR-007)
 khronos-egl = { version = "=6.0.0", default-features = false }   # tl-gpu-probe --api-versions (ADR-007)
@@ -123,11 +123,7 @@ tl-history = { path = "crates/tl-history" }
 tl-remote  = { path = "crates/tl-remote" }
 tl-tray    = { path = "crates/tl-tray" }
 
-# Local GPUI patches (D-043, ADR-014). Source: crates.io gpui-pre and gpui-pre-wgpu 0.3.7,
-# changes listed in third_party/gpui-pre/PATCHES.md.
-[patch.crates-io]
-gpui-pre = { path = "third_party/gpui-pre" }
-gpui-pre-wgpu = { path = "third_party/gpui-pre-wgpu" }
+# spike tasklens-yivhe: local gpui-pre patches dropped
 
 [profile.dev]
 opt-level = 1                 # workspace crates; at 0 the overview tests run 1.6x slower (ADR-002, CS-H1)

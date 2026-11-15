@@ -207,7 +207,7 @@ pub fn bind_keys_process_windows(cx: &mut App) {
     let search_table = Some(table_ctx.as_str());
 
     let tabs: Vec<KeyBinding> = (1..=7u8)
-        .map(|i| KeyBinding::new(&format!("alt-{i}"), PropsSelectTab(i), props))
+        .map(|i| KeyBinding::new(format!("alt-{i}").leak(), PropsSelectTab(i), props))
         .collect();
     cx.bind_keys(tabs);
 
