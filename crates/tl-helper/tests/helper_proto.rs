@@ -677,8 +677,8 @@ fn policy_file_has_four_actions() {
         (
             "io.github.oysteinkrog.tasklens.netmon",
             "tl-netmon",
-            "Run the tasklens network monitor",
-            "Authentication is required to run the tasklens network monitor.",
+            "Run the tasklens network and storage monitor",
+            "Authentication is required to run the tasklens network and storage monitor.",
         ),
         (
             "io.github.oysteinkrog.tasklens.smart",

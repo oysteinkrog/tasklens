@@ -17,8 +17,8 @@
     <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/tasklens/tasklens-setup</annotate>
   </action>
   <action id="io.github.oysteinkrog.tasklens.netmon">
-    <description>Run the tasklens network monitor</description>
-    <message>Authentication is required to run the tasklens network monitor.</message>
+    <description>Run the tasklens network and storage monitor</description>
+    <message>Authentication is required to run the tasklens network and storage monitor.</message>
     <defaults><allow_any>auth_admin</allow_any><allow_inactive>auth_admin</allow_inactive><allow_active>auth_admin_keep</allow_active></defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/tasklens/tl-netmon</annotate>
   </action>

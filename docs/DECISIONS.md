@@ -2,6 +2,14 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-11-16
+
+### D-044 ADR-021 accepted (tl-netmon, P4)
+
+- **Decision** (owner, 2026-11-16, pdu.90): ADR-021 is accepted with the eight answers in its "Owner answers" section, as Astra recommended. Implementation stays P4. The prerequisite prototype, `tasklens-pdu.102`, runs on the owner's machine only, and its results amend ADR-021 before `crates/tl-netmon` is created.
+- **D-019 amended:** the `.netmon` prompt is now "Run the tasklens network and storage monitor" / "Authentication is required to run the tasklens network and storage monitor."
+- **R-002 amended:** tasklens has four polkit actions. The fourth, `.smart`, came with ADR-018.
+
 ## 2026-11-05
 
 ### D-043 GPUI may be patched (ADR-014)

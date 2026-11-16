@@ -193,7 +193,7 @@ fn reach(host: &str, user: &str) -> String {
     format!(
         "Remote admin lets tasklens windows on other PCs run administrator actions on {host} \
          without a password prompt: acting on other users' processes, closing network \
-         connections, the network monitor, reading SMART data from disks, tasklens setup, and \
+         connections, the network and storage monitor, reading SMART data from disks, tasklens setup, and \
          starting, stopping, enabling and disabling system services.\n\
          With it on, any program that runs as {user} on {host} can do these actions without a \
          prompt, whether it came through tasklens or not.\n\

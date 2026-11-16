@@ -1403,7 +1403,7 @@ A timeout reports `OutcomeUnknown`, never `Failed`. Work already running on the 
 
 **Privileged helper boundary (P3, reserved now).**
 - Binary `/usr/lib/tasklens/tl-helper`, started by the engine as `pkexec /usr/lib/tasklens/tl-helper --session`.
-- Polkit has exactly three tasklens actions, in `/usr/share/polkit-1/actions/io.github.oysteinkrog.Tasklens.policy`: `io.github.oysteinkrog.tasklens.helper` (`auth_admin_keep`) covers every tl-helper operation; `io.github.oysteinkrog.tasklens.setup` (`auth_admin_keep`) covers `/usr/lib/tasklens/tasklens-setup`; `io.github.oysteinkrog.tasklens.netmon` is reserved for `tl-netmon` (P4). Polkit authorises the `pkexec` launch once, so per-operation action names inside a running helper would not be enforced.
+- Polkit has exactly four tasklens actions, in `/usr/share/polkit-1/actions/io.github.oysteinkrog.Tasklens.policy`: `io.github.oysteinkrog.tasklens.helper` (`auth_admin_keep`) covers every tl-helper operation; `io.github.oysteinkrog.tasklens.setup` (`auth_admin_keep`) covers `/usr/lib/tasklens/tasklens-setup`; `io.github.oysteinkrog.tasklens.netmon` is reserved for `tl-netmon` (P4); `io.github.oysteinkrog.tasklens.smart` (`auth_admin_keep`) covers `/usr/lib/tasklens/tasklens-smart` (ADR-018, R-088). Polkit authorises the `pkexec` launch once, so per-operation action names inside a running helper would not be enforced.
 - Transport: the helper's stdin and stdout, a Unix socketpair so a file descriptor can travel as `SCM_RIGHTS` ancillary data with the `Dump` frame (R-145), using the same `tl-model::wire` framing as the GPU probe (ADR-007), max frame 64 KiB. Frames are `HelperFrame { seq: u32, request }` and `HelperReply { seq: u32, last: bool, body }` after a `Hello { proto }` handshake both ways, `HELPER_PROTO_VERSION = 1` (R-157). A reply larger than one frame is sent as a sequence of frames; the 4 MiB cap is per reply message for the streamed requests (`ScanStrings`, `NetnsSockDiagDump`) and total per request for the rest. There is no single-call `--once` mode.
 - Allowed requests only:
   - `Signal { key, signal }`, `SetNice`, `SetSched`, `SetAffinity`, `SetIoPriority`; `Signal`, `SetNice`, `SetSched` and `SetAffinity` also accept a thread target (`ActionTarget::Thread`);
@@ -3775,7 +3775,7 @@ Both use the same `-p` list. The feature-less app variant (`cargo build -p tl-ap
 
 ## ADR-021: tl-netmon, the privileged eBPF collector for per-process network and storage operations
 
-Status: proposed (draft 2026-11-13, owner asked for the draft; implementation stays P4). Phase P4. Two owner decisions bind it. First, one ADR covers both collectors, and process rows keep the `n/a` disk-operations cell until P4 ships (bead `tasklens-pdu.90`, option A, 2026-11-07). Second, the draft is written now and the work stays P4 (2026-11-13). Astra reviewed the first draft on 2026-11-13; this version answers its eleven findings. The owner adds the D entry when he approves it.
+Status: accepted 2026-11-16 (D-044), with the owner answers listed after the open questions; implementation stays P4. Drafted 2026-11-13. Phase P4. Two owner decisions bind it. First, one ADR covers both collectors, and process rows keep the `n/a` disk-operations cell until P4 ships (bead `tasklens-pdu.90`, option A, 2026-11-07). Second, the draft is written now and the work stays P4 (2026-11-13). Astra reviewed the first draft on 2026-11-13; this version answers its eleven findings. The owner accepted it on 2026-11-16 (D-044).
 
 ### Context
 
@@ -3938,7 +3938,7 @@ The engine applies the ADR-008 counter rules per key: `cur < prev` is a reset, a
 
 - Process rows get Disk reads and Disk writes as issued-request events, and Network counts TCP and UDP for every user's processes while the collector runs, with the exceptions the prototype lists.
 - One more privileged binary. After start it runs as the invoking user with CAP_BPF at most, behind a seccomp filter if CAP_BPF stays, takes no paths and runs no programs.
-- No fourth polkit action. The prompt text of D-019 still says "network monitor" (open question 8).
+- No new polkit action. The `.netmon` prompt says "network and storage monitor" (D-044, open question 8).
 - Building the workspace with `tl-netmon` needs `clang`.
 - Attribution limits are permanent and shown in tooltips: storage events follow the dispatching task, writeback rarely counts for the writer, stacked devices count per layer, network counts payload bytes.
 - The engine stays free of eBPF code and of `bpf()` calls.
@@ -3990,3 +3990,16 @@ The engine applies the ADR-008 counter rules per key: `cur < prev` is a reset, a
 6. **Process history recording** (ADR-012). Whether recording keeps `tl-netmon` running while no window shows these columns. Default: no.
 7. **Hook-time gate.** The limit for total hook time per core. Default: the prototype proposes a value; the shipping bead cannot close without the owner's number.
 8. **Prompt text and polkit action count.** D-019's prompt says "network monitor", and the binary is named `tl-netmon`, but it now also counts storage events. Separately, ADR-006, R-002 and `docs/spec/merged/sys-app.md` say tasklens has exactly three actions, while ADR-018 and the shipped policy file have a fourth, `io.github.oysteinkrog.tasklens.smart` **[verified]**. This ADR adds no action. Both must be settled before storage collection ships.
+
+### Owner answers (2026-11-16, D-044)
+
+The owner accepted the answers Astra recommended on 2026-11-16 (review on bead `tasklens-pdu.90`).
+
+1. **The switch.** It goes in the Additional setup row, named "Per-process network and storage counting", with the interactive start link and a line saying it also counts other users' processes. No text calls the counts "exact". The new strings are a spec change made by the shipping bead.
+2. **Network coverage.** Default accepted: the prototype picks the hooks and lists the uncounted paths. PROC-032's "exact all-protocol" wording is changed to the coverage the prototype proves, and the column says "TCP and UDP at the socket layer" until then.
+3. **Unit for Disk reads and Disk writes.** The prototype measures both `block:block_rq_issue` and `block:block_bio_queue` before PROC-031 is settled. If issued requests stay the unit, process cells are labelled "Issued read/write requests" and every stacked layer counts, with the caveat in the tooltip.
+4. **Oldest supported kernel.** Default accepted: the owner's kernel (7.3) and the current Arch LTS kernel only. Docs say "tested on", not a version range.
+5. **Seccomp.** Default accepted: `seccompiler` if its dependency closure passes check-deps. The prototype checks the real syscall list of the collector against the filter.
+6. **Process history recording.** Default accepted: recording alone does not keep `tl-netmon` running. History shows gaps (missing values, never zero) while it is stopped.
+7. **Hook-time gate.** Default accepted: the prototype measures and proposes a limit; the shipping bead cannot close without the owner's number.
+8. **Prompt text and polkit action count.** The `.netmon` prompt now says "network and storage monitor" (D-019 amended by D-044, policy file and test updated). The action and the `tl-netmon` name stay. ADR-006, R-002 and `docs/spec/merged/sys-app.md` now list the fourth action, `.smart`.

@@ -11,7 +11,7 @@ Binding inputs, in order of precedence: `docs/DECISIONS.md` (D-001 to D-010), `d
 Conventions:
 - Phases follow R-072. P0 is the spike. P1 is the Performance core, the process table and P1 actions. P2 adds Services, Startup Apps, Connections, Properties windows, the KWin bridge, the 5 and 10 minute ranges and the remaining themes. P3 adds the helper, history, tray, detached graphs, mini window, strings, dumps and low-memory. P4 is everything later.
 - Names, paths, polkit actions and D-Bus names are from canonical table (c). Number formats are from canonical table (d). Settings keys are from canonical table (a). Keys are from canonical table (b).
-- Polkit actions owned by tasklens are exactly three (R-002): `io.github.oysteinkrog.tasklens.helper`, `io.github.oysteinkrog.tasklens.setup` and `io.github.oysteinkrog.tasklens.netmon` (reserved). Every tl-helper operation runs under the helper action.
+- Polkit actions owned by tasklens are exactly four (R-002, D-044): `io.github.oysteinkrog.tasklens.helper`, `io.github.oysteinkrog.tasklens.setup`, `io.github.oysteinkrog.tasklens.netmon` (reserved) and `io.github.oysteinkrog.tasklens.smart` (ADR-018). Every tl-helper operation runs under the helper action.
 - Table cells, header totals and sidebar readouts use ADR-003's validity glyphs. Properties fields and Information rows use the PERF-013 words ("Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown") (R-050).
 - "Was:" lines name old IDs from `features-sys-app.md`. Every other ID reference names a merged entry: SYS and APP in this file, PROC in `proc.md`, PERF in `perf.md`.
 
