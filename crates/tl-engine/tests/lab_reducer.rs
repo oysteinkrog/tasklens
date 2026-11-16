@@ -4961,10 +4961,27 @@ fn gpu_and_vram_groups_per_nvidia_gpu() {
         .collect();
     assert_eq!(vram, [300.0, 100.0, 0.0, 600.0]);
 
-    // A sample without process rows: every band gets a gap and both lists stay.
+    // A sample without process rows soon after one with rows: device history gets rows with
+    // every 10th sample only, so the bands are left alone. No gap, and both lists stay.
     let lists = (Arc::clone(&g.groups), Arc::clone(&g.vram_groups));
-    rig.run(vec![gpu_group_msg(gpu, 50.0, 1000, None, None)])
+    rig.run(vec![gpu_group_msg(gpu.clone(), 50.0, 1000, None, None)])
         .expect("no invariant violation");
+    let snap = rig.latest();
+    let g = &snap.system.gpus[0].1;
+    assert_eq!((&g.groups, &g.vram_groups), (&lists.0, &lists.1));
+    for b in g.groups.iter() {
+        assert!(!gap(&rig, b.device, MetricId::GPU_GROUP), "{}", b.key);
+    }
+    for b in g.vram_groups.iter() {
+        assert!(!gap(&rig, b.device, MetricId::VRAM_GROUP), "{}", b.key);
+    }
+
+    // No rows for longer than the hold: every band gets a gap and both lists stay.
+    let mut late = gpu_group_msg(gpu, 50.0, 1000, None, None);
+    if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut late {
+        s.t_ns += 31 * SEC;
+    }
+    rig.run(vec![late]).expect("no invariant violation");
     let snap = rig.latest();
     let g = &snap.system.gpus[0].1;
     assert_eq!((&g.groups, &g.vram_groups), (&lists.0, &lists.1));
@@ -4974,6 +4991,59 @@ fn gpu_and_vram_groups_per_nvidia_gpu() {
     for b in g.vram_groups.iter() {
         assert!(gap(&rig, b.device, MetricId::VRAM_GROUP), "{}", b.key);
     }
+}
+
+/// Device history alone: the GPU worker sends rows with every 10th 1 s sample. The 9 samples
+/// between must not gap the app bands, or the VRAM by app history away from the GPU page is all
+/// gaps (the CPU and memory bands get nothing between sweeps either).
+#[test]
+fn gpu_groups_hold_between_history_rows() {
+    let uuid = [7; 16];
+    let gpu = DeviceIdentity::Gpu {
+        uuid,
+        pci_bus_id: Arc::from("0000:01:00.0"),
+    };
+    let mut rig = Rig::new();
+    rig.run(vec![
+        gpu_info(uuid, true),
+        mem_sweep(SEC, &[(1, "game", 1 << 20)]),
+    ])
+    .expect("no invariant violation");
+    let t0 = now_boot_ns();
+    let at = |mut msg: EngineMsg, t: TimeNs| {
+        if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut msg {
+            s.t_ns = t;
+        }
+        msg
+    };
+    for second in 0..30u64 {
+        let rows = (second % 10 == 0).then(|| vec![nvml_row(uuid, 1, Some(40), 300)]);
+        let msg = gpu_group_msg(gpu.clone(), 50.0, 1000, rows, None);
+        rig.run(vec![at(msg, t0 + second * SEC)])
+            .expect("no invariant violation");
+    }
+    let snap = rig.latest();
+    let g = &snap.system.gpus[0].1;
+    let game = g
+        .vram_groups
+        .iter()
+        .find(|b| &*b.key == "comm:game")
+        .expect("game band");
+    let samples: Vec<Sample> = snap
+        .series
+        .get(SeriesId {
+            device: game.device,
+            metric: MetricId::VRAM_GROUP,
+        })
+        .expect("series exists")
+        .samples
+        .to_vec();
+    assert_eq!(samples.len(), 3, "one point per sample with rows");
+    assert!(
+        samples.iter().all(Sample::is_valid),
+        "no gap between history rows"
+    );
+    assert!(samples.iter().all(|s| s.value == 300.0));
 }
 
 #[test]

@@ -26,6 +26,7 @@ use tl_collect::apps::mem_group::MemGroup;
 use tl_model::gpu_proto::GpuProcessSample;
 use tl_model::ids::{DeviceIdx, MetricId};
 use tl_model::system::WineGroupInfo;
+use tl_model::time::TimeNs;
 
 pub use super::mem_groups::GroupInfo;
 use super::mem_groups::{MemGroups, OTHER_KEY, OTHER_NAME, TOP_GROUPS};
@@ -39,6 +40,13 @@ pub const DRIVER_KEY: &str = "driver";
 pub const DRIVER_NAME: &str = "Other / driver";
 /// The highest load of one app, in percent of the GPU.
 pub const APP_MAX_PCT: f64 = 100.0;
+
+/// How long the bands of a GPU hold after its last sample with process rows. While only
+/// device history needs rows, the GPU workers send them with every 10th 1 s sample
+/// (`HistoryRows`), so the samples between have none. Those must not gap the bands, or the
+/// history away from the GPU page is all gaps. The process sweep feeds the CPU and memory bands
+/// the same way: nothing between sweeps. Three history periods, as the series stale rule.
+pub const ROWS_HOLD_NS: u64 = 30_000_000_000;
 
 /// A GPU band's place in `GpuGroups::devices`: the GPU's PCI bus id and the band key.
 pub type BandKey = (Arc<str>, Arc<str>);
@@ -223,9 +231,12 @@ pub struct GpuGroups {
     /// not touch the catalog.
     pub devices: FxHashMap<BandKey, (DeviceIdx, Arc<str>)>,
     /// Per (GPU device, `GPU_GROUP` or `VRAM_GROUP`): the band devices of the last sample with
-    /// process rows. One that drops out gets a gap; a sample without rows gaps them all and
-    /// keeps them, so the next one gaps them again.
+    /// process rows. One that drops out gets a gap. A sample without rows within `ROWS_HOLD_NS`
+    /// of the last one with rows leaves them alone; a later one gaps them all and keeps them, so
+    /// the next one gaps them again.
     pub shown: FxHashMap<(DeviceIdx, MetricId), Vec<DeviceIdx>>,
+    /// Per GPU device: the time of its last sample with process rows.
+    pub rows_at: FxHashMap<DeviceIdx, TimeNs>,
     pub other_key: Arc<str>,
     pub other_name: Arc<str>,
     pub driver_key: Arc<str>,
@@ -237,6 +248,7 @@ impl Default for GpuGroups {
         GpuGroups {
             devices: FxHashMap::default(),
             shown: FxHashMap::default(),
+            rows_at: FxHashMap::default(),
             other_key: Arc::from(OTHER_KEY),
             other_name: Arc::from(OTHER_NAME),
             driver_key: Arc::from(DRIVER_KEY),

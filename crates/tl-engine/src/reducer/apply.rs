@@ -2222,9 +2222,11 @@ impl Reducer {
 
     /// Pushes the GPU load and VRAM bands of GPU `gpu` and puts their lists in `g.groups` and
     /// `g.vram_groups` (tasklens-g00wx.1, `gpu_groups`). An NVIDIA GPU gets load bands only
-    /// when it supports per-process utilization; a DRM card gets both. Without process rows for
-    /// the GPU's worker (`rows` is `GpuRows::None`, or the sample has none) every band the GPU
-    /// showed gets a gap, no device is added, and the lists stay as they were.
+    /// when it supports per-process utilization; a DRM card gets both. A sample without rows
+    /// within `ROWS_HOLD_NS` of the GPU's last one with rows keeps the lists and pushes nothing.
+    /// Otherwise, without process rows (`rows` is `GpuRows::None`, or the sample has none),
+    /// every band the GPU showed gets a gap, no device is added, and the lists stay as they
+    /// were.
     fn apply_gpu_groups(
         &mut self,
         gpu: DeviceIdx,
@@ -2257,6 +2259,19 @@ impl Reducer {
                 } else {
                     nvidia.map(|r| gpu_groups::nvidia_uses(r, uuid))
                 };
+                // A sample between two history samples with rows: keep the bands as they are,
+                // without a gap (`gpu_groups::ROWS_HOLD_NS`).
+                let held = &mut self.apply_state.gpu_groups.rows_at;
+                if uses.is_some() {
+                    held.insert(gpu, t);
+                } else if held
+                    .get(&gpu)
+                    .is_some_and(|&at| t.saturating_sub(at) <= gpu_groups::ROWS_HOLD_NS)
+                {
+                    g.groups = prev_load;
+                    g.vram_groups = prev_vram;
+                    return Ok(());
+                }
                 let load_ok = drm_card || self.apply_state.gpu_caps.get(uuid) == Some(&true);
                 let util = g.util_pct.validity.is_valid().then_some(g.util_pct.value);
                 let used = g.mem_used.validity.is_valid().then_some(g.mem_used.value);
