@@ -2,7 +2,14 @@
 //!
 //! A `TL1.` code is `"TL1."` plus base64url without padding of the JSON object
 //! `{"v":1,"name":…,"accent":"#RRGGBB","WINDOW_BG":"#RRGGBB",…}` with the 22 slots in
-//! `ThemeSlot` order. Import also takes raw `themes.json` text and a single theme object.
+//! `ThemeSlot` order. Import also takes raw `themes.json` text, a single theme object and a
+//! TaskSlinger share code.
+//!
+//! A TaskSlinger 0.9.2 share code has no prefix: it is standard base64 (RFC 4648 section 4, with
+//! padding) of `themes.json` text, `{"themes":[{"name":…,"WINDOW_BG":"#RRGGBB",…}]}`. This was
+//! checked on 2026-11-18 by sharing a theme in TaskSlinger 0.9.2 and importing codes back into it
+//! (U-17, tasklens-lgw.12). TaskSlinger's own Import also takes base64url without padding and
+//! rejects text that starts with `TS1.`, so tasklens does the same.
 //!
 //! Import text comes from the clipboard, so it is untrusted: the text is capped at
 //! `MAX_IMPORT_BYTES`, the theme count at `MAX_USER_THEMES`, nothing panics, and nothing logs the
@@ -21,7 +28,8 @@ use super::{ThemeDef, ThemeSlot, builtin};
 /// The prefix of a tasklens theme code.
 pub const TL1_PREFIX: &str = "TL1.";
 
-/// The prefix of a TaskSlinger theme code (E17-010).
+/// The prefix the plan expected for TaskSlinger codes (E17-010). TaskSlinger 0.9.2 neither
+/// writes nor reads it (U-17), so text with this prefix is not a theme code.
 const TS1_PREFIX: &str = "TS1.";
 
 /// The longest import text accepted, in bytes. Longer text is not a theme code.
@@ -98,9 +106,10 @@ pub fn decode_tl1(code: &str) -> Result<ThemeDef, ShareCodeError> {
     themes.pop().ok_or(ShareCodeError::BadJson)
 }
 
-/// The themes in clipboard text: a `TL1.` code, a `TS1.` code (E17-010), `themes.json` text
-/// (`{"themes":[…]}`, at most `MAX_USER_THEMES` entries) or a single theme object (one with
-/// `WINDOW_BG`). Entries of the `themes` array that are not objects are skipped.
+/// The themes in clipboard text: a `TL1.` code, `themes.json` text (`{"themes":[…]}`, at most
+/// `MAX_USER_THEMES` entries), a single theme object (one with `WINDOW_BG`) or a TaskSlinger share
+/// code (base64 of either JSON form). Entries of the `themes` array that are not objects are
+/// skipped. Text that starts with `TS1.` is not a theme code (U-17).
 pub fn import_text(text: &str) -> Result<Vec<ThemeDef>, ShareCodeError> {
     let text = text.trim();
     if text.len() > MAX_IMPORT_BYTES {
@@ -110,10 +119,40 @@ pub fn import_text(text: &str) -> Result<Vec<ThemeDef>, ShareCodeError> {
         return decode_tl1(text).map(|def| vec![def]);
     }
     if text.starts_with(TS1_PREFIX) {
-        // TaskSlinger codes wait for U-17 (E17-010).
         return Err(ShareCodeError::NotAThemeCode);
     }
-    let Ok(Value::Object(mut root)) = serde_json::from_str::<Value>(text) else {
+    match serde_json::from_str::<Value>(text) {
+        Ok(value) => import_json(value),
+        Err(_) => decode_taskslinger(text),
+    }
+}
+
+/// Decodes a TaskSlinger share code: base64 of `themes.json` text or of one theme object. Both
+/// base64 alphabets are accepted, with or without padding, and ASCII whitespace inside the code
+/// is ignored, since the share dialog wraps it. Anything else is `NotAThemeCode`.
+pub fn decode_taskslinger(code: &str) -> Result<Vec<ThemeDef>, ShareCodeError> {
+    if code.len() > MAX_IMPORT_BYTES {
+        return Err(ShareCodeError::NotAThemeCode);
+    }
+    let url: String = code
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .map(|c| match c {
+            '+' => '-',
+            '/' => '_',
+            c => c,
+        })
+        .collect();
+    let bytes = base64url_decode(&url).ok_or(ShareCodeError::NotAThemeCode)?;
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => import_json(value),
+        Err(_) => Err(ShareCodeError::NotAThemeCode),
+    }
+}
+
+/// The themes in a parsed JSON value: `{"themes":[…]}` or one theme object.
+fn import_json(value: Value) -> Result<Vec<ThemeDef>, ShareCodeError> {
+    let Value::Object(mut root) = value else {
         return Err(ShareCodeError::NotAThemeCode);
     };
     let objects: Vec<BTreeMap<String, Value>> = match root.remove("themes") {
@@ -427,8 +466,91 @@ mod tests {
         assert!(import_text("{\"themes\":[]}").unwrap().is_empty());
     }
 
+    /// A code made by TaskSlinger 0.9.2's Share button for "Default Dark Copy" (U-17).
+    const TS_SAMPLE_CODE: &str = include_str!("testdata/taskslinger-0.9.2-share-code.txt");
+    const TS_EXPORT: &str = include_str!("testdata/taskslinger-0.9.2-themes.json");
+
+    /// The sample code decodes to the exported "Default Dark Copy": all 22 slots match.
+    #[test]
+    fn taskslinger_sample_code_decodes() {
+        let export: Value = serde_json::from_str(TS_EXPORT).unwrap();
+        let want = export["themes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "Default Dark Copy")
+            .unwrap();
+        for text in [
+            TS_SAMPLE_CODE.to_string(),
+            format!("  {}\n", TS_SAMPLE_CODE.trim()),
+        ] {
+            let defs = import_text(&text).unwrap();
+            assert_eq!(defs.len(), 1);
+            assert_eq!(&*defs[0].name, "Default Dark Copy");
+            for slot in &ThemeSlot::ALL[..22] {
+                let hex = want[slot.json_key()].as_str().unwrap();
+                assert_eq!(
+                    defs[0].slots[*slot as usize],
+                    builtin::parse_hex(hex).unwrap(),
+                    "{}",
+                    slot.json_key()
+                );
+            }
+        }
+        // The share dialog wraps the code; line breaks inside are ignored.
+        let code = TS_SAMPLE_CODE.trim();
+        let wrapped: String = code
+            .as_bytes()
+            .chunks(76)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            import_text(&wrapped).unwrap()[0].slots,
+            import_text(code).unwrap()[0].slots
+        );
+    }
+
+    /// TaskSlinger's Import takes base64url without padding too; a `TS1.` prefix is refused by
+    /// TaskSlinger 0.9.2, so tasklens refuses it as well (U-17).
+    #[test]
+    fn taskslinger_code_forms() {
+        let code = TS_SAMPLE_CODE.trim();
+        let bytes = base64url_decode(&code.replace('+', "-").replace('/', "_")).unwrap();
+        let url = encode_b64(&bytes);
+        assert!(!url.ends_with('='));
+        assert_eq!(
+            import_text(&url).unwrap()[0].slots,
+            import_text(code).unwrap()[0].slots
+        );
+        for prefixed in [format!("TS1.{code}"), format!("TS1.{url}")] {
+            assert_eq!(
+                import_text(&prefixed).err(),
+                Some(ShareCodeError::NotAThemeCode)
+            );
+        }
+        // Base64 that is not theme JSON, and text that is not base64, are not theme codes.
+        for bad in [
+            encode_b64(b"[1,2]"),
+            encode_b64(b"{\"name\":\"x\"}"),
+            "@@@@".into(),
+        ] {
+            assert_eq!(
+                import_text(&bad).err(),
+                Some(ShareCodeError::NotAThemeCode),
+                "{bad}"
+            );
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn taskslinger_code_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+            let _ = import_text(&encode_b64(&bytes));
+            let _ = decode_taskslinger(&encode_b64(&bytes));
+        }
 
         #[test]
         fn import_never_panics(text in any::<String>()) {
