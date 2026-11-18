@@ -709,7 +709,7 @@ mod tests {
             );
             assert_eq!(&*current(cx).name, DEFAULT_LIGHT);
             assert_eq!(style_version(cx), n);
-            assert_eq!(current(cx).window_bg, hex(0xF3F4F6));
+            assert_eq!(current(cx).window_bg, hex(0xFAFAFA));
             ThemeStore::cancel_preview(b, cx);
             assert_eq!(&*current(cx).name, DEFAULT_DARK);
         });

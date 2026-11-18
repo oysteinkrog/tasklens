@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(kit.mode, KitMode::Dark);
 
         apply(&builtin_theme("Default Light", &appearance), &m, &mut kit);
-        assert_eq!(kit.colors.tab_active, hex(0xF3F4F6));
+        assert_eq!(kit.colors.tab_active, hex(0xFAFAFA));
         assert_eq!(kit.colors.red, ThemeColor::light().red);
         assert_eq!(
             kit.colors.tab_bar_segmented,

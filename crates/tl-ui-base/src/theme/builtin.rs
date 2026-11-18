@@ -479,11 +479,99 @@ mod tests {
         0x075B84, 0x2B2F33, 0x2A2E31, 0x104B68, 0x202224, 0x27292B, 0x1A1C1E, 0x494F54, 0xD6D8D9,
         0x959A9C, 0xFFFFFF, 0xBFD9E6, 0x3E2A28, 0x0277A6,
     ];
+    /// TaskSlinger 0.9.2's "Default Light" export, with `text_secondary` and
+    /// `text_selected_secondary` moved to the contrast floor (R-122, tasklens-lgw.7).
     const LIGHT: [u32; 23] = [
-        0xF3F4F6, 0xE4E6E9, 0xEBEDEF, 0xFFFFFF, 0xFFFFFF, 0xDDE1E5, 0xFFFFFF, 0xF6F7F8, 0xE8EBEE,
-        0xCFE6F2, 0xD4D8DC, 0xFFFFFF, 0xE1EEF5, 0xEBEDEF, 0xE0E3E6, 0xEBEDEF, 0xB5BBC0, 0x1B1F22,
-        0x5E656A, 0x0F1416, 0x3E5460, 0xF6D5CF, 0x0277A6,
+        0xFAFAFA, 0xF0F0F0, 0xF5F5F5, 0xFFFFFF, 0xEBF5FF, 0xE3E8F0, 0xFAFAFA, 0xF5F5F5, 0xE6F2FF,
+        0x0078D6, 0xE0E0E0, 0xF5F5F5, 0xE6F2FF, 0xE0E0E0, 0xCCD9EB, 0xEBEBEB, 0xB3B3B3, 0x212121,
+        0x5E5E5E, 0xFFFFFF, 0xFDFDFD, 0x5C7DEB, 0x0078D6,
     ];
+
+    /// The slots Default Light changes from the export to keep the contrast floor (R-122).
+    const LIGHT_FLOOR_SLOTS: [&str; 2] = ["TEXT_SECONDARY", "TEXT_SELECTED_SECONDARY"];
+
+    /// TaskSlinger 0.9.2's `themes.json` after "Create copy" on Default Dark: the eleven named
+    /// built-ins plus "Default Dark Copy", exported under Wine on 2026-11-18 (U-18).
+    const TS_EXPORT: &str = include_str!("testdata/taskslinger-0.9.2-themes.json");
+
+    /// TaskSlinger pairs below the floor, kept as exported because the named themes copy
+    /// TaskSlinger exactly (APP-035). Theme, foreground slot, background slot.
+    const EXPECTED_CONTRAST_EXCEPTIONS: &[(&str, &str, &str)] = &[
+        ("Vivid Nightfall", "TEXT_PRIMARY", "HEADER"),
+        ("Vivid Nightfall", "TEXT_SECONDARY", "ROW_HOVER"),
+        ("Vivid Nightfall", "TEXT_SECONDARY", "HEADER"),
+        ("Vivid Nightfall", "TEXT_SECONDARY", "INPUT"),
+        ("Vivid Nightfall", "TEXT_SECONDARY", "INPUT_FOCUS"),
+        ("Vivid Nightfall", "TEXT_SECONDARY", "TAB_BG"),
+        ("Vivid Nightfall", "TEXT_SECONDARY", "TAB_HOVER"),
+        ("Catppuccin Frappé", "TEXT_SECONDARY", "ROW_HOVER"),
+        ("Catppuccin Frappé", "TEXT_SECONDARY", "HEADER"),
+        ("Catppuccin Frappé", "TEXT_SECONDARY", "INPUT_FOCUS"),
+        ("Catppuccin Frappé", "TEXT_SECONDARY", "TAB_BG"),
+        ("Catppuccin Frappé", "TEXT_SECONDARY", "TAB_HOVER"),
+        ("Catppuccin Macchiato", "TEXT_SECONDARY", "ROW_HOVER"),
+        ("Catppuccin Macchiato", "TEXT_SECONDARY", "TAB_HOVER"),
+        ("Catppuccin Mocha", "TEXT_SECONDARY", "ROW_HOVER"),
+        ("Catppuccin Mocha", "TEXT_SECONDARY", "TAB_HOVER"),
+        ("Dracula", "TEXT_PRIMARY", "HEADER"),
+        ("Dracula", "TEXT_SECONDARY", "LIST_BG"),
+        ("Dracula", "TEXT_SECONDARY", "WINDOW_BG"),
+        ("Dracula", "TEXT_SECONDARY", "ROW_ALT"),
+        ("Dracula", "TEXT_SECONDARY", "ROW_HOVER"),
+        ("Dracula", "TEXT_SECONDARY", "HEADER"),
+        ("Dracula", "TEXT_SECONDARY", "MENU_BG"),
+        ("Dracula", "TEXT_SECONDARY", "TOOLBAR"),
+        ("Dracula", "TEXT_SECONDARY", "INPUT"),
+        ("Dracula", "TEXT_SECONDARY", "INPUT_FOCUS"),
+        ("Dracula", "TEXT_SECONDARY", "TAB_BG"),
+        ("Dracula", "TEXT_SECONDARY", "TAB_HOVER"),
+        ("Dracula", "TEXT_SECONDARY", "TITLEBAR"),
+        ("Windows 7 Aero", "TEXT_SELECTED_SECONDARY", "ROW_SELECTED"),
+        ("Windows 7 Aero", "TEXT_SECONDARY", "TITLEBAR"),
+        (
+            "Golden Summer Fields",
+            "TEXT_SELECTED_PRIMARY",
+            "ROW_SELECTED",
+        ),
+        (
+            "Golden Summer Fields",
+            "TEXT_SELECTED_SECONDARY",
+            "ROW_SELECTED",
+        ),
+        ("Golden Summer Fields", "TEXT_SECONDARY", "INPUT_FOCUS"),
+        ("Golden Summer Fields", "TEXT_SECONDARY", "TAB_HOVER"),
+        ("Soft Pink Delight", "TEXT_SELECTED_PRIMARY", "ROW_SELECTED"),
+        (
+            "Soft Pink Delight",
+            "TEXT_SELECTED_SECONDARY",
+            "ROW_SELECTED",
+        ),
+        ("Soft Pink Delight", "TEXT_SECONDARY", "INPUT"),
+        ("Soft Pink Delight", "TEXT_SECONDARY", "INPUT_FOCUS"),
+        ("Catppuccin Latte", "TEXT_SELECTED_PRIMARY", "ROW_SELECTED"),
+        (
+            "Catppuccin Latte",
+            "TEXT_SELECTED_SECONDARY",
+            "ROW_SELECTED",
+        ),
+        ("Catppuccin Latte", "TEXT_SECONDARY", "ROW_HOVER"),
+        ("Catppuccin Latte", "TEXT_SECONDARY", "INPUT"),
+        ("Catppuccin Latte", "TEXT_SECONDARY", "INPUT_FOCUS"),
+        ("Catppuccin Latte", "TEXT_SECONDARY", "TAB_BG"),
+        ("Catppuccin Latte", "TEXT_SECONDARY", "TAB_HOVER"),
+    ];
+
+    /// The defaults carry `mode`, `status` and `graph`; the ten named themes do not (APP-035).
+    fn is_default(def: &ThemeDef) -> bool {
+        matches!(&*def.name, "Default Dark" | "Default Light")
+    }
+
+    fn by_name<'a>(themes: &'a [ThemeDef], name: &str) -> &'a ThemeDef {
+        themes
+            .iter()
+            .find(|t| &*t.name == name)
+            .unwrap_or_else(|| panic!("no {name}"))
+    }
 
     fn hex(v: u32) -> Hsla {
         rgb(v).into()
@@ -528,20 +616,22 @@ mod tests {
     #[test]
     fn builtin_json_parses() {
         let themes = load();
-        assert_eq!(themes.len(), 2);
+        assert_eq!(themes.len(), 12);
         for t in themes.iter() {
-            assert!(t.status.is_some(), "{} has no status", t.name);
-            assert!(t.graph.is_some(), "{} has no graph", t.name);
+            let default = is_default(t);
+            assert_eq!(t.status.is_some(), default, "{} status", t.name);
+            assert_eq!(t.graph.is_some(), default, "{} graph", t.name);
+            assert_eq!(t.mode.is_some(), default, "{} mode", t.name);
             assert!(t.extra.is_empty(), "{} has extra keys", t.name);
         }
         let root: Value = serde_json::from_str(BUILTIN_JSON).unwrap();
         let mut colours = Vec::new();
         collect_colour_strings(&root, &mut colours);
-        // 2 themes x (22 slots + accent + 4 status + 13 graph + 12 group + 3 power colours
-        // + 4 value ramps of 3).
+        // 2 defaults x (22 slots + accent + 4 status + 13 graph + 12 group + 3 power colours
+        // + 4 value ramps of 3), plus 10 named themes x (22 slots + accent).
         assert_eq!(
             colours.len(),
-            2 * (23 + 4 + 13 + GROUP_COLORS + 3 + 3 * VALUE_RAMP_KINDS)
+            2 * (23 + 4 + 13 + GROUP_COLORS + 3 + 3 * VALUE_RAMP_KINDS) + 10 * 23
         );
         for c in &colours {
             assert_eq!(c.len(), 7, "{c} is not #RRGGBB");
@@ -552,40 +642,86 @@ mod tests {
     #[test]
     fn all_slots_present_in_every_theme() {
         let themes = load();
-        assert_eq!(&*themes[0].name, "Default Dark");
-        assert_eq!(&*themes[1].name, "Default Light");
-        assert_eq!(themes[0].mode, Some(ThemeMode::Dark));
-        assert_eq!(themes[1].mode, Some(ThemeMode::Light));
-        for (def, table) in themes.iter().zip([DARK, LIGHT]) {
+        let (dark, light) = (
+            by_name(&themes, "Default Dark"),
+            by_name(&themes, "Default Light"),
+        );
+        assert_eq!(dark.mode, Some(ThemeMode::Dark));
+        assert_eq!(light.mode, Some(ThemeMode::Light));
+        for (def, table) in [(dark, DARK), (light, LIGHT)] {
             let want: Vec<Hsla> = table.iter().map(|&v| hex(v)).collect();
             assert_eq!(slot_values(def), want, "{}", def.name);
+        }
+    }
+
+    /// The ten named themes equal TaskSlinger's export slot for slot, and Default Light differs
+    /// only in the two floor slots (APP-035, R-122, U-18). Each accent is TaskSlinger's
+    /// `ROW_SELECTED`, the colour sampled from the active tab outline of each theme.
+    #[test]
+    fn named_themes_match_taskslinger_export() {
+        let themes = load();
+        let export: Value = serde_json::from_str(TS_EXPORT).unwrap();
+        let export = export["themes"].as_array().unwrap();
+        assert_eq!(export.len(), 12);
+        for ts in export {
+            let ts_name = ts["name"].as_str().unwrap();
+            let name = ts_name.strip_suffix(" Copy").unwrap_or(ts_name);
+            if name == "Default Dark" {
+                continue; // shipped from R-269 and the P0 samples, not replaced here
+            }
+            let def = by_name(&themes, name);
+            for slot in &ThemeSlot::ALL[..22] {
+                let key = slot.json_key();
+                if name == "Default Light" && LIGHT_FLOOR_SLOTS.contains(&key) {
+                    continue;
+                }
+                let want = parse_hex(ts[key].as_str().unwrap()).unwrap();
+                assert_eq!(def.slots[*slot as usize], want, "{name} {key}");
+            }
+            let row_selected = parse_hex(ts["ROW_SELECTED"].as_str().unwrap()).unwrap();
+            assert_eq!(def.accent, row_selected, "{name} accent");
+        }
+    }
+
+    /// Without `mode`, each named theme reads as TaskSlinger shows it: the four light-background
+    /// themes are light, the rest dark.
+    #[test]
+    fn named_theme_modes_inferred() {
+        let light = [
+            "Windows 7 Aero",
+            "Golden Summer Fields",
+            "Soft Pink Delight",
+            "Catppuccin Latte",
+        ];
+        for def in load().iter().filter(|t| !is_default(t)) {
+            let want = if light.contains(&&*def.name) {
+                ThemeMode::Light
+            } else {
+                ThemeMode::Dark
+            };
+            assert_eq!(def.effective_mode(), want, "{}", def.name);
         }
     }
 
     #[test]
     fn names_in_ts_order() {
         let themes = load();
-        let mut order = TS_THEME_ORDER.iter();
-        for t in themes.iter() {
-            assert!(
-                order.any(|n| *n == &*t.name),
-                "{} is out of TaskSlinger order",
-                t.name
-            );
-        }
+        let names: Vec<&str> = themes.iter().map(|t| &*t.name).collect();
+        assert_eq!(names, TS_THEME_ORDER);
     }
 
     #[test]
     fn light_theme_mode_inferred_if_missing() {
         let root: Value = serde_json::from_str(BUILTIN_JSON).unwrap();
-        let mut obj: BTreeMap<String, Value> = root["themes"][1]
+        let mut obj: BTreeMap<String, Value> = root["themes"][7]
             .as_object()
             .unwrap()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         obj.remove("mode");
-        assert_eq!(obj["WINDOW_BG"], "#F3F4F6");
+        assert_eq!(obj["name"], "Default Light");
+        assert_eq!(obj["WINDOW_BG"], "#FAFAFA");
         let def = parse_theme_object(&obj, true).unwrap();
         assert_eq!(def.mode, None);
         assert_eq!(def.effective_mode(), ThemeMode::Light);
@@ -723,20 +859,41 @@ mod tests {
         .chain(secondary_bgs.map(|bg| (TextSecondary, bg, 4.5)))
         .collect();
         let mut failures = Vec::new();
+        let mut excused = 0;
         for def in load().iter() {
             for &(fg, bg, floor) in &pairs {
                 let ratio = contrast(def.slots[fg as usize], def.slots[bg as usize]);
-                if ratio < floor {
-                    failures.push(format!(
+                let listed = EXPECTED_CONTRAST_EXCEPTIONS.contains(&(
+                    &*def.name,
+                    fg.json_key(),
+                    bg.json_key(),
+                ));
+                // The defaults never have exceptions; a listed pair must really fail.
+                assert!(
+                    !(listed && is_default(def)),
+                    "{} has an exception",
+                    def.name
+                );
+                match (ratio < floor, listed) {
+                    (true, true) => excused += 1,
+                    (false, false) => {}
+                    (true, false) => failures.push(format!(
                         "{}: {} on {} is {ratio:.2}, below {floor}",
                         def.name,
                         fg.json_key(),
                         bg.json_key()
-                    ));
+                    )),
+                    (false, true) => failures.push(format!(
+                        "{}: {} on {} is {ratio:.2} but listed as an exception",
+                        def.name,
+                        fg.json_key(),
+                        bg.json_key()
+                    )),
                 }
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert_eq!(excused, EXPECTED_CONTRAST_EXCEPTIONS.len());
     }
 
     /// Each built-in theme has 12 group colours, each at least 3:1 against `chart_bg` (the
@@ -744,8 +901,8 @@ mod tests {
     #[test]
     fn group_colours_contrast_with_chart_bg() {
         let mut failures = Vec::new();
-        for def in load().iter() {
-            let graph = def.graph.expect("built-in themes have graph colours");
+        for def in load().iter().filter(|t| is_default(t)) {
+            let graph = def.graph.expect("default themes have graph colours");
             assert!(!graph.groups_unset(), "{} has no group colours", def.name);
             for (i, c) in graph.groups.iter().enumerate() {
                 let ratio = contrast(*c, graph.chart_bg);
@@ -781,8 +938,8 @@ mod tests {
     #[test]
     fn power_ramp_set_and_readable() {
         let mut failures = Vec::new();
-        for def in load().iter() {
-            let graph = def.graph.expect("built-in themes have graph colours");
+        for def in load().iter().filter(|t| is_default(t)) {
+            let graph = def.graph.expect("default themes have graph colours");
             assert!(!graph.power_unset(), "{} has no power ramp", def.name);
             let ramp = graph.power_ramp();
             for (i, c) in ramp.iter().enumerate() {
@@ -796,7 +953,8 @@ mod tests {
             }
         }
         let themes = load();
-        let (dark, light) = (themes[0].graph.unwrap(), themes[1].graph.unwrap());
+        let dark = by_name(&themes, "Default Dark").graph.unwrap();
+        let light = by_name(&themes, "Default Light").graph.unwrap();
         assert_ne!(
             dark.power_ramp(),
             light.power_ramp(),
@@ -829,8 +987,8 @@ mod tests {
     #[test]
     fn value_ramps_set_and_readable() {
         let mut failures = Vec::new();
-        for def in load().iter() {
-            let graph = def.graph.expect("built-in themes have graph colours");
+        for def in load().iter().filter(|t| is_default(t)) {
+            let graph = def.graph.expect("default themes have graph colours");
             for kind in ValueRampKind::ALL {
                 assert!(
                     !graph.value_ramp_unset(kind),

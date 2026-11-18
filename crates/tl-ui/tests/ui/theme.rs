@@ -51,7 +51,7 @@ fn light_active_at_start(cx: &mut TestAppContext) {
     cx.update(|cx| {
         init_with("Default Light", cx);
         assert_eq!(&*current(cx).name, "Default Light");
-        assert_eq!(Theme::global(cx).colors.background, hex(0xF3F4F6));
+        assert_eq!(Theme::global(cx).colors.background, hex(0xFAFAFA));
     });
 }
 
@@ -75,8 +75,10 @@ fn init_user(json: &str, cx: &mut App) -> Rc<RefCell<Vec<PersistTheme>>> {
 /// A themes file with one light user theme "Ocean": Default Light's colours with a new name.
 fn ocean_light_file() -> String {
     let builtin = tl_ui_base::theme::builtin::load();
-    let light = &builtin[1];
-    assert_eq!(&*light.name, "Default Light");
+    let light = builtin
+        .iter()
+        .find(|t| &*t.name == "Default Light")
+        .expect("Default Light is built in");
     let mut def = light.clone();
     def.name = "Ocean".into();
     tl_ui_base::theme::user_store::serialize_user_themes(&[def])
@@ -104,7 +106,7 @@ fn delete_active_falls_back_by_mode(cx: &mut TestAppContext) {
         );
         assert_eq!(&*current(cx).name, "Default Light");
         assert!(current(cx).builtin);
-        assert_eq!(Theme::global(cx).colors.background, hex(0xF3F4F6));
+        assert_eq!(Theme::global(cx).colors.background, hex(0xFAFAFA));
         let names: Vec<String> = cx
             .global::<ThemeStore>()
             .user
@@ -193,7 +195,7 @@ fn scheme_change_from_snapshot_switches_theme(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update(|cx| {
         assert_eq!(&*current(cx).name, "Default Light");
-        assert_eq!(Theme::global(cx).colors.background, hex(0xF3F4F6));
+        assert_eq!(Theme::global(cx).colors.background, hex(0xFAFAFA));
         assert_eq!(metrics(cx).style_version, n + 1);
     });
 

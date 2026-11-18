@@ -121,25 +121,27 @@ impl GraphPalette {
 pub const GRAPH_COLOR_ACCENT: &str = "accent";
 
 /// The 17 accent colours in menu order (APP-039). state.toml stores the name in lower case.
-/// These hex values are fallbacks until U-18 replaces them.
+/// The values are pixel samples of TaskSlinger 0.9.2's Graph Color swatches (U-18, 2026-11-18);
+/// they are the same in every theme. TaskSlinger also has "Red" and "Sky", which APP-039 does not
+/// list.
 pub const ACCENT_COLORS: [(&str, u32); 17] = [
-    ("Coral", 0xFF7F50),
-    ("Orange", 0xF28C28),
-    ("Amber", 0xF5B700),
-    ("Yellow", 0xE8D44D),
-    ("Lime", 0x9BCB3C),
-    ("Green", 0x4CAF50),
-    ("Mint", 0x3EB489),
-    ("Teal", 0x14A098),
-    ("Cyan", 0x22B8CF),
-    ("Blue", 0x3B82F6),
-    ("Indigo", 0x6366F1),
-    ("Violet", 0x8B5CF6),
-    ("Lavender", 0xB4A7F5),
-    ("Fuchsia", 0xD946EF),
-    ("Pink", 0xEC4899),
-    ("Rose", 0xF43F5E),
-    ("Slate", 0x64748B),
+    ("Coral", 0xEB7847),
+    ("Orange", 0xF2944F),
+    ("Amber", 0xE3BA63),
+    ("Yellow", 0xF2CC59),
+    ("Lime", 0xA6D15C),
+    ("Green", 0x70D17D),
+    ("Mint", 0x57D196),
+    ("Teal", 0x47BDA6),
+    ("Cyan", 0x40C7DB),
+    ("Blue", 0x75A8EB),
+    ("Indigo", 0x5C7DEB),
+    ("Violet", 0x8F7AF5),
+    ("Lavender", 0xC9A1F5),
+    ("Fuchsia", 0xD66BEB),
+    ("Pink", 0xF28AC4),
+    ("Rose", 0xF0739E),
+    ("Slate", 0x9EB8D1),
 ];
 
 /// Looks up an accent colour by name, ignoring case. Returns `None` for an unknown name.
@@ -165,7 +167,7 @@ mod tests {
                 "Blue", "Indigo", "Violet", "Lavender", "Fuchsia", "Pink", "Rose", "Slate",
             ]
         );
-        let coral: Hsla = rgb(0xFF7F50).into();
+        let coral: Hsla = rgb(0xEB7847).into();
         assert_eq!(accent_color("coral"), Some(coral));
         assert_eq!(accent_color("Coral"), Some(coral));
         assert_eq!(accent_color("magenta"), None);

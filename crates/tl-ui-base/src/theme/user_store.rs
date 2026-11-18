@@ -573,7 +573,7 @@ mod tests {
         let out = load(&file(vec![light]));
         assert_eq!(out.themes.len(), 1);
         let t = &out.themes[0];
-        assert_eq!(t.slots[ThemeSlot::Header as usize], hex(0xDDE1E5));
+        assert_eq!(t.slots[ThemeSlot::Header as usize], hex(0xE3E8F0));
         assert_eq!(t.slots[ThemeSlot::WindowBg as usize], hex(0xFAFAFA));
         assert_eq!(
             out.repairs,

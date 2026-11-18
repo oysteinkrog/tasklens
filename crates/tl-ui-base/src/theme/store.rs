@@ -758,8 +758,8 @@ mod tests {
             assert_eq!(style_version(cx), n + 1);
             let kit = Theme::global(cx);
             assert_eq!(kit.mode, KitMode::Light);
-            assert_eq!(kit.colors.tab_active, hex(0xF3F4F6));
-            assert_eq!(kit.colors.background, hex(0xF3F4F6));
+            assert_eq!(kit.colors.tab_active, hex(0xFAFAFA));
+            assert_eq!(kit.colors.background, hex(0xFAFAFA));
 
             // Back to dark: the mode switch must not leave the kit's own dark colours behind.
             activate(DEFAULT_DARK, ActivateSource::FollowSystem, cx).unwrap();
@@ -780,9 +780,9 @@ mod tests {
             let n = style_version(cx);
             activate(DEFAULT_LIGHT, ActivateSource::User, cx).unwrap();
             assert!(cx.global::<ThemeStore>().crossfade.is_none());
-            assert_eq!(current(cx).window_bg, hex(0xF3F4F6));
+            assert_eq!(current(cx).window_bg, hex(0xFAFAFA));
             assert_eq!(style_version(cx), n + 1);
-            assert_eq!(Theme::global(cx).colors.background, hex(0xF3F4F6));
+            assert_eq!(Theme::global(cx).colors.background, hex(0xFAFAFA));
         });
         assert_eq!(frame_after(vcx, 16), 0);
     }
@@ -810,11 +810,11 @@ mod tests {
             assert_eq!(style_version(cx), n + 2);
             let t = current(cx);
             assert_eq!(&*t.name, DEFAULT_LIGHT);
-            assert_eq!(t.window_bg, hex(0xF3F4F6));
+            assert_eq!(t.window_bg, hex(0xFAFAFA));
             assert_eq!(t.mode, ThemeMode::Light);
             let kit = Theme::global(cx);
             assert_eq!(kit.mode, KitMode::Light);
-            assert_eq!(kit.colors.background, hex(0xF3F4F6));
+            assert_eq!(kit.colors.background, hex(0xFAFAFA));
         });
         // Nothing is armed once the fade ended.
         assert_eq!(frame_after(vcx, 16), 0);
@@ -827,7 +827,7 @@ mod tests {
         assert_eq!(frame_after(vcx, 100), 1);
         vcx.update(|_, cx| {
             let l = current(cx).window_bg.l;
-            let (dark, light) = (hex(0x191B1D).l, hex(0xF3F4F6).l);
+            let (dark, light) = (hex(0x191B1D).l, hex(0xFAFAFA).l);
             assert!(dark < l && l < light, "{dark} < {l} < {light}");
             // The kit keeps the old theme until the end.
             assert_eq!(Theme::global(cx).colors.background, hex(0x191B1D));
@@ -841,7 +841,7 @@ mod tests {
         switch(vcx, DEFAULT_LIGHT);
         assert_eq!(frame_after(vcx, 100), 1);
         let mid = vcx.update(|_, cx| current(cx).window_bg);
-        assert_ne!(mid, hex(0xF3F4F6));
+        assert_ne!(mid, hex(0xFAFAFA));
         let n = vcx.update(|_, cx| style_version(cx));
 
         switch(vcx, DEFAULT_DARK);
@@ -869,7 +869,7 @@ mod tests {
             let n = style_version(cx);
             activate(DEFAULT_LIGHT, ActivateSource::User, cx).unwrap();
             assert!(cx.global::<ThemeStore>().crossfade.is_none());
-            assert_eq!(current(cx).window_bg, hex(0xF3F4F6));
+            assert_eq!(current(cx).window_bg, hex(0xFAFAFA));
             assert_eq!(style_version(cx), n + 1);
         });
     }
@@ -987,7 +987,7 @@ mod tests {
 
             assert_eq!(on_system_scheme(2, &theme, cx), activated(DEFAULT_LIGHT));
             assert_eq!(&*current(cx).name, DEFAULT_LIGHT);
-            assert_eq!(Theme::global(cx).colors.background, hex(0xF3F4F6));
+            assert_eq!(Theme::global(cx).colors.background, hex(0xFAFAFA));
             let n = style_version(cx);
             // The same scheme again does not activate.
             assert_eq!(on_system_scheme(2, &theme, cx), None);

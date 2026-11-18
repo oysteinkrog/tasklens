@@ -2590,6 +2590,9 @@ fn activate_refused_while_editing(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn sync_on_applies_at_once(cx: &mut TestAppContext) {
     let r = rig(cx);
+    // Twelve built-in themes make the Theme submenu taller than the 400 px rig window; the menu
+    // scrolls there, so give this click a window the whole submenu fits in.
+    r.cx.simulate_resize(size(px(1000.), px(800.)));
     r.cx.update(|_, cx| {
         cx.global_mut::<tl_ui_base::theme::ThemeStore>()
             .system_scheme = 2
@@ -2710,7 +2713,7 @@ fn graph_color_menu_rows(cx: &mut TestAppContext) {
         rows.iter().all(|e| e.swatch.is_some()),
         "every row has a swatch"
     );
-    let teal: gpui_kit::Hsla = gpui_kit::rgb(0x14A098).into();
+    let teal: gpui_kit::Hsla = gpui_kit::rgb(0x47BDA6).into();
     assert_eq!(rows[8].swatch, Some(teal));
     // The rows are drawn, top to bottom.
     let drawn = labels(r.cx);

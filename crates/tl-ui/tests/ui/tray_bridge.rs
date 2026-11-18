@@ -616,7 +616,7 @@ fn named_and_accent_colours(cx: &mut TestAppContext) {
         false,
     );
     let m = r.one(cx);
-    assert_eq!(m.graphs[0].line_rgb, [0x14, 0xA0, 0x98]);
+    assert_eq!(m.graphs[0].line_rgb, [0x47, 0xBD, 0xA6]);
     assert_eq!(&*m.graphs[0].color, "teal");
     let theme = cx.read(|cx| tl_ui_base::theme::current(cx).clone());
     let c = theme.graph.cpu_line.to_rgb();
@@ -931,7 +931,7 @@ fn set_color_and_range_persist(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(saved(cx), vec![row("cpu", "cpu", "rose", 300)]);
     let m = r.one(cx);
-    assert_eq!(m.graphs[0].line_rgb, [0xF4, 0x3F, 0x5E]);
+    assert_eq!(m.graphs[0].line_rgb, [0xF0, 0x73, 0x9E]);
     r.service
         .events
         .try_send(TrayEvent::SetRange {

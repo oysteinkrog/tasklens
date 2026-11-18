@@ -1956,7 +1956,7 @@ mod panel {
             color: GraphColor::Mint,
         });
         draw(&mut r.vcx);
-        assert_eq!(cpu_line(&mut r), gpui_kit::rgb(0x3EB489).into());
+        assert_eq!(cpu_line(&mut r), gpui_kit::rgb(0x57D196).into());
         let state = r
             .vcx
             .update(|_, cx| TlSettings::state(cx).minigraphs.clone());
@@ -1987,7 +1987,7 @@ mod panel {
         };
         let mut r = rig_with(cx, state);
         draw(&mut r.vcx);
-        assert_eq!(cpu_line(&mut r), gpui_kit::rgb(0x14A098).into());
+        assert_eq!(cpu_line(&mut r), gpui_kit::rgb(0x47BDA6).into());
     }
 
     #[gpui_kit::test]

@@ -1659,8 +1659,8 @@ mod tests {
         theme.graph.net_line = color(0x000006);
         let g = &theme.graph;
         // Fan and Battery: the Violet and Mint of their graphs (UI-PRF-005).
-        let violet = color(0x8B5CF6);
-        let mint = color(0x3EB489);
+        let violet = color(0x8F7AF5);
+        let mint = color(0x57D196);
         let expect = [
             (DeviceKind::Overview, None, theme.accent),
             (DeviceKind::Cpu, Some(TlIcon::Cpu), g.cpu_line),
