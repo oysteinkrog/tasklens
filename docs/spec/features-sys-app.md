@@ -1323,17 +1323,17 @@ Mission Center's "connections" request turned out to list network interfaces, no
 
   | Name | Hex | Name | Hex |
   |---|---|---|---|
-  | Coral | #FF7F50 | Blue | #3B82F6 |
-  | Orange | #F28C28 | Indigo | #6366F1 |
-  | Amber | #F5B700 | Violet | #8B5CF6 |
-  | Yellow | #E8D44D | Lavender | #B4A7F5 |
-  | Lime | #9BCB3C | Fuchsia | #D946EF |
-  | Green | #4CAF50 | Pink | #EC4899 |
-  | Mint | #3EB489 | Rose | #F43F5E |
-  | Teal | #14A098 | Slate | #64748B |
-  | Cyan | #22B8CF | | |
+  | Coral | #EB7847 | Blue | #75A8EB |
+  | Orange | #F2944F | Indigo | #5C7DEB |
+  | Amber | #E3BA63 | Violet | #8F7AF5 |
+  | Yellow | #F2CC59 | Lavender | #C9A1F5 |
+  | Lime | #A6D15C | Fuchsia | #D66BEB |
+  | Green | #70D17D | Pink | #F28AC4 |
+  | Mint | #57D196 | Rose | #F0739E |
+  | Teal | #47BDA6 | Slate | #9EB8D1 |
+  | Cyan | #40C7DB | | |
 
-  These hex values are fallbacks. They are replaced by pixel samples of TaskSlinger's swatches when the theme extraction in APP-035 runs.
+  These hex values are pixel samples of TaskSlinger 0.9.2's swatches, taken on 2026-11-18 (U-18).
 - Linux data/mechanism: constants in tl-ui
 - Verdict: BUILD
 - Phase: P3

@@ -1664,14 +1664,15 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - "Share theme" opens the window "tasklens Share Theme" with the code and a Copy button. Toast "Theme code copied".
   - "Import theme" reads the clipboard and accepts:
     - tasklens codes `TL1.` + base64url(JSON `{"v":1,"name":…,"accent":"#…","SLOT":"#RRGGBB",…}`);
-    - TaskSlinger codes `TS1.…`;
+    - TaskSlinger 0.9.2 share codes: standard base64 (with padding) of `themes.json` text, with no prefix. Base64url without padding is accepted too, as TaskSlinger does;
     - raw TaskSlinger `themes.json` text.
+    Text that starts with `TS1.` is not a theme code: TaskSlinger 0.9.2 neither writes nor reads it.
   - Toasts: "Theme imported", "Clipboard does not contain a theme code".
 - Linux data/mechanism: clipboard read through GPUI; serde_json
 - Verdict: ADAPT
 - Phase: P3
 - Privilege: none
-- Verify U-17: the TaskSlinger `TS1.` encoding is inferred. The bead generates one code in TaskSlinger under Wine, decodes it and matches it. If it cannot be decoded, tasklens accepts only `TL1.` codes and raw JSON (R-079).
+- U-17 verified (2026-11-18, tasklens-lgw.12): a code from TaskSlinger 0.9.2's Share button decodes to its `themes.json` entry slot for slot. The sample code is the test fixture `crates/tl-ui-base/src/theme/testdata/taskslinger-0.9.2-share-code.txt`.
 
 ### APP-039 Graph accent colours
 - Was: APP-039
@@ -1680,17 +1681,17 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 
   | Name | Hex | Name | Hex |
   |---|---|---|---|
-  | Coral | #FF7F50 | Blue | #3B82F6 |
-  | Orange | #F28C28 | Indigo | #6366F1 |
-  | Amber | #F5B700 | Violet | #8B5CF6 |
-  | Yellow | #E8D44D | Lavender | #B4A7F5 |
-  | Lime | #9BCB3C | Fuchsia | #D946EF |
-  | Green | #4CAF50 | Pink | #EC4899 |
-  | Mint | #3EB489 | Rose | #F43F5E |
-  | Teal | #14A098 | Slate | #64748B |
-  | Cyan | #22B8CF | | |
+  | Coral | #EB7847 | Blue | #75A8EB |
+  | Orange | #F2944F | Indigo | #5C7DEB |
+  | Amber | #E3BA63 | Violet | #8F7AF5 |
+  | Yellow | #F2CC59 | Lavender | #C9A1F5 |
+  | Lime | #A6D15C | Fuchsia | #D66BEB |
+  | Green | #70D17D | Pink | #F28AC4 |
+  | Mint | #57D196 | Rose | #F0739E |
+  | Teal | #47BDA6 | Slate | #9EB8D1 |
+  | Cyan | #40C7DB | | |
 
-  These hex values are fallbacks. They are replaced by pixel samples of TaskSlinger's swatches when the theme extraction in APP-035 runs (U-18). The stored value in `state.toml` (`color` in `[[minigraphs]]` and `[[tray_graphs]]`) is `accent` or the lower-case name (R-083).
+  These hex values are pixel samples of TaskSlinger 0.9.2's swatches, taken on 2026-11-18 (U-18, tasklens-lgw.7); they do not change with the theme. TaskSlinger also offers Red (#EB5757) and Sky (#57B2F5), which this list leaves out. The stored value in `state.toml` (`color` in `[[minigraphs]]` and `[[tray_graphs]]`) is `accent` or the lower-case name (R-083).
 - Linux data/mechanism: constants in tl-ui
 - Verdict: BUILD
 - Phase: P3
