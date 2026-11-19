@@ -1226,6 +1226,13 @@ mod anchor {
         assert_eq!(count(&b, vcx), 1);
     }
 
+    /// The sample period of the 32-chart tests. A chart counts as moving while
+    /// `newest + 2 × period + 1 px` is later than the real boot clock. At 100 ms that left
+    /// 300 ms of real time for the setup and one paint of 32 charts, and a loaded machine ran
+    /// past it: the last charts stopped moving and missed the frame. 1 s gives about 2.1 s and
+    /// keeps the 150 ms pixel step, which comes from the range and width.
+    const SLACK_PERIOD: u64 = 1000 * MS;
+
     #[gpui_kit::test]
     fn thirty_two_charts_one_frame_request(cx: &mut TestAppContext) {
         let specs = (0..32).map(|_| spec(A, true)).collect();
@@ -1235,7 +1242,7 @@ mod anchor {
             let c = chart(&root, vcx, i);
             c.update(vcx, |v, cx| {
                 v.set_series_for_test(
-                    smallvec![Some(flat(A, 1, 600, now - 50 * MS, 100 * MS))],
+                    smallvec![Some(flat(A, 1, 600, now - 50 * MS, SLACK_PERIOD))],
                     cx,
                 );
             });
@@ -1265,7 +1272,7 @@ mod anchor {
         for c in &charts {
             c.update(vcx, |v, cx| {
                 v.set_series_for_test(
-                    smallvec![Some(flat(A, 1, 600, now - 50 * MS, 100 * MS))],
+                    smallvec![Some(flat(A, 1, 600, now - 50 * MS, SLACK_PERIOD))],
                     cx,
                 );
             });
