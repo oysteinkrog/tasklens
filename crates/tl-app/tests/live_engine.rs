@@ -98,27 +98,53 @@ struct CpuTicks {
 }
 
 impl CpuTicks {
+    /// Rewrites the file once with the two moving fields zero-padded to a fixed width, before
+    /// the engine starts. The collector keeps the file open and rereads it, so `advance` must
+    /// change it in place, and a fixed length lets it do that without the truncate that
+    /// `fs::write` does first: a read in that gap saw an empty file and the CPU total went
+    /// `Failed` on a loaded machine.
     fn new(root: &Path) -> Self {
         let path = root.join("proc/stat");
         let text = fs::read_to_string(&path).expect("read proc/stat");
-        Self {
+        let ticks = Self {
             path,
             text,
             calls: 0,
-        }
+        };
+        let initial = ticks.render();
+        fs::write(&ticks.path, &initial).expect("write proc/stat");
+        ticks
     }
 
-    fn advance(&mut self) {
-        self.calls += 1;
+    /// The file with the `cpu` line's user and idle fields moved on by `100 * calls`.
+    fn render(&self) -> String {
         let add = 100 * self.calls;
         let (first, rest) = self.text.split_once('\n').expect("proc/stat has lines");
         let mut fields: Vec<String> = first.split_whitespace().map(str::to_owned).collect();
         assert_eq!(fields[0], "cpu");
         for ix in [1, 4] {
             let n: u64 = fields[ix].parse().expect("tick count");
-            fields[ix] = (n + add).to_string();
+            fields[ix] = format!("{:016}", n + add);
         }
-        fs::write(&self.path, format!("{}\n{rest}", fields.join(" "))).expect("write proc/stat");
+        format!("{}\n{rest}", fields.join(" "))
+    }
+
+    fn advance(&mut self) {
+        use std::io::{Seek as _, Write as _};
+        self.calls += 1;
+        let text = self.render();
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&self.path)
+            .expect("open proc/stat");
+        assert_eq!(
+            file.metadata().expect("stat proc/stat").len(),
+            text.len() as u64,
+            "proc/stat keeps its length"
+        );
+        file.seek(std::io::SeekFrom::Start(0))
+            .expect("seek proc/stat");
+        file.write_all(text.as_bytes()).expect("write proc/stat");
     }
 }
 
