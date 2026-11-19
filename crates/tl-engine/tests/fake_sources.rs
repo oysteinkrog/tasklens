@@ -240,7 +240,19 @@ impl FakeLab {
     }
 
     /// Runs to quiescence and checks the lab's oracles.
+    ///
+    /// A cancelled `metric_history` worker closes its store on a real thread
+    /// (`tl-history-close`) and waits for it. On a loaded machine that thread can take longer
+    /// than the lab's step budget, and the oracle then saw the worker still `Cancelling`. So
+    /// first give real threads up to 5 s of real time to wake their tasks.
     pub fn finish(mut self) {
+        let begin = std::time::Instant::now();
+        while !self.lab.is_quiescent() && begin.elapsed() < std::time::Duration::from_secs(5) {
+            self.lab.run_until_idle();
+            if !self.lab.is_quiescent() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
         let report = self.lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
     }
