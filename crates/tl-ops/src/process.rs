@@ -1639,7 +1639,13 @@ mod tests {
         ] {
             assert_eq!(result, Err(OpsError::IdentityChanged));
         }
-        assert_eq!(stat_fields(pid).expect("stat")[0], "S");
+        // The child may still be on a CPU just after it printed "ready" (R under load), so
+        // check only that the refused SIGSTOP did not land.
+        let state = stat_fields(pid).expect("stat")[0].clone();
+        assert!(
+            !matches!(state.as_str(), "T" | "t"),
+            "child stopped: {state}"
+        );
         assert_eq!(all_nice(pid), nice);
         assert_eq!(all_policies(pid), policies);
         assert_eq!(tid_affinity(tid), affinity);
